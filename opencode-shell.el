@@ -267,7 +267,7 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
-(defcustom opencode-shell-debug nil
+(defcustom opencode-shell-debug t
   "When non-nil, append diagnostic events to `*OpenCode Shell Log*`."
   :type 'boolean :group 'opencode-shell)
 
