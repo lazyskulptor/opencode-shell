@@ -541,7 +541,7 @@
         (should (equal (opencode-shell--composer-text) "draft text"))
         (should (= (- (point) opencode-shell--composer-start) 5))
         (goto-char (point-min))
-        (search-forward "ASSISTANT")
+        (search-forward "ASSISTANT>")
         (let* ((turn (car opencode-shell--turns))
                (user-begin (opencode-shell--turn-user-begin turn))
                (user-end (opencode-shell--turn-user-end turn)))

@@ -293,9 +293,15 @@ and lifecycle keys."
 (defvar-local opencode-shell--filter "")
 (defvar-local opencode-shell--directory-filter nil)
 
-(defface opencode-shell-user-face '((t :inherit font-lock-keyword-face))
+(defface opencode-shell-user-face
+  '((((class color) (background dark)) :foreground "#dca3a3" :weight bold)
+    (((class color) (background light)) :foreground "#8b2252" :weight bold)
+    (t :inherit font-lock-keyword-face :weight bold))
   "Restrained face for user labels." :group 'opencode-shell)
-(defface opencode-shell-assistant-face '((t :inherit font-lock-function-name-face))
+(defface opencode-shell-assistant-face
+  '((((class color) (background dark)) :foreground "#8cd0d3" :weight bold)
+    (((class color) (background light)) :foreground "#00688b" :weight bold)
+    (t :inherit font-lock-function-name-face :weight bold))
   "Restrained face for assistant labels." :group 'opencode-shell)
 (defface opencode-shell-waiting-face '((t :inherit shadow :slant italic))
   "Face for a turn awaiting a response." :group 'opencode-shell)
@@ -838,13 +844,13 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 (defun opencode-shell--insert-turn-blocks (turn)
   "Insert immutable user and response blocks for TURN before the composer."
   (let ((user-begin (point)))
-    (insert (propertize "USER\n" 'font-lock-face 'opencode-shell-user-face
+    (insert (propertize "USER>\n" 'font-lock-face 'opencode-shell-user-face
                         'rear-nonsticky '(font-lock-face))
             (or (opencode-shell--turn-user turn) "") "\n\n")
     (let ((user-end (point))
           (response-begin (point)))
       (if-let ((answer (opencode-shell--turn-assistant turn)))
-          (insert (propertize "ASSISTANT\n" 'face 'opencode-shell-assistant-face)
+          (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
                   answer "\n\n")
         (insert (propertize
                  (if (eq (opencode-shell--turn-status turn) 'error)
@@ -877,7 +883,7 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 (defun opencode-shell--response-display (turn)
   "Return the propertized response display for TURN."
   (if-let ((answer (opencode-shell--turn-assistant turn)))
-      (concat (propertize "ASSISTANT\n" 'font-lock-face 'opencode-shell-assistant-face)
+      (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
               answer "\n\n")
     (propertize
      (if (eq (opencode-shell--turn-status turn) 'error)
