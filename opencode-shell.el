@@ -1173,6 +1173,16 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
       (remhash key opencode-shell--servers)
       (message "OpenCode: %s" message-text))))
 
+(defun opencode-shell--process-tail (process)
+  "Return PROCESS's bounded output tail, or nil when empty."
+  (when-let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (unless (= (point-min) (point-max))
+          (buffer-substring-no-properties
+           (max (point-min) (- (point-max) opencode-shell--process-tail-limit))
+           (point-max)))))))
+
 (defun opencode-shell--await-server (profile deadline attempt)
   "Poll PROFILE health until DEADLINE for ATTEMPT."
   (let* ((key (opencode-shell--server-key profile))
@@ -1180,8 +1190,9 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
     (when (and (opencode-shell--attempt-current-p key attempt)
                (plist-get state :starting))
      (if (> (float-time) deadline)
-         (progn
-           (opencode-shell--fail-start key attempt "server startup timed out"))
+          (opencode-shell--fail-start
+           key attempt (or (plist-get state :exit-error)
+                           "server startup timed out"))
        (opencode-shell--server-ready
         profile
         (lambda (ready &optional _)
@@ -1208,9 +1219,18 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
              (memq (process-status process) '(exit signal failed))
              (eq process (plist-get (gethash key opencode-shell--servers) :process)))
     (if (plist-get (gethash key opencode-shell--servers) :starting)
-        (opencode-shell--fail-start
-         key attempt (format "server exited before becoming healthy (status %s)"
-                      (process-exit-status process)))
+        (let* ((state (gethash key opencode-shell--servers))
+               (tail (opencode-shell--process-tail process))
+               (message-text
+                (format "server exited before becoming healthy (status %s)%s"
+                        (process-exit-status process)
+                        (if tail (format ":\n%s" tail) ""))))
+          ;; Another concurrent starter may have won the port.  Keep polling
+          ;; this attempt so a healthy endpoint can be adopted safely.
+          (setq state (plist-put state :process nil)
+                state (plist-put state :owned nil)
+                state (plist-put state :exit-error message-text))
+          (puthash key state opencode-shell--servers))
       (remhash key opencode-shell--servers))))
 
 (defun opencode-shell--spawn-server (profile attempt)
@@ -1238,10 +1258,10 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
                                state)
                    opencode-shell--servers)
           (if (process-live-p process)
-               (opencode-shell--await-server
-                profile (+ (float-time) (or (plist-get profile :startup-timeout) 10))
-                attempt)
-             (opencode-shell--fail-start key attempt "server exited during startup")))
+              (opencode-shell--await-server
+               profile (+ (float-time) (or (plist-get profile :startup-timeout) 10))
+               attempt)
+            (opencode-shell--process-sentinel key attempt process "exited")))
        (error (opencode-shell--fail-start
                key attempt
                (format "could not start server: %s" (error-message-string err))))))))
