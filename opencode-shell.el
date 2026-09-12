@@ -45,7 +45,8 @@ stored in profile or server state.  Set this to nil to disable auth-source."
 (defcustom opencode-shell-profiles nil
   "Named OpenCode connection profiles, represented as plists.
 Supported keys include `:name', `:base-url', `:directory', `:workspace',
-`:match', `:remote', auth-source lookup keys, and lifecycle keys."
+`:session-list-directory', `:match', `:remote', auth-source lookup keys,
+and lifecycle keys."
   :type '(repeat plist) :group 'opencode-shell)
 
 (defvar opencode-shell--servers (make-hash-table :test #'equal))
@@ -58,7 +59,8 @@ Supported keys include `:name', `:base-url', `:directory', `:workspace',
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
   (list :name "default" :base-url opencode-shell-base-url
-        :directory opencode-shell-directory))
+        :directory opencode-shell-directory
+        :session-list-directory (expand-file-name "~/")))
 
 (defun opencode-shell--profile-name (profile)
   "Return a stable display name for PROFILE."
@@ -137,6 +139,12 @@ Supported keys include `:name', `:base-url', `:directory', `:workspace',
           (user-error "OpenCode profile names must be non-empty and unique: %s" name))
         (when (gethash key keys)
           (user-error "OpenCode profile identities must be unique: %s" key))
+        (when (and (opencode-shell--profile-remote-p profile)
+                   (not (and (stringp (plist-get profile :session-list-directory))
+                             (file-name-absolute-p
+                              (plist-get profile :session-list-directory)))))
+          (user-error "Remote OpenCode profile %s requires an absolute server-native :session-list-directory"
+                      name))
         (when-let ((config (gethash server-key servers)))
           (opencode-shell--validate-server-profile profile (list :config config)))
         (puthash server-key (opencode-shell--server-lifecycle-config profile) servers)
@@ -225,6 +233,19 @@ Supported keys include `:name', `:base-url', `:directory', `:workspace',
   "Return DIRECTORY in PROFILE server-native form."
   (opencode-shell--server-directory directory profile))
 
+(defun opencode-shell--session-list-directory (profile)
+  "Return PROFILE's server-native root for session listing."
+  (let ((directory (plist-get profile :session-list-directory)))
+    (cond (directory
+           (unless (and (stringp directory) (file-name-absolute-p directory))
+             (user-error "OpenCode profile %s has an invalid :session-list-directory"
+                         (opencode-shell--profile-name profile)))
+           (expand-file-name directory))
+          ((opencode-shell--profile-remote-p profile)
+           (user-error "Remote OpenCode profile %s requires an absolute server-native :session-list-directory"
+                       (opencode-shell--profile-name profile)))
+          (t (expand-file-name "~/")))))
+
 (defun opencode-shell--buffer-scope (profile directory)
   "Return a stable buffer scope for PROFILE and server-native DIRECTORY."
   (format "%s:%s" (opencode-shell--profile-key profile) (or directory "")))
@@ -267,6 +288,7 @@ Supported keys include `:name', `:base-url', `:directory', `:workspace',
 (defvar-local opencode-shell--request-status "idle")
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
+(defvar-local opencode-shell--directory-filter nil)
 
 (defface opencode-shell-user-face '((t :inherit font-lock-keyword-face))
   "Restrained face for user labels." :group 'opencode-shell)
@@ -382,7 +404,8 @@ called after a transport, status, or decoding failure."
           (t 0))))
 
 (defun opencode-shell--normalize-sessions (sessions)
-  "Normalize and newest-first sort SESSIONS, deduplicating by ID."
+  "Normalize and newest-first sort SESSIONS, deduplicating by ID.
+Each retained session keeps its server-reported directory unchanged."
   (let ((seen (make-hash-table :test #'equal)) result)
     (dolist (session (sort (copy-sequence (or sessions nil))
                            (lambda (a b) (> (opencode-shell--time a)
@@ -452,9 +475,12 @@ called after a transport, status, or decoding failure."
   (mapcar #'opencode-shell--session-row
           (seq-filter
            (lambda (session)
-             (or (string-empty-p opencode-shell--filter)
-                 (string-match-p (regexp-quote (downcase opencode-shell--filter))
-                                 (downcase (opencode-shell--session-text session)))))
+             (and (or (null opencode-shell--directory-filter)
+                      (equal opencode-shell--directory-filter
+                             (opencode-shell--get session 'directory)))
+                  (or (string-empty-p opencode-shell--filter)
+                      (string-match-p (regexp-quote (downcase opencode-shell--filter))
+                                      (downcase (opencode-shell--session-text session))))))
            opencode-shell--sessions)))
 
 (defvar opencode-shell-sessions-mode-map
@@ -463,6 +489,8 @@ called after a transport, status, or decoding failure."
     (define-key map (kbd "RET") #'opencode-shell-open-at-point)
     (define-key map (kbd "c") #'opencode-shell-create-session)
     (define-key map (kbd "/") #'opencode-shell-filter)
+    (define-key map (kbd "p") #'opencode-shell-filter-directory)
+    (define-key map (kbd "A") #'opencode-shell-show-all-sessions)
     (define-key map (kbd "d") #'opencode-shell-delete-session)
     map))
 
@@ -477,7 +505,8 @@ called after a transport, status, or decoding failure."
 
 ;;;###autoload
 (defun opencode-shell-sessions (&optional directory profile)
-  "Open the session browser scoped to DIRECTORY and PROFILE.
+  "Open PROFILE's server-wide session browser.
+DIRECTORY, when non-nil, is only an initial directory view filter.
 For compatibility, DIRECTORY may itself be a profile plist or profile name."
   (interactive)
   (when-let ((as-profile (opencode-shell--resolve-profile directory)))
@@ -486,20 +515,21 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
                     profile opencode-shell--profile
                     (opencode-shell--matching-profile (or directory default-directory))
                     (opencode-shell--default-profile)))
-  (let* ((resolved-directory
-          (opencode-shell--server-directory
-           (or directory (plist-get profile :directory) opencode-shell-directory)
-           profile))
-         (buffer (get-buffer-create
-                  (format "*OpenCode Shell Sessions:%s*"
-                          (opencode-shell--buffer-scope profile resolved-directory)))))
+  (opencode-shell--validate-profiles)
+  (let* ((list-directory (opencode-shell--session-list-directory profile))
+         (directory-filter (and directory
+                                (opencode-shell--server-directory directory profile)))
+          (buffer (get-buffer-create
+                   (format "*OpenCode Shell Sessions:%s*"
+                           (opencode-shell--profile-key profile)))))
     (with-current-buffer buffer
       (opencode-shell-sessions-mode)
       (setq-local opencode-shell--profile profile)
       (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
-      (setq-local opencode-shell--directory resolved-directory)
+      (setq-local opencode-shell--directory list-directory)
+      (setq-local opencode-shell--directory-filter directory-filter)
       (opencode-shell-refresh))
     (pop-to-buffer buffer)))
 
@@ -529,6 +559,28 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
+(defun opencode-shell-filter-directory (directory)
+  "Show only sessions whose server-reported directory equals DIRECTORY."
+  (interactive
+   (list (completing-read
+          "Session directory: "
+          (delete-dups
+           (delq nil (mapcar (lambda (session)
+                               (opencode-shell--get session 'directory))
+                             opencode-shell--sessions)))
+          nil t)))
+  (setq opencode-shell--directory-filter directory
+        tabulated-list-entries (opencode-shell--session-entries))
+  (tabulated-list-print t))
+
+(defun opencode-shell-show-all-sessions ()
+  "Clear browser text and directory filters and show all sessions."
+  (interactive)
+  (setq opencode-shell--filter ""
+        opencode-shell--directory-filter nil
+        tabulated-list-entries (opencode-shell--session-entries))
+  (tabulated-list-print t))
+
 (defun opencode-shell-create-session (title)
   "Create a session named TITLE and open it."
   (interactive "sSession title: ")
@@ -546,9 +598,15 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   "Open the session at point."
   (interactive)
   (if-let ((id (tabulated-list-get-id)))
-      (if opencode-shell--profile
-          (opencode-shell-open-session id opencode-shell--directory opencode-shell--profile)
-        (opencode-shell-open-session id opencode-shell--directory))
+      (let* ((session (seq-find
+                       (lambda (item) (equal id (opencode-shell--get item 'id)))
+                       opencode-shell--sessions))
+             (directory (opencode-shell--get session 'directory)))
+        (unless directory
+          (user-error "Session %s has no server-reported directory" id))
+        (if opencode-shell--profile
+            (opencode-shell-open-session id directory opencode-shell--profile)
+          (opencode-shell-open-session id directory)))
     (user-error "No session at point")))
 
 (defun opencode-shell-delete-session ()

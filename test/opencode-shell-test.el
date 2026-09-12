@@ -37,7 +37,9 @@
   (with-temp-buffer
     (insert (propertize "one" 'tabulated-list-id "s1"))
     (goto-char (point-min))
-    (setq-local opencode-shell--directory "/scope/exact")
+    (setq-local opencode-shell--directory "/list/root")
+    (setq-local opencode-shell--sessions
+                '(((id . "s1") (directory . "/scope/exact"))))
     (let (opened)
       (cl-letf (((symbol-function 'opencode-shell-open-session)
                  (lambda (id directory) (setq opened (list id directory)))))
@@ -587,13 +589,15 @@
 (defconst opencode-shell-test--local-profile
   '(:name "local" :base-url "http://127.0.0.1:7777/"
     :directory "/client/project" :workspace "/server/project"
+    :session-list-directory "/home/local"
     :start-command ("opencode" "serve") :server-directory "/tmp"
     :startup-timeout 2 :auth-source (:host "localhost" :port 7777)))
 
 (defconst opencode-shell-test--remote-profile
   '(:name "remote" :base-url "https://code.example.test"
     :directory "/ssh:code.example.test:/srv/project"
-    :workspace "/srv/project" :start-command ("opencode" "serve")))
+    :workspace "/srv/project" :session-list-directory "/home/remote"
+    :start-command ("opencode" "serve")))
 
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
@@ -613,8 +617,9 @@
     (should (equal (opencode-shell--profile-key opencode-shell-test--local-profile)
                    (opencode-shell--profile-key (copy-tree opencode-shell-test--local-profile))))
     (should (equal (opencode-shell--default-profile)
-                   (list :name "default" :base-url opencode-shell-base-url
-                         :directory opencode-shell-directory)))
+                    (list :name "default" :base-url opencode-shell-base-url
+                          :directory opencode-shell-directory
+                          :session-list-directory (expand-file-name "~/"))))
     (should (equal (opencode-shell--matching-profile)
                    opencode-shell-test--local-profile))
     (cl-letf (((symbol-function 'completing-read)
@@ -716,7 +721,8 @@
 
 (ert-deftest opencode-shell-broad-profile-launch-scopes-request-and-buffers ()
   (let* ((profile '(:name "workspace" :base-url "http://127.0.0.1:4096"
-                    :directory "/Workspace" :workspace "/server/Workspace"))
+                     :directory "/Workspace" :workspace "/server/Workspace"
+                     :session-list-directory "/home/user"))
          (default-directory "/Workspace/personal/translator/")
          requests buffers)
     (cl-letf (((symbol-function 'opencode-shell--matching-profile) (lambda (&optional _) profile))
@@ -728,12 +734,15 @@
           (progn
             (opencode-shell-launch)
             (should (equal (car requests)
-                           '("GET" "/session/status"
-                             "/server/Workspace/personal/translator/")))
+                            '("GET" "/session/status"
+                              "/home/user")))
             (opencode-shell-sessions "/Workspace/" profile)
             (should (equal (car requests)
-                           '("GET" "/session/status" "/server/Workspace/")))
-            (should (= (length (delete-dups buffers)) 2)))
+                            '("GET" "/session/status" "/home/user")))
+            (should (= (length (delete-dups buffers)) 1))
+            (should (equal (with-current-buffer (car buffers)
+                             opencode-shell--directory-filter)
+                           "/server/Workspace/")))
         (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers)))))
 
 (ert-deftest opencode-shell-sessions-remains-backward-compatible ()
@@ -743,13 +752,13 @@
                (lambda () (push (list opencode-shell--directory opencode-shell--profile) seen))))
       (unwind-protect
           (progn
-            (opencode-shell-sessions "/legacy/directory")
-            (should (equal (caar seen) "/legacy/directory"))
+             (opencode-shell-sessions "/legacy/directory")
+             (should (equal (caar seen) (expand-file-name "~/")))
             (opencode-shell-sessions opencode-shell-test--remote-profile)
             (should (equal (cadar seen) opencode-shell-test--remote-profile))
-            (opencode-shell-sessions "/explicit" opencode-shell-test--local-profile)
-            (should (equal (car seen)
-                           (list "/explicit" opencode-shell-test--local-profile))))
+             (opencode-shell-sessions "/explicit" opencode-shell-test--local-profile)
+             (should (equal (car seen)
+                            (list "/home/local" opencode-shell-test--local-profile))))
         (when-let ((buffer (get-buffer "*OpenCode Shell Sessions*"))) (kill-buffer buffer))))))
 
 (ert-deftest opencode-shell-server-health-reuse-does-not-spawn ()
@@ -1038,6 +1047,68 @@
   (let ((opencode-shell-profiles
          '((:name "one" :id "same") (:name "two" :id "same"))))
     (should-error (opencode-shell--validate-profiles) :type 'user-error)))
+
+(ert-deftest opencode-shell-session-list-directory-validation ()
+  (should (equal (opencode-shell--session-list-directory
+                  '(:name "local" :base-url "http://localhost:4096"))
+                 (expand-file-name "~/")))
+  (should-error
+   (let ((opencode-shell-profiles
+          '((:name "remote" :base-url "https://code.example.test"))))
+     (opencode-shell--validate-profiles))
+   :type 'user-error)
+  (should-error
+   (opencode-shell--session-list-directory
+    '(:name "remote" :base-url "https://code.example.test"
+      :session-list-directory "relative"))
+   :type 'user-error))
+
+(ert-deftest opencode-shell-browser-root-filter-and-row-directory-are-independent ()
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--directory "/home/server"
+                opencode-shell--directory-filter "/work/one"
+                opencode-shell--sessions
+                '(((id . "one") (title . "Same") (directory . "/work/one"))
+                  ((id . "two") (title . "Same") (directory . "/work/two"))))
+    (should (equal (mapcar #'car (opencode-shell--session-entries)) '("one")))
+    (opencode-shell-show-all-sessions)
+    (should (equal (mapcar #'car tabulated-list-entries) '("one" "two")))
+    (should (equal opencode-shell--directory "/home/server"))))
+
+(ert-deftest opencode-shell-opened-session-keeps-row-directory-for-follow-up-requests ()
+  (let ((profile opencode-shell-test--remote-profile)
+        (opencode-shell-poll-interval 60) browser transcript requests)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _) (setq transcript buffer)))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'opencode-shell--request)
+               (lambda (_method path callback &rest _)
+                 (push (list path opencode-shell--directory) requests)
+                 (when (member path '("/session/s/message" "/permission" "/question"))
+                   (funcall callback nil)))))
+      (unwind-protect
+          (progn
+            (setq browser (generate-new-buffer " *oc-browser-directory*"))
+            (with-current-buffer browser
+              (opencode-shell-sessions-mode)
+              (setq-local opencode-shell--profile profile
+                          opencode-shell--directory "/home/remote"
+                          opencode-shell--sessions
+                          '(((id . "s") (directory . "/srv/other"))))
+              (let ((inhibit-read-only t))
+                (insert (propertize "s" 'tabulated-list-id "s")))
+              (goto-char (point-min))
+              (opencode-shell-open-at-point))
+            (with-current-buffer transcript
+              (opencode-shell-abort)
+              (should-error (opencode-shell-permissions) :type 'user-error)
+              (should-error (opencode-shell-questions) :type 'user-error))
+            (should requests)
+            (dolist (request requests)
+              (should (equal (cadr request) "/srv/other"))))
+        (when (buffer-live-p browser) (kill-buffer browser))
+        (when (buffer-live-p transcript) (kill-buffer transcript))))))
 
 (ert-deftest opencode-shell-custom-raw-auth-header-covers-health ()
   (let ((profile '(:name "auth" :base-url "http://localhost:9"

@@ -14,8 +14,11 @@ optionally `opencode-shell-directory`, then run
 ## Profiles
 
 `opencode-shell-profiles` is a list of named plists. A profile can select its
-`:base-url`, client `:directory`, server `:workspace`, authentication source,
-and local server lifecycle settings. Use `M-x opencode-shell-launch` to pick
+`:base-url`, client `:directory`, server `:workspace`, session-list root,
+authentication source, and local server lifecycle settings. Local profiles
+default `:session-list-directory` to the local user home. Remote profiles must
+set it to an absolute server-native home/root path, never TRAMP syntax. Use
+`M-x opencode-shell-launch` to pick
 the profile matching the current directory; use a prefix argument to choose a
 profile explicitly. `M-x opencode-shell-open-profile` always prompts. The
 session browser also accepts a profile directly, while retaining the legacy
@@ -56,7 +59,20 @@ owned process; use the explicit restart command to replace it.
 
 ## Commands
 
-The session browser uses `g` refresh, `/` filter, `c` create, `RET` open, and `d` confirmed delete. A transcript buffer has a multiline composer after `Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET` submits it. Submitted prompts and polled responses above the composer are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent; both selections appear in the header and affect subsequent prompt payloads. `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state bindings when Evil is available.
+The session browser queries the active profile's `:session-list-directory`, so
+it shows that server's sessions across project directories regardless of the
+current buffer. Its `p` directory filter and `/` text filter are view-only;
+`A` clears both. Use `g` refresh, `c` create, `RET` open, and `d` confirmed
+delete. `RET` uses the selected row's exact server-reported directory, which is
+then immutable for transcript history, prompts, aborts, permissions, questions,
+and status requests. A transcript buffer has a multiline composer after
+`Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET`
+submits it. Submitted prompts and polled responses above the composer are
+read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
+both selections appear in the header and affect subsequent prompt payloads.
+`g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question
+flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
+bindings when Evil is available.
 
 Conversation turns are buffer-local records with stable internal IDs. Poll updates replace only the read-only transcript region, preserving the composer text and its point. A failed `prompt_async` request marks the attempted turn as failed and restores the submitted draft for retry.
 
