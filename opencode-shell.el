@@ -267,6 +267,25 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
+(defcustom opencode-shell-debug nil
+  "When non-nil, append diagnostic events to `*OpenCode Shell Log*`."
+  :type 'boolean :group 'opencode-shell)
+
+(defconst opencode-shell--debug-log-limit 20000)
+
+(defun opencode-shell--log (format-string &rest args)
+  "Append a timestamped diagnostic message when debugging is enabled."
+  (when opencode-shell-debug
+    (ignore-errors
+      (with-current-buffer (get-buffer-create "*OpenCode Shell Log*")
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert (format-time-string "%Y-%m-%d %H:%M:%S.%3N ")
+                  (apply #'format format-string args) "\n")
+          (when (> (buffer-size) opencode-shell--debug-log-limit)
+            (delete-region (point-min)
+                           (- (point-max) opencode-shell--debug-log-limit))))))))
+
 (defvar-local opencode-shell--sessions nil)
 (defvar-local opencode-shell--session-status nil)
 (defvar-local opencode-shell--directory nil)
@@ -361,19 +380,26 @@ called after a transport, status, or decoding failure."
                     (list header))))
          (url-request-data (and body (encode-coding-string (json-serialize body) 'utf-8)))
          (origin (current-buffer)))
+    (opencode-shell--log "request %s %s session=%s directory=%s"
+                         method path opencode-shell--session-id
+                         opencode-shell--directory)
     (url-retrieve
      (opencode-shell--url path params)
      (lambda (status)
        (let ((response (current-buffer)))
          (unwind-protect
-             (if-let ((err (plist-get status :error)))
-                 (when (buffer-live-p origin)
-                   (with-current-buffer origin
+              (if-let ((err (plist-get status :error)))
+                  (when (buffer-live-p origin)
+                    (with-current-buffer origin
+                      (opencode-shell--log "request failed %s %s: %s"
+                                           method path err)
                      (message "OpenCode: %s" (opencode-shell--bounded-error err))
                      (when error-callback (funcall error-callback))))
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
-                      (if (not (<= 200 code 299))
+                       (opencode-shell--log "response %s %s status=%s"
+                                            method path code)
+                       (if (not (<= 200 code 299))
                           (let ((response-body (opencode-shell--response-body)))
                             (when (buffer-live-p origin)
                               (with-current-buffer origin
@@ -1006,6 +1032,9 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
   (let ((text (opencode-shell--composer-text)))
+    (opencode-shell--log "submit chars=%d composer=%s point=%d session=%s"
+                         (length text) opencode-shell--composer-start
+                         (point) opencode-shell--session-id)
     (when (string-blank-p text) (user-error "Prompt is blank"))
     (let ((turn (opencode-shell--make-turn
                  :id (format "local-%d" (cl-incf opencode-shell--turn-counter))
@@ -1137,9 +1166,14 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 
 (defun opencode-shell--evil-move-to-composer ()
   "Move point to the composer when entering Evil insert state."
+  (opencode-shell--log "evil insert entry buffer=%s composer=%s point=%d max=%d"
+                       (buffer-name) opencode-shell--composer-start
+                       (point) (point-max))
   (when (and (derived-mode-p 'opencode-shell-mode)
              (not (opencode-shell--in-composer-p)))
-    (goto-char (point-max))))
+    (goto-char (point-max)))
+  (opencode-shell--log "evil insert ready point=%d in-composer=%s"
+                       (point) (opencode-shell--in-composer-p)))
 
 (defun opencode-shell--enable-evil-composer-hook ()
   "Install the buffer-local Evil insert-state hook."
