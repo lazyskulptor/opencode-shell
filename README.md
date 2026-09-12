@@ -75,7 +75,13 @@ both selections appear in the header and affect subsequent prompt payloads.
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
 
-Conversation turns are buffer-local records with stable internal IDs. Poll updates replace only the read-only transcript region, preserving the composer text and its point. A failed `prompt_async` request marks the attempted turn as failed and restores the submitted draft for retry.
+The session buffer uses normal text editing rather than `special-mode`. Only the
+bottom composer is writable; each submitted user prompt and its response are
+separate read-only regions owned by a buffer-local turn record. Poll updates
+replace turn regions without changing composer text or point. Evil's ordinary
+insert commands are left intact and entering insert state focuses the composer.
+A failed `prompt_async` request marks the attempted turn as failed and restores
+the submitted draft for retry when no newer draft exists.
 
 ## Security
 

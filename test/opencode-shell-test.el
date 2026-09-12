@@ -343,6 +343,16 @@
       (opencode-shell--setup-evil)
       (should (= (length calls) 4)))))
 
+(ert-deftest opencode-shell-uses-editable-base-with-native-character-input ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (should (derived-mode-p 'text-mode))
+    (should-not (derived-mode-p 'special-mode))
+    (should-not (lookup-key opencode-shell-mode-map (kbd "i")))
+    (should-not (lookup-key opencode-shell-mode-map (kbd "한")))
+    (should-not (fboundp 'opencode-shell-self-insert))
+    (should-not (fboundp 'opencode-shell-newline))))
+
 (ert-deftest opencode-shell-selections-are-buffer-local ()
   (let ((a (generate-new-buffer " *oc-a*")) (b (generate-new-buffer " *oc-b*")))
     (unwind-protect
@@ -362,8 +372,7 @@
       (should (get-text-property (string-match "message" raw) 'face)))))
 
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
-  (should (eq (lookup-key opencode-shell-mode-map (kbd "p"))
-              #'opencode-shell-self-insert))
+  (should-not (lookup-key opencode-shell-mode-map (kbd "p")))
   (should-not (fboundp 'opencode-shell-prompt))
   (should (eq (lookup-key opencode-shell-sessions-mode-map (kbd "RET"))
               #'opencode-shell-open-at-point))
@@ -428,8 +437,21 @@
     (opencode-shell--render-messages
      (list (opencode-shell-test--message "u1" "user" "sent")
            (opencode-shell-test--message "a1" "assistant" "reply" "u1")))
+    (let ((turn (car opencode-shell--turns)))
+      (should (marker-position (opencode-shell--turn-user-begin turn)))
+      (should (marker-position (opencode-shell--turn-user-end turn)))
+      (should (marker-position (opencode-shell--turn-response-begin turn)))
+      (should (marker-position (opencode-shell--turn-response-end turn)))
+      (should (eq (get-text-property
+                   (opencode-shell--turn-user-begin turn) 'read-only) t))
+      (should (eq (get-text-property
+                   (opencode-shell--turn-response-begin turn) 'read-only) t)))
     (should-error (let ((inhibit-read-only nil))
-                    (goto-char (point-min)) (insert "x"))
+                     (goto-char (point-min)) (insert "x"))
+                   :type 'text-read-only)
+    (should-error (let ((inhibit-read-only nil))
+                    (delete-region (1- opencode-shell--composer-start)
+                                   (1+ opencode-shell--composer-start)))
                   :type 'text-read-only)
     (goto-char (point-max))
     (insert "\nthird")
@@ -518,11 +540,21 @@
       (let ((id (opencode-shell--turn-id (car opencode-shell--turns))))
         (should (equal (opencode-shell--composer-text) "draft text"))
         (should (= (- (point) opencode-shell--composer-start) 5))
-        (should (eq (get-text-property (point-min) 'face) 'opencode-shell-user-face))
         (goto-char (point-min))
         (search-forward "ASSISTANT")
-        (should (eq (get-text-property (match-beginning 0) 'face)
-                    'opencode-shell-assistant-face))
+        (let* ((turn (car opencode-shell--turns))
+               (user-begin (opencode-shell--turn-user-begin turn))
+               (user-end (opencode-shell--turn-user-end turn)))
+          (opencode-shell--render-messages
+           (list (opencode-shell-test--message "u1" "user" "question")
+                 (opencode-shell-test--message "a1" "assistant" "updated" "u1")))
+          (should (eq turn (car opencode-shell--turns)))
+          (should (eq user-begin
+                      (opencode-shell--turn-user-begin
+                       (car opencode-shell--turns))))
+          (should (eq user-end
+                      (opencode-shell--turn-user-end
+                       (car opencode-shell--turns)))))
         (opencode-shell--render-messages messages)
         (should (equal id (opencode-shell--turn-id (car opencode-shell--turns))))))))
 

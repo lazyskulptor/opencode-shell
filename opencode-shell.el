@@ -267,60 +267,8 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
-(defcustom opencode-shell-debug t
-  "When non-nil, append diagnostic events to `*OpenCode Shell Log*`."
-  :type 'boolean :group 'opencode-shell)
-
-(defconst opencode-shell--debug-log-limit 20000)
-
 (defvar opencode-shell--composer-start)
 (defvar opencode-shell--transcript-end)
-
-(defun opencode-shell--log (format-string &rest args)
-  "Append a timestamped diagnostic message when debugging is enabled."
-  (when opencode-shell-debug
-    (ignore-errors
-      (with-current-buffer (get-buffer-create "*OpenCode Shell Log*")
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (insert (format-time-string "%Y-%m-%d %H:%M:%S.%3N ")
-                  (apply #'format format-string args) "\n")
-          (when (> (buffer-size) opencode-shell--debug-log-limit)
-            (delete-region (point-min)
-                           (- (point-max) opencode-shell--debug-log-limit))))))))
-
-(defun opencode-shell-show-log ()
-  "Display the OpenCode Shell diagnostic log."
-  (interactive)
-  (pop-to-buffer (get-buffer-create "*OpenCode Shell Log*")))
-
-(defun opencode-shell--show-log-on-error (err)
-  "Record ERR, display the diagnostic log, then re-signal it."
-  (opencode-shell--log "ERROR %S backtrace=%s" err
-                       (with-output-to-string (backtrace)))
-  (display-buffer (get-buffer-create "*OpenCode Shell Log*"))
-  (signal (car err) (cdr err)))
-
-(defun opencode-shell--marker-description (value)
-  "Return a safe diagnostic description of marker VALUE."
-  (cond ((not (markerp value)) (format "%S" value))
-        ((not (marker-position value)) "dead-marker")
-        (t (format "marker:%d" (marker-position value)))))
-
-(defun opencode-shell--log-command-state ()
-  "Log command and Evil/composer state in transcript buffers."
-  (when (and opencode-shell-debug (derived-mode-p 'opencode-shell-mode))
-    (opencode-shell--log
-     "command this=%S real=%S evil=%S point=%d max=%d composer=%s transcript=%s local-hook=%S"
-     this-command real-this-command
-     (and (boundp 'evil-state) evil-state)
-     (point) (point-max)
-     (opencode-shell--marker-description opencode-shell--composer-start)
-     (opencode-shell--marker-description opencode-shell--transcript-end)
-     (and (boundp 'evil-insert-state-entry-hook)
-          (local-variable-p 'evil-insert-state-entry-hook)
-          (memq #'opencode-shell--evil-move-to-composer
-                evil-insert-state-entry-hook)))))
 
 (defvar-local opencode-shell--sessions nil)
 (defvar-local opencode-shell--session-status nil)
@@ -336,6 +284,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--capabilities-loaded nil)
 (defvar-local opencode-shell--capabilities-loading nil)
 (defvar-local opencode-shell--turns nil)
+(defvar-local opencode-shell--rendered-turns nil)
 (defvar-local opencode-shell--turn-counter 0)
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
@@ -354,7 +303,8 @@ and lifecycle keys."
   "Face for conversation transport errors." :group 'opencode-shell)
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
-  id server-user-id user assistant parts status begin end)
+  id server-user-id user assistant parts status user-begin user-end
+  response-begin response-end)
 
 (defun opencode-shell--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -416,9 +366,6 @@ called after a transport, status, or decoding failure."
                     (list header))))
          (url-request-data (and body (encode-coding-string (json-serialize body) 'utf-8)))
          (origin (current-buffer)))
-    (opencode-shell--log "request %s %s session=%s directory=%s"
-                         method path opencode-shell--session-id
-                         opencode-shell--directory)
     (url-retrieve
      (opencode-shell--url path params)
      (lambda (status)
@@ -427,14 +374,10 @@ called after a transport, status, or decoding failure."
               (if-let ((err (plist-get status :error)))
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
-                      (opencode-shell--log "request failed %s %s: %s"
-                                           method path err)
-                     (message "OpenCode: %s" (opencode-shell--bounded-error err))
+                      (message "OpenCode: %s" (opencode-shell--bounded-error err))
                      (when error-callback (funcall error-callback))))
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
-                       (opencode-shell--log "response %s %s status=%s"
-                                            method path code)
                        (if (not (<= 200 code 299))
                           (let ((response-body (opencode-shell--response-body)))
                             (when (buffer-live-p origin)
@@ -716,9 +659,6 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 
 (defvar opencode-shell-mode-map
   (let ((map (make-sparse-keymap)))
-    (dolist (char (number-sequence 32 126))
-      (define-key map (vector char) #'opencode-shell-self-insert))
-    (define-key map (kbd "RET") #'opencode-shell-newline)
     (define-key map (kbd "C-c C-c") #'opencode-shell-submit)
     (define-key map (kbd "s-<return>") #'opencode-shell-submit)
     (define-key map (kbd "C-c C-v") #'opencode-shell-select-model)
@@ -736,51 +676,31 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
        (marker-position opencode-shell--composer-start)
        (>= (point) opencode-shell--composer-start)))
 
-(defun opencode-shell-self-insert (n)
-  "Insert the typed character N times in the composer."
-  (interactive "p")
-  (unless (opencode-shell--in-composer-p)
-    (signal 'text-read-only (list "OpenCode transcript is read-only")))
-  (self-insert-command n))
-
-(defun opencode-shell-newline ()
-  "Insert a newline in the composer."
-  (interactive)
-  (unless (opencode-shell--in-composer-p)
-    (signal 'text-read-only (list "OpenCode transcript is read-only")))
-  (insert "\n"))
-
-(defun opencode-shell--protect-transcript (begin _end)
-  "Reject user edits beginning before the composer at BEGIN."
-  (when (and (not inhibit-read-only) opencode-shell--composer-start
-             (< begin opencode-shell--composer-start))
+(defun opencode-shell--protect-transcript (begin end)
+  "Reject user edits before or crossing the composer boundary."
+  (when (and (not inhibit-read-only)
+             (markerp opencode-shell--composer-start)
+             (marker-position opencode-shell--composer-start)
+             (or (< begin opencode-shell--composer-start)
+                 (< end opencode-shell--composer-start)))
     (signal 'text-read-only (list "OpenCode transcript is read-only"))))
 
-(define-derived-mode opencode-shell-mode special-mode "OpenCode"
+(define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
-  (setq-local buffer-read-only nil)
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
+              opencode-shell--rendered-turns nil
               opencode-shell--request-status "idle")
-  (when opencode-shell-debug
-    (get-buffer-create "*OpenCode Shell Log*"))
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
-    (setq opencode-shell--composer-start (copy-marker (point))
-          opencode-shell--transcript-end opencode-shell--composer-start))
+    (setq opencode-shell--composer-start (copy-marker (point) nil)
+          opencode-shell--transcript-end (copy-marker (point) nil)))
   (goto-char (point-max))
-  (when opencode-shell-debug
-    (add-hook 'pre-command-hook #'opencode-shell--log-command-state nil t)
-    (add-hook 'post-command-hook #'opencode-shell--log-command-state nil t))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
-  (opencode-shell--log
-   "mode initialized buffer=%s evil-loaded=%s composer=%s transcript=%s"
-   (buffer-name) (featurep 'evil)
-   (opencode-shell--marker-description opencode-shell--composer-start)
-   (opencode-shell--marker-description opencode-shell--transcript-end)))
+  )
 
 (defun opencode-shell--cleanup ()
   "Cancel this buffer's timer and invalidate outstanding callbacks."
@@ -905,54 +825,118 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
     (delete-region opencode-shell--composer-start (point-max))
     (goto-char opencode-shell--composer-start)
     (insert text)
-    (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
+     (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
 
-(defun opencode-shell--render-turns ()
-  "Render turns above the composer without changing composer text or point."
-  (let* ((in-composer (>= (point) opencode-shell--composer-start))
-         (offset (and in-composer (- (point) opencode-shell--composer-start)))
-         (old-point (point))
-         (anchor (and (not in-composer)
-                      (seq-find (lambda (turn)
-                                  (and (marker-position (opencode-shell--turn-begin turn))
-                                       (<= (opencode-shell--turn-begin turn) old-point)
-                                       (< old-point (opencode-shell--turn-end turn))))
-                                opencode-shell--turns)))
-         (anchor-offset (and anchor (- old-point (opencode-shell--turn-begin anchor))))
-         (inhibit-read-only t))
-    (delete-region (point-min) opencode-shell--transcript-end)
-    (goto-char (point-min))
-    (let (boundaries)
-      (dolist (turn opencode-shell--turns)
-        (let ((begin (point)))
-      (insert-before-markers (propertize "USER\n" 'face 'opencode-shell-user-face))
-      (insert-before-markers (opencode-shell--turn-user turn) "\n\n")
+(defun opencode-shell--discard-turn-markers (turn)
+  "Detach all rendered region markers owned by TURN."
+  (dolist (marker (list (opencode-shell--turn-user-begin turn)
+                        (opencode-shell--turn-user-end turn)
+                        (opencode-shell--turn-response-begin turn)
+                        (opencode-shell--turn-response-end turn)))
+    (when (markerp marker) (set-marker marker nil))))
+
+(defun opencode-shell--insert-turn-blocks (turn)
+  "Insert immutable user and response blocks for TURN before the composer."
+  (let ((user-begin (point)))
+    (insert (propertize "USER\n" 'font-lock-face 'opencode-shell-user-face
+                        'rear-nonsticky '(font-lock-face))
+            (or (opencode-shell--turn-user turn) "") "\n\n")
+    (let ((user-end (point))
+          (response-begin (point)))
       (if-let ((answer (opencode-shell--turn-assistant turn)))
-          (progn (insert-before-markers
-                  (propertize "ASSISTANT\n" 'face 'opencode-shell-assistant-face))
-                 (insert-before-markers answer "\n\n"))
-        (insert-before-markers (propertize
+          (insert (propertize "ASSISTANT\n" 'face 'opencode-shell-assistant-face)
+                  answer "\n\n")
+        (insert (propertize
                  (if (eq (opencode-shell--turn-status turn) 'error)
                      "Request failed\n\n" "Waiting for response…\n\n")
-          'face (if (eq (opencode-shell--turn-status turn) 'error)
-                    'opencode-shell-error-face 'opencode-shell-waiting-face))))
-          (push (list turn begin (point)) boundaries)))
-      (insert-before-markers
-       (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
-      (dolist (entry boundaries)
-        (setf (opencode-shell--turn-begin (car entry))
-              (copy-marker (cadr entry))
-              (opencode-shell--turn-end (car entry))
-              (copy-marker (caddr entry)))))
-    (add-text-properties (point-min) (point)
+                 'face (if (eq (opencode-shell--turn-status turn) 'error)
+                           'opencode-shell-error-face 'opencode-shell-waiting-face))))
+      (let ((response-end (point)))
+        (add-text-properties user-begin user-end
+                             '(read-only t rear-nonsticky (read-only face)))
+        (add-text-properties response-begin response-end
+                             '(read-only t rear-nonsticky (read-only face)))
+        (setf (opencode-shell--turn-user-begin turn) (copy-marker user-begin)
+              (opencode-shell--turn-user-end turn) (copy-marker user-end)
+              (opencode-shell--turn-response-begin turn) (copy-marker response-begin)
+              (opencode-shell--turn-response-end turn) (copy-marker response-end))))))
+
+(defun opencode-shell--turn-rendered-p (turn)
+  "Return non-nil when TURN owns live rendered markers in this buffer."
+  (let ((markers (list (opencode-shell--turn-user-begin turn)
+                       (opencode-shell--turn-user-end turn)
+                       (opencode-shell--turn-response-begin turn)
+                       (opencode-shell--turn-response-end turn))))
+    (and (seq-every-p (lambda (marker)
+                        (and (markerp marker)
+                             (marker-position marker)
+                             (eq (marker-buffer marker) (current-buffer))))
+                      markers)
+         (apply #'<= (mapcar #'marker-position markers)))))
+
+(defun opencode-shell--response-display (turn)
+  "Return the propertized response display for TURN."
+  (if-let ((answer (opencode-shell--turn-assistant turn)))
+      (concat (propertize "ASSISTANT\n" 'font-lock-face 'opencode-shell-assistant-face)
+              answer "\n\n")
+    (propertize
+     (if (eq (opencode-shell--turn-status turn) 'error)
+         "Request failed\n\n" "Waiting for response…\n\n")
+     'face (if (eq (opencode-shell--turn-status turn) 'error)
+               'opencode-shell-error-face 'opencode-shell-waiting-face))))
+
+(defun opencode-shell--update-turn-response (turn)
+  "Update only TURN's immutable response block."
+  (let ((begin (opencode-shell--turn-response-begin turn))
+        (end (opencode-shell--turn-response-end turn))
+        (inhibit-read-only t))
+    (delete-region begin end)
+    (goto-char begin)
+    (insert (opencode-shell--response-display turn))
+    (add-text-properties begin (point)
                          '(read-only t rear-nonsticky (read-only face)))
-    (set-marker opencode-shell--transcript-end (point))
-    (if in-composer
-        (goto-char (min (point-max) (+ opencode-shell--composer-start offset)))
-      (if anchor
-          (goto-char (min (opencode-shell--turn-end anchor)
-                          (+ (opencode-shell--turn-begin anchor) anchor-offset)))
-        (goto-char (min old-point opencode-shell--transcript-end))))))
+    (set-marker end (point))))
+
+(defun opencode-shell--render-turns ()
+  "Render immutable turn blocks without changing composer bytes or point."
+  (let* ((composer-offset (and (opencode-shell--in-composer-p)
+                               (- (point) opencode-shell--composer-start)))
+         (composer-text (opencode-shell--composer-text))
+         (old-point (point))
+         (inhibit-read-only t))
+    (let* ((known-count (length opencode-shell--rendered-turns))
+           (append-only
+            (and (<= known-count (length opencode-shell--turns))
+                 (cl-every #'eq opencode-shell--rendered-turns
+                           (seq-take opencode-shell--turns known-count))
+                 (seq-every-p #'opencode-shell--turn-rendered-p
+                              opencode-shell--rendered-turns))))
+      (when append-only
+        (dolist (turn opencode-shell--rendered-turns)
+          (save-excursion (opencode-shell--update-turn-response turn))))
+      (if append-only
+          (save-excursion
+            (goto-char opencode-shell--composer-start)
+            (delete-region opencode-shell--transcript-end
+                           opencode-shell--composer-start)
+            (dolist (turn (nthcdr known-count opencode-shell--turns))
+              (opencode-shell--insert-turn-blocks turn))
+            (insert (propertize "Prompt> " 'read-only t
+                                'rear-nonsticky '(read-only))))
+        (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
+        (delete-region (point-min) opencode-shell--transcript-end)
+        (goto-char (point-min))
+        (dolist (turn opencode-shell--turns) (opencode-shell--insert-turn-blocks turn))
+        (insert (propertize "Prompt> " 'read-only t
+                            'rear-nonsticky '(read-only))))
+      (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
+      (save-excursion
+        (goto-char (- (point-max) (length composer-text)))
+        (set-marker opencode-shell--transcript-end (point))
+        (set-marker opencode-shell--composer-start (point))))
+    (if composer-offset
+        (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
+      (goto-char (min old-point opencode-shell--transcript-end)))))
 
 (defun opencode-shell--render-messages (messages)
   "Reconcile and render chronological message envelopes from MESSAGES."
@@ -1078,9 +1062,6 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
   (let ((text (opencode-shell--composer-text)))
-    (opencode-shell--log "submit chars=%d composer=%s point=%d session=%s"
-                         (length text) opencode-shell--composer-start
-                         (point) opencode-shell--session-id)
     (when (string-blank-p text) (user-error "Prompt is blank"))
     (let ((turn (opencode-shell--make-turn
                  :id (format "local-%d" (cl-incf opencode-shell--turn-counter))
@@ -1212,30 +1193,15 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 
 (defun opencode-shell--evil-move-to-composer ()
   "Move point to the composer when entering Evil insert state."
-  (condition-case err
-      (progn
-        (opencode-shell--log "evil insert entry buffer=%s composer=%s point=%d max=%d"
-                             (buffer-name)
-                             (opencode-shell--marker-description
-                              opencode-shell--composer-start)
-                             (point) (point-max))
-        (when (and (derived-mode-p 'opencode-shell-mode)
-                   (not (opencode-shell--in-composer-p)))
-          (goto-char (point-max)))
-        (opencode-shell--log "evil insert ready point=%d in-composer=%s"
-                             (point) (opencode-shell--in-composer-p)))
-    (error (opencode-shell--show-log-on-error err))))
+  (when (and (derived-mode-p 'opencode-shell-mode)
+             (not (opencode-shell--in-composer-p)))
+    (goto-char (point-max))))
 
 (defun opencode-shell--enable-evil-composer-hook ()
   "Install the buffer-local Evil insert-state hook."
   (when (boundp 'evil-insert-state-entry-hook)
     (add-hook 'evil-insert-state-entry-hook
-              #'opencode-shell--evil-move-to-composer nil t)
-    (opencode-shell--log "evil hook installed buffer=%s local=%s present=%s"
-                         (buffer-name)
-                         (local-variable-p 'evil-insert-state-entry-hook)
-                         (memq #'opencode-shell--evil-move-to-composer
-                               evil-insert-state-entry-hook))))
+              #'opencode-shell--evil-move-to-composer nil t)))
 
 (defun opencode-shell--server-health-callback (profile callback status)
   "Handle a health response for PROFILE and report readiness to CALLBACK."
