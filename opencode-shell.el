@@ -289,6 +289,18 @@ and lifecycle keys."
             (delete-region (point-min)
                            (- (point-max) opencode-shell--debug-log-limit))))))))
 
+(defun opencode-shell-show-log ()
+  "Display the OpenCode Shell diagnostic log."
+  (interactive)
+  (pop-to-buffer (get-buffer-create "*OpenCode Shell Log*")))
+
+(defun opencode-shell--show-log-on-error (err)
+  "Record ERR, display the diagnostic log, then re-signal it."
+  (opencode-shell--log "ERROR %S backtrace=%s" err
+                       (with-output-to-string (backtrace)))
+  (display-buffer (get-buffer-create "*OpenCode Shell Log*"))
+  (signal (car err) (cdr err)))
+
 (defun opencode-shell--marker-description (value)
   "Return a safe diagnostic description of marker VALUE."
   (cond ((not (markerp value)) (format "%S" value))
@@ -751,6 +763,8 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--request-status "idle")
+  (when opencode-shell-debug
+    (get-buffer-create "*OpenCode Shell Log*"))
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
@@ -1198,14 +1212,19 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 
 (defun opencode-shell--evil-move-to-composer ()
   "Move point to the composer when entering Evil insert state."
-  (opencode-shell--log "evil insert entry buffer=%s composer=%s point=%d max=%d"
-                       (buffer-name) opencode-shell--composer-start
-                       (point) (point-max))
-  (when (and (derived-mode-p 'opencode-shell-mode)
-             (not (opencode-shell--in-composer-p)))
-    (goto-char (point-max)))
-  (opencode-shell--log "evil insert ready point=%d in-composer=%s"
-                       (point) (opencode-shell--in-composer-p)))
+  (condition-case err
+      (progn
+        (opencode-shell--log "evil insert entry buffer=%s composer=%s point=%d max=%d"
+                             (buffer-name)
+                             (opencode-shell--marker-description
+                              opencode-shell--composer-start)
+                             (point) (point-max))
+        (when (and (derived-mode-p 'opencode-shell-mode)
+                   (not (opencode-shell--in-composer-p)))
+          (goto-char (point-max)))
+        (opencode-shell--log "evil insert ready point=%d in-composer=%s"
+                             (point) (opencode-shell--in-composer-p)))
+    (error (opencode-shell--show-log-on-error err))))
 
 (defun opencode-shell--enable-evil-composer-hook ()
   "Install the buffer-local Evil insert-state hook."
