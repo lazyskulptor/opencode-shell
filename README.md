@@ -33,21 +33,32 @@ profile-qualified, so identical session IDs on different servers never share a
 browser or transcript buffer.
 
 Local profiles may provide an argv-style start command, server working
-directory, health path, and bounded startup timeout. Launch reuses an already
-healthy server and coalesces concurrent requests into one start attempt per
-profile. `M-x opencode-shell-start-server`,
+directory, health path, and bounded startup timeout. Lifecycle is shared by
+canonical base URL: profiles using one endpoint reuse one health probe, start
+attempt, owned process, stop/restart state, and exit cleanup while retaining
+their own directory, authentication, sessions, and capabilities. Profiles for
+one endpoint must specify compatible start command, health path, server
+directory, timeout, health authentication header, and `:stop-on-exit` setting;
+configuration conflicts fail before startup. `M-x opencode-shell-start-server`,
 `M-x opencode-shell-stop-server`, and `M-x opencode-shell-restart-server`
 provide explicit control. Stop only terminates a live process started and owned
 by this Emacs client. Killing a browser or transcript does not stop that
-process. Owned processes are stopped when Emacs exits. Profiles using a TRAMP
+process. Owned processes are stopped once when Emacs exits unless the shared
+profiles consistently set `:stop-on-exit` to nil. Profiles using a TRAMP
 directory or a non-loopback server URL are remote and are never auto-started;
 `:remote` can also force remote classification.
 
+Canonical lifecycle URLs treat loopback host spellings, a trailing slash, and
+explicit default HTTP/HTTPS ports as the same endpoint. A healthy server not
+started by this client is tracked as non-owned for shared configuration
+validation and is never stopped. A failed probe cannot replace a still-live
+owned process; use the explicit restart command to replace it.
+
 ## Commands
 
-The session browser uses `g` refresh, `/` filter, `c` create, `RET` open, and `d` confirmed delete. Transcript buffers use `g` resync, `p` prompt, `a` abort, `m` model, `A` agent, `P` permission, `Q` question, and `?` help. These maps work in vanilla Emacs and receive mode-local Evil normal-state bindings when Evil is available.
+The session browser uses `g` refresh, `/` filter, `c` create, `RET` open, and `d` confirmed delete. A transcript buffer has a multiline composer after `Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET` submits it. Submitted prompts and polled responses above the composer are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent; both selections appear in the header and affect subsequent prompt payloads. `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state bindings when Evil is available.
 
-Prompts use minibuffer history. Transcript Markdown remains exact raw text with safe fontification for common headings, lists, quotes, links, inline code, and fenced blocks. Code and HTML are never evaluated.
+Conversation turns are buffer-local records with stable internal IDs. Poll updates replace only the read-only transcript region, preserving the composer text and its point. A failed `prompt_async` request marks the attempted turn as failed and restores the submitted draft for retry.
 
 ## Security
 
@@ -63,4 +74,4 @@ public configuration.
 
 ## Limitations
 
-This beta polls and fully resynchronizes instead of streaming SSE. It does not render tables specially, stream partial assistant text, offer a multiline composer, paginate large histories, or expose file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.
+This beta polls instead of streaming SSE. It intentionally defers rich Markdown/tool rendering, folding, retention pruning, partial assistant streaming, pagination, and file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.

@@ -10,5 +10,8 @@
 - Add health-aware, bounded local server start plus explicit start, owned-only
   stop, and restart commands; remote profiles never auto-start and killing a
   transcript does not stop an owned server.
+- Share local server lifecycle by canonical endpoint, coalesce health/start
+  work across project profiles, preserve callback profile isolation, and reject
+  conflicting lifecycle configuration for a shared endpoint.
 - Preserve the single-server variables and the historical directory argument to
   `opencode-shell-sessions` while allowing that command to accept a profile.
