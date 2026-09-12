@@ -22,7 +22,7 @@
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
-(defcustom opencode-shell-base-url "http://127.0.0.1:4096"
+(defcustom opencode-shell-base-url "http://127.0.0.1:4199"
   "OpenCode server base URL."
   :type 'string :group 'opencode-shell)
 

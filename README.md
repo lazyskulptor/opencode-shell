@@ -6,8 +6,9 @@ It is an independent early beta workflow, not an ACP bridge.
 ## Development install
 
 Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
-original single-server setup, configure `opencode-shell-base-url` and
-optionally `opencode-shell-directory`, then run
+original single-server setup, the local endpoint defaults to
+`http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it and
+optionally configure `opencode-shell-directory`, then run
 `M-x opencode-shell-sessions`. Existing calls such as
 `(opencode-shell-sessions "/work/project")` remain supported.
 

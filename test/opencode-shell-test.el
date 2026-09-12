@@ -607,6 +607,9 @@
   (should (boundp 'opencode-shell-profiles))
   (should (boundp 'opencode-shell--servers)))
 
+(ert-deftest opencode-shell-default-local-endpoint-is-4199 ()
+  (should (equal opencode-shell-base-url "http://127.0.0.1:4199")))
+
 (ert-deftest opencode-shell-profile-key-name-default-read-and-match ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile
