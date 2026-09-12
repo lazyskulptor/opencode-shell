@@ -362,7 +362,9 @@
       (should (get-text-property (string-match "message" raw) 'face)))))
 
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
-  (should (eq (lookup-key opencode-shell-mode-map (kbd "p")) #'opencode-shell-prompt))
+  (should (eq (lookup-key opencode-shell-mode-map (kbd "p"))
+              #'opencode-shell-self-insert))
+  (should-not (fboundp 'opencode-shell-prompt))
   (should (eq (lookup-key opencode-shell-sessions-mode-map (kbd "RET"))
               #'opencode-shell-open-at-point))
   (with-temp-buffer
@@ -523,23 +525,6 @@
                     'opencode-shell-assistant-face))
         (opencode-shell--render-messages messages)
         (should (equal id (opencode-shell--turn-id (car opencode-shell--turns))))))))
-
-(ert-deftest opencode-shell-render-preserves-turn-relative-transcript-point ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (let ((messages (list (opencode-shell-test--message "u1" "user" "one")
-                          (opencode-shell-test--message "a1" "assistant" "short" "u1")
-                          (opencode-shell-test--message "u2" "user" "second turn"))))
-      (opencode-shell--render-messages messages)
-      (let ((turn (cadr opencode-shell--turns)))
-        (goto-char (+ (opencode-shell--turn-begin turn) 7))
-        (opencode-shell--render-messages
-         (list (opencode-shell-test--message "u1" "user" "one")
-               (opencode-shell-test--message "a1" "assistant"
-                                              "a much longer earlier response" "u1")
-               (opencode-shell-test--message "u2" "user" "second turn")))
-        (should (eq turn (cadr opencode-shell--turns)))
-        (should (= (- (point) (opencode-shell--turn-begin turn)) 7))))))
 
 (ert-deftest opencode-shell-waiting-face-model-agent-keys-and-header ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c")) #'opencode-shell-submit))

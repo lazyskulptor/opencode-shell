@@ -267,7 +267,6 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
-(defvar opencode-shell-prompt-history nil)
 (defvar-local opencode-shell--sessions nil)
 (defvar-local opencode-shell--session-status nil)
 (defvar-local opencode-shell--directory nil)
@@ -655,19 +654,39 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
 
 (defvar opencode-shell-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'opencode-shell-resync)
-    (define-key map (kbd "p") #'opencode-shell-prompt)
+    (dolist (char (number-sequence 32 126))
+      (define-key map (vector char) #'opencode-shell-self-insert))
+    (define-key map (kbd "RET") #'opencode-shell-newline)
     (define-key map (kbd "C-c C-c") #'opencode-shell-submit)
     (define-key map (kbd "s-<return>") #'opencode-shell-submit)
     (define-key map (kbd "C-c C-v") #'opencode-shell-select-model)
     (define-key map (kbd "C-c C-m") #'opencode-shell-select-agent)
-    (define-key map (kbd "a") #'opencode-shell-abort)
-    (define-key map (kbd "m") #'opencode-shell-select-model)
-    (define-key map (kbd "A") #'opencode-shell-select-agent)
-    (define-key map (kbd "P") #'opencode-shell-permissions)
-    (define-key map (kbd "Q") #'opencode-shell-questions)
-    (define-key map (kbd "?") #'describe-mode)
+    (define-key map (kbd "C-c C-g") #'opencode-shell-resync)
+    (define-key map (kbd "C-c C-a") #'opencode-shell-abort)
+    (define-key map (kbd "C-c C-p") #'opencode-shell-permissions)
+    (define-key map (kbd "C-c C-q") #'opencode-shell-questions)
+    (define-key map (kbd "C-c C-h") #'describe-mode)
     map))
+
+(defun opencode-shell--in-composer-p ()
+  "Return non-nil when point is in the writable composer."
+  (and (markerp opencode-shell--composer-start)
+       (marker-position opencode-shell--composer-start)
+       (>= (point) opencode-shell--composer-start)))
+
+(defun opencode-shell-self-insert (n)
+  "Insert the typed character N times in the composer."
+  (interactive "p")
+  (unless (opencode-shell--in-composer-p)
+    (signal 'text-read-only (list "OpenCode transcript is read-only")))
+  (self-insert-command n))
+
+(defun opencode-shell-newline ()
+  "Insert a newline in the composer."
+  (interactive)
+  (unless (opencode-shell--in-composer-p)
+    (signal 'text-read-only (list "OpenCode transcript is read-only")))
+  (insert "\n"))
 
 (defun opencode-shell--protect-transcript (begin _end)
   "Reject user edits beginning before the composer at BEGIN."
@@ -686,7 +705,7 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
     (erase-buffer)
     (insert (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
     (setq opencode-shell--composer-start (copy-marker (point))
-          opencode-shell--transcript-end (copy-marker (point-min))))
+          opencode-shell--transcript-end opencode-shell--composer-start))
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t))
@@ -831,19 +850,28 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
          (inhibit-read-only t))
     (delete-region (point-min) opencode-shell--transcript-end)
     (goto-char (point-min))
-    (dolist (turn opencode-shell--turns)
-      (setf (opencode-shell--turn-begin turn) (copy-marker (point)))
-      (insert (propertize "USER\n" 'face 'opencode-shell-user-face))
-      (insert (opencode-shell--turn-user turn) "\n\n")
+    (let (boundaries)
+      (dolist (turn opencode-shell--turns)
+        (let ((begin (point)))
+      (insert-before-markers (propertize "USER\n" 'face 'opencode-shell-user-face))
+      (insert-before-markers (opencode-shell--turn-user turn) "\n\n")
       (if-let ((answer (opencode-shell--turn-assistant turn)))
-          (progn (insert (propertize "ASSISTANT\n" 'face 'opencode-shell-assistant-face))
-                 (insert answer "\n\n"))
-        (insert (propertize
+          (progn (insert-before-markers
+                  (propertize "ASSISTANT\n" 'face 'opencode-shell-assistant-face))
+                 (insert-before-markers answer "\n\n"))
+        (insert-before-markers (propertize
                  (if (eq (opencode-shell--turn-status turn) 'error)
                      "Request failed\n\n" "Waiting for response…\n\n")
-                 'face (if (eq (opencode-shell--turn-status turn) 'error)
-                           'opencode-shell-error-face 'opencode-shell-waiting-face))))
-      (setf (opencode-shell--turn-end turn) (copy-marker (point))))
+          'face (if (eq (opencode-shell--turn-status turn) 'error)
+                    'opencode-shell-error-face 'opencode-shell-waiting-face))))
+          (push (list turn begin (point)) boundaries)))
+      (insert-before-markers
+       (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
+      (dolist (entry boundaries)
+        (setf (opencode-shell--turn-begin (car entry))
+              (copy-marker (cadr entry))
+              (opencode-shell--turn-end (car entry))
+              (copy-marker (caddr entry)))))
     (add-text-properties (point-min) (point)
                          '(read-only t rear-nonsticky (read-only face)))
     (set-marker opencode-shell--transcript-end (point))
@@ -1002,12 +1030,6 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
          (opencode-shell--render-turns)
          (force-mode-line-update))))))
 
-(defun opencode-shell-prompt (text)
-  "Compatibility command that places TEXT in the composer and submits it."
-  (interactive (list (read-string "Prompt: " nil 'opencode-shell-prompt-history)))
-  (opencode-shell--replace-composer text)
-  (opencode-shell-submit))
-
 (defun opencode-shell-abort ()
   "Abort work in the current session."
   (interactive)
@@ -1112,6 +1134,18 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
     (kbd "RET") #'opencode-shell-open-at-point
     (kbd "g r") #'opencode-shell-refresh))
+
+(defun opencode-shell--evil-move-to-composer ()
+  "Move point to the composer when entering Evil insert state."
+  (when (and (derived-mode-p 'opencode-shell-mode)
+             (not (opencode-shell--in-composer-p)))
+    (goto-char (point-max))))
+
+(defun opencode-shell--enable-evil-composer-hook ()
+  "Install the buffer-local Evil insert-state hook."
+  (when (boundp 'evil-insert-state-entry-hook)
+    (add-hook 'evil-insert-state-entry-hook
+              #'opencode-shell--evil-move-to-composer nil t)))
 
 (defun opencode-shell--server-health-callback (profile callback status)
   "Handle a health response for PROFILE and report readiness to CALLBACK."
@@ -1364,7 +1398,13 @@ auto-started."
   (interactive (list (opencode-shell--read-profile) nil))
   (opencode-shell-sessions directory profile))
 
-(with-eval-after-load 'evil (opencode-shell--setup-evil))
+(with-eval-after-load 'evil
+  (opencode-shell--setup-evil)
+  (add-hook 'opencode-shell-mode-hook #'opencode-shell--enable-evil-composer-hook)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'opencode-shell-mode)
+        (opencode-shell--enable-evil-composer-hook)))))
 
 (provide 'opencode-shell)
 ;;; opencode-shell.el ends here
