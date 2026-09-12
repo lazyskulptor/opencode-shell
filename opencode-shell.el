@@ -273,6 +273,9 @@ and lifecycle keys."
 
 (defconst opencode-shell--debug-log-limit 20000)
 
+(defvar opencode-shell--composer-start)
+(defvar opencode-shell--transcript-end)
+
 (defun opencode-shell--log (format-string &rest args)
   "Append a timestamped diagnostic message when debugging is enabled."
   (when opencode-shell-debug
@@ -285,6 +288,27 @@ and lifecycle keys."
           (when (> (buffer-size) opencode-shell--debug-log-limit)
             (delete-region (point-min)
                            (- (point-max) opencode-shell--debug-log-limit))))))))
+
+(defun opencode-shell--marker-description (value)
+  "Return a safe diagnostic description of marker VALUE."
+  (cond ((not (markerp value)) (format "%S" value))
+        ((not (marker-position value)) "dead-marker")
+        (t (format "marker:%d" (marker-position value)))))
+
+(defun opencode-shell--log-command-state ()
+  "Log command and Evil/composer state in transcript buffers."
+  (when (and opencode-shell-debug (derived-mode-p 'opencode-shell-mode))
+    (opencode-shell--log
+     "command this=%S real=%S evil=%S point=%d max=%d composer=%s transcript=%s local-hook=%S"
+     this-command real-this-command
+     (and (boundp 'evil-state) evil-state)
+     (point) (point-max)
+     (opencode-shell--marker-description opencode-shell--composer-start)
+     (opencode-shell--marker-description opencode-shell--transcript-end)
+     (and (boundp 'evil-insert-state-entry-hook)
+          (local-variable-p 'evil-insert-state-entry-hook)
+          (memq #'opencode-shell--evil-move-to-composer
+                evil-insert-state-entry-hook)))))
 
 (defvar-local opencode-shell--sessions nil)
 (defvar-local opencode-shell--session-status nil)
@@ -733,8 +757,16 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
     (setq opencode-shell--composer-start (copy-marker (point))
           opencode-shell--transcript-end opencode-shell--composer-start))
   (goto-char (point-max))
+  (when opencode-shell-debug
+    (add-hook 'pre-command-hook #'opencode-shell--log-command-state nil t)
+    (add-hook 'post-command-hook #'opencode-shell--log-command-state nil t))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
-  (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t))
+  (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
+  (opencode-shell--log
+   "mode initialized buffer=%s evil-loaded=%s composer=%s transcript=%s"
+   (buffer-name) (featurep 'evil)
+   (opencode-shell--marker-description opencode-shell--composer-start)
+   (opencode-shell--marker-description opencode-shell--transcript-end)))
 
 (defun opencode-shell--cleanup ()
   "Cancel this buffer's timer and invalidate outstanding callbacks."
@@ -1179,7 +1211,12 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   "Install the buffer-local Evil insert-state hook."
   (when (boundp 'evil-insert-state-entry-hook)
     (add-hook 'evil-insert-state-entry-hook
-              #'opencode-shell--evil-move-to-composer nil t)))
+              #'opencode-shell--evil-move-to-composer nil t)
+    (opencode-shell--log "evil hook installed buffer=%s local=%s present=%s"
+                         (buffer-name)
+                         (local-variable-p 'evil-insert-state-entry-hook)
+                         (memq #'opencode-shell--evil-move-to-composer
+                               evil-insert-state-entry-hook))))
 
 (defun opencode-shell--server-health-callback (profile callback status)
   "Handle a health response for PROFILE and report readiness to CALLBACK."
