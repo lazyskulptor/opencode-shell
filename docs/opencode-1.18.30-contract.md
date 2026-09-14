@@ -5,7 +5,7 @@
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Check server readiness; profiles may override the path |
-| `GET` | `/session` | List all sessions in the supplied directory scope; 1.18.30 exposes no session pagination parameters |
+| `GET` | `/session` | List all server sessions when `directory` is omitted; 1.18.30 exposes no session pagination parameters |
 | `POST` | `/session` | Create a session |
 | `GET` | `/session/status` | Read session status |
 | `DELETE` | `/session/:id` | Delete a session |

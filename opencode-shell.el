@@ -45,7 +45,7 @@ stored in profile or server state.  Set this to nil to disable auth-source."
 (defcustom opencode-shell-profiles nil
   "Named OpenCode connection profiles, represented as plists.
 Supported keys include `:name', `:base-url', `:directory', `:workspace',
-`:session-list-directory', `:match', `:remote', auth-source lookup keys,
+`:match', `:remote', auth-source lookup keys,
 and lifecycle keys."
   :type '(repeat plist) :group 'opencode-shell)
 
@@ -60,8 +60,7 @@ and lifecycle keys."
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
   (list :name "default" :base-url opencode-shell-base-url
-        :directory opencode-shell-directory
-        :session-list-directory (expand-file-name "~/")))
+        :directory opencode-shell-directory))
 
 (defun opencode-shell--profile-name (profile)
   "Return a stable display name for PROFILE."
@@ -140,12 +139,6 @@ and lifecycle keys."
           (user-error "OpenCode profile names must be non-empty and unique: %s" name))
         (when (gethash key keys)
           (user-error "OpenCode profile identities must be unique: %s" key))
-        (when (and (opencode-shell--profile-remote-p profile)
-                   (not (and (stringp (plist-get profile :session-list-directory))
-                             (file-name-absolute-p
-                              (plist-get profile :session-list-directory)))))
-          (user-error "Remote OpenCode profile %s requires an absolute server-native :session-list-directory"
-                      name))
         (when-let ((config (gethash server-key servers)))
           (opencode-shell--validate-server-profile profile (list :config config)))
         (puthash server-key (opencode-shell--server-lifecycle-config profile) servers)
@@ -203,6 +196,40 @@ and lifecycle keys."
              (or (opencode-shell--resolve-profile name)
                  (user-error "Unknown OpenCode server alias: %s" name)))))
 
+(defun opencode-shell--read-session-directory (profile)
+  "Read a directory and return its path as understood by PROFILE's server."
+  (let ((directory (read-directory-name
+                    (format "%s session directory: "
+                            (opencode-shell--profile-name profile))
+                    default-directory nil t)))
+    (opencode-shell--server-directory directory profile)))
+
+(defun opencode-shell--create-and-open-session (profile directory)
+  "Create and open a title-less PROFILE session in DIRECTORY."
+  (let ((buffer (generate-new-buffer " *opencode-create-session*")))
+    (with-current-buffer buffer
+      (setq-local opencode-shell--profile profile)
+      (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
+                                                opencode-shell-base-url))
+      (setq-local opencode-shell--directory directory)
+      (opencode-shell--request
+       "POST" "/session"
+       (lambda (session)
+         (kill-buffer buffer)
+         (opencode-shell-open-session
+          (opencode-shell--get session 'id) directory profile))))))
+
+(defun opencode-shell--start-session (profile)
+  "Prompt for PROFILE directory, ensure readiness, and create a session."
+  (let ((directory (opencode-shell--read-session-directory profile)))
+    (if (and (plist-get profile :start-command)
+             (not (opencode-shell--profile-remote-p profile)))
+        (opencode-shell--start-server
+         profile
+         (lambda (ready)
+           (opencode-shell--create-and-open-session ready directory)))
+      (opencode-shell--create-and-open-session profile directory))))
+
 (defun opencode-shell--register-profile-commands ()
   "Refresh session and start commands for configured server aliases."
   (interactive)
@@ -230,8 +257,8 @@ and lifecycle keys."
            name (lambda (profile) (opencode-shell--open-profile profile nil t)))
           (format "Open the %s OpenCode session browser." name))
         (defalias start-symbol
-          (opencode-shell--generated-command name #'opencode-shell--start-server)
-          (format "Start or connect to the %s OpenCode server." name))
+          (opencode-shell--generated-command name #'opencode-shell--start-session)
+          (format "Create a %s OpenCode session after choosing its directory." name))
         (push sessions-symbol opencode-shell--generated-profile-commands)
         (push start-symbol opencode-shell--generated-profile-commands)))
     (setq opencode-shell--generated-profile-commands
@@ -262,19 +289,6 @@ and lifecycle keys."
 (defun opencode-shell--profile-directory (profile directory)
   "Return DIRECTORY in PROFILE server-native form."
   (opencode-shell--server-directory directory profile))
-
-(defun opencode-shell--session-list-directory (profile)
-  "Return PROFILE's server-native root for session listing."
-  (let ((directory (plist-get profile :session-list-directory)))
-    (cond (directory
-           (unless (and (stringp directory) (file-name-absolute-p directory))
-             (user-error "OpenCode profile %s has an invalid :session-list-directory"
-                         (opencode-shell--profile-name profile)))
-           (expand-file-name directory))
-          ((opencode-shell--profile-remote-p profile)
-           (user-error "Remote OpenCode profile %s requires an absolute server-native :session-list-directory"
-                       (opencode-shell--profile-name profile)))
-          (t (expand-file-name "~/")))))
 
 (defun opencode-shell--buffer-scope (profile directory)
   "Return a stable buffer scope for PROFILE and server-native DIRECTORY."
@@ -558,9 +572,8 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
                     profile opencode-shell--profile
                     (opencode-shell--default-profile)))
   (opencode-shell--validate-profiles)
-  (let* ((list-directory (opencode-shell--session-list-directory profile))
-         (directory-filter (and directory
-                                (opencode-shell--server-directory directory profile)))
+  (let* ((directory-filter (and directory
+                                 (opencode-shell--server-directory directory profile)))
           (buffer (get-buffer-create
                    (format "*OpenCode Shell Sessions:%s*"
                            (opencode-shell--profile-key profile)))))
@@ -570,7 +583,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
       (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
-      (setq-local opencode-shell--directory list-directory)
+      (setq-local opencode-shell--directory nil)
       (setq-local opencode-shell--directory-filter directory-filter)
       (opencode-shell-refresh))
     (pop-to-buffer buffer)))

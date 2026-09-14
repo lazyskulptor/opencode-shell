@@ -14,13 +14,13 @@ to select a server and open its complete session browser.
 ## Profiles
 
 `opencode-shell-profiles` is a list of named plists. A profile can select its
-`:base-url`, client `:directory`, server `:workspace`, session-list root,
+`:base-url`, client `:directory`, server `:workspace`,
 authentication source, and local server lifecycle settings. Local profiles
-default `:session-list-directory` to the local user home. Remote profiles must
-set it to an absolute server-native home/root path, never TRAMP syntax.
+request session inventory without directory scope so every server path appears.
 `M-x opencode-shell` always selects a server first. Each alias also generates
 `<alias>-sessions` and `<alias>-start`, such as `local-sessions` and
-`local-start`.
+`local-start`. The start command asks for a directory, creates a title-less
+session there, and opens it.
 
 Profile `:name` values and identity keys must be unique; set an explicit `:id`
 when an identity must survive a name or URL change. A string `:match` is a
