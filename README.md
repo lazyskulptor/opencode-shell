@@ -18,8 +18,8 @@ to select a server and open its complete session browser.
 authentication source, and local server lifecycle settings. Local profiles
 request session inventory without directory scope so every server path appears.
 `M-x opencode-shell` always selects a server first. Each alias also generates
-`<alias>-sessions` and `<alias>-start`, such as `local-sessions` and
-`local-start`. The start command asks for a directory, creates a title-less
+`<alias>-sessions` and `<alias>-start`, such as `opencode-shell-local-sessions` and
+`opencode-shell-local-start`. The start command asks for a directory, creates a title-less
 session there, and opens it.
 
 Profile `:name` values and identity keys must be unique; set an explicit `:id`

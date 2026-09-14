@@ -237,8 +237,8 @@ and lifecycle keys."
     (dolist (profile opencode-shell-profiles)
       (let* ((name (opencode-shell--profile-name profile))
              (segment (opencode-shell--profile-command-segment name))
-             (symbols (list (intern (format "%s-sessions" segment))
-                            (intern (format "%s-start" segment)))))
+              (symbols (list (intern (format "opencode-shell-%s-sessions" segment))
+                             (intern (format "opencode-shell-%s-start" segment)))))
         (dolist (symbol symbols)
           (when (gethash symbol seen)
             (user-error "OpenCode profile command collision: %s" symbol))
@@ -546,13 +546,13 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defvar opencode-shell-sessions-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'opencode-shell-refresh)
-    (define-key map (kbd "RET") #'opencode-shell-open-at-point)
-    (define-key map (kbd "c") #'opencode-shell-create-session)
-    (define-key map (kbd "/") #'opencode-shell-filter)
-    (define-key map (kbd "p") #'opencode-shell-filter-directory)
-    (define-key map (kbd "A") #'opencode-shell-show-all-sessions)
-    (define-key map (kbd "d") #'opencode-shell-delete-session)
+    (define-key map (kbd "g") #'opencode-shell--refresh)
+    (define-key map (kbd "RET") #'opencode-shell--open-at-point)
+    (define-key map (kbd "c") #'opencode-shell--create-session)
+    (define-key map (kbd "/") #'opencode-shell--filter)
+    (define-key map (kbd "p") #'opencode-shell--filter-directory)
+    (define-key map (kbd "A") #'opencode-shell--show-all-sessions)
+    (define-key map (kbd "d") #'opencode-shell--delete-session)
     map))
 
 (define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
@@ -561,7 +561,7 @@ Each retained session keeps its server-reported directory unchanged."
         [("Title" 28 t) ("ID" 10 t) ("Project" 28 t) ("Agent" 12 t)
          ("Model" 18 t) ("Status" 10 t) ("Updated" 16 t)])
   (setq tabulated-list-padding 2 tabulated-list-sort-key '("Updated" . t))
-  (add-hook 'tabulated-list-revert-hook #'opencode-shell-refresh nil t)
+  (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
   (tabulated-list-init-header))
 
 (defun opencode-shell--sessions (&optional directory profile)
@@ -585,10 +585,10 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory nil)
       (setq-local opencode-shell--directory-filter directory-filter)
-      (opencode-shell-refresh))
+      (opencode-shell--refresh))
     (pop-to-buffer buffer)))
 
-(defun opencode-shell-refresh ()
+(defun opencode-shell--refresh ()
   "Refresh sessions and statuses, preserving point where possible."
   (interactive)
   (let ((id (tabulated-list-get-id))
@@ -607,14 +607,14 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
               (tabulated-list-print t)
               (when id (goto-char (point-min)) (search-forward id nil t))))))))))
 
-(defun opencode-shell-filter (text)
+(defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
   (interactive (list (read-string "Filter sessions: " opencode-shell--filter)))
   (setq opencode-shell--filter text
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
-(defun opencode-shell-filter-directory (directory)
+(defun opencode-shell--filter-directory (directory)
   "Show only sessions whose server-reported directory equals DIRECTORY."
   (interactive
    (list (completing-read
@@ -628,7 +628,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
-(defun opencode-shell-show-all-sessions ()
+(defun opencode-shell--show-all-sessions ()
   "Clear browser text and directory filters and show all sessions."
   (interactive)
   (setq opencode-shell--filter ""
@@ -636,13 +636,13 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
-(defun opencode-shell-create-session ()
+(defun opencode-shell--create-session ()
   "Choose a directory and create a session for the browser's server."
   (interactive)
   (opencode-shell--start-session
    (or opencode-shell--profile (opencode-shell--default-profile))))
 
-(defun opencode-shell-open-at-point ()
+(defun opencode-shell--open-at-point ()
   "Open the session at point."
   (interactive)
   (if-let ((id (tabulated-list-get-id)))
@@ -657,13 +657,13 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
           (opencode-shell-open-session id directory)))
     (user-error "No session at point")))
 
-(defun opencode-shell-delete-session ()
+(defun opencode-shell--delete-session ()
   "Delete the session at point after confirmation."
   (interactive)
   (let ((id (or (tabulated-list-get-id) (user-error "No session at point"))))
     (when (yes-or-no-p (format "Delete OpenCode session %s? " id))
       (opencode-shell--request "DELETE" (format "/session/%s" id)
-                                (lambda (_) (opencode-shell-refresh))))))
+                                (lambda (_) (opencode-shell--refresh))))))
 
 (defun opencode-shell--normalize-models (response)
   "Return models from server-connected providers in RESPONSE."
@@ -714,26 +714,26 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
 
 (defvar opencode-shell-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'opencode-shell-submit)
-    (define-key map (kbd "s-<return>") #'opencode-shell-submit)
-    (define-key map (kbd "C-c C-v") #'opencode-shell-select-model)
-    (define-key map (kbd "C-c C-m") #'opencode-shell-select-agent)
-    (define-key map (kbd "C-c C-g") #'opencode-shell-resync)
-    (define-key map (kbd "C-c C-a") #'opencode-shell-abort)
-    (define-key map (kbd "C-c C-p") #'opencode-shell-permissions)
-    (define-key map (kbd "C-c C-y") #'opencode-shell-permission-allow-once)
-    (define-key map (kbd "C-c C-l") #'opencode-shell-permission-allow-always)
-    (define-key map (kbd "C-c C-n") #'opencode-shell-permission-reject)
-    (define-key map (kbd "C-c C-q") #'opencode-shell-questions)
+    (define-key map (kbd "C-c C-c") #'opencode-shell--submit)
+    (define-key map (kbd "s-<return>") #'opencode-shell--submit)
+    (define-key map (kbd "C-c C-v") #'opencode-shell--select-model)
+    (define-key map (kbd "C-c C-m") #'opencode-shell--select-agent)
+    (define-key map (kbd "C-c C-g") #'opencode-shell--resync)
+    (define-key map (kbd "C-c C-a") #'opencode-shell--abort)
+    (define-key map (kbd "C-c C-p") #'opencode-shell--permissions)
+    (define-key map (kbd "C-c C-y") #'opencode-shell--permission-allow-once)
+    (define-key map (kbd "C-c C-l") #'opencode-shell--permission-allow-always)
+    (define-key map (kbd "C-c C-n") #'opencode-shell--permission-reject)
+    (define-key map (kbd "C-c C-q") #'opencode-shell--questions)
     (define-key map (kbd "C-c C-h") #'describe-mode)
     map))
 
 (defvar opencode-shell-permission-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "y") #'opencode-shell-permission-allow-once)
-    (define-key map (kbd "a") #'opencode-shell-permission-allow-always)
-    (define-key map (kbd "n") #'opencode-shell-permission-reject)
-    (define-key map (kbd "r") #'opencode-shell-permission-reject)
+    (define-key map (kbd "y") #'opencode-shell--permission-allow-once)
+    (define-key map (kbd "a") #'opencode-shell--permission-allow-always)
+    (define-key map (kbd "n") #'opencode-shell--permission-reject)
+    (define-key map (kbd "r") #'opencode-shell--permission-reject)
     map))
 
 (defun opencode-shell--in-composer-p ()
@@ -806,12 +806,12 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
-      (opencode-shell-resync t)
+      (opencode-shell--resync t)
       (setq opencode-shell--poll-timer
             (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
                          (lambda (target)
                            (when (buffer-live-p target)
-                             (with-current-buffer target (opencode-shell-resync))))
+                             (with-current-buffer target (opencode-shell--resync))))
                          buffer)))
     (pop-to-buffer buffer)))
 
@@ -1120,7 +1120,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
          (completing-read-multiple prompt options nil require-match)
        (list (completing-read prompt options nil require-match))))))
 
-(defun opencode-shell-resync (&optional capabilities)
+(defun opencode-shell--resync (&optional capabilities)
   "Fully resync transcript, status, models, agents, and pending state."
   (interactive (list t))
   (opencode-shell--guarded-request
@@ -1159,7 +1159,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
            (settle nil))
          nil (lambda () (settle t)))))))
 
-(defun opencode-shell-select-model ()
+(defun opencode-shell--select-model ()
   "Select a server-advertised model for subsequent prompts."
   (interactive)
   (unless opencode-shell--models (user-error "No models loaded; resync first"))
@@ -1168,7 +1168,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
                     opencode-shell--models)))
   (force-mode-line-update))
 
-(defun opencode-shell-select-agent ()
+(defun opencode-shell--select-agent ()
   "Select a server-advertised agent name for subsequent prompts."
   (interactive)
   (unless opencode-shell--agents (user-error "No agents loaded; resync first"))
@@ -1184,7 +1184,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
           (and opencode-shell--selected-agent
                `((agent . ,opencode-shell--selected-agent)))))
 
-(defun opencode-shell-submit ()
+(defun opencode-shell--submit ()
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
   (let ((text (opencode-shell--composer-text)))
@@ -1199,7 +1199,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
       (force-mode-line-update)
       (opencode-shell--request
        "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
-       (lambda (_) (opencode-shell-resync))
+       (lambda (_) (opencode-shell--resync))
        (opencode-shell--prompt-body text) nil
        (lambda ()
          (setf (opencode-shell--turn-status turn) 'error)
@@ -1212,11 +1212,11 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
          (opencode-shell--render-turns)
          (force-mode-line-update))))))
 
-(defun opencode-shell-abort ()
+(defun opencode-shell--abort ()
   "Abort work in the current session."
   (interactive)
   (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
-                            (lambda (_) (opencode-shell-resync)) '()))
+                            (lambda (_) (opencode-shell--resync)) '()))
 
 (defun opencode-shell--choose-pending (kind callback)
   "Fetch pending KIND and invoke CALLBACK with the selected object."
@@ -1260,7 +1260,7 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
                  (format "metadata=%s" (opencode-shell--permission-value metadata)))))
    " | "))
 
-(defun opencode-shell-permissions ()
+(defun opencode-shell--permissions ()
   "Move to the first pending inline permission request."
   (interactive)
   (unless opencode-shell--permissions (user-error "No pending permission"))
@@ -1289,22 +1289,22 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
      `((reply . ,reply)) nil
      (lambda () (setq opencode-shell--permission-sending nil)))))
 
-(defun opencode-shell-permission-allow-once ()
+(defun opencode-shell--permission-allow-once ()
   "Allow the inline permission once."
   (interactive)
   (opencode-shell--permission-reply "once"))
 
-(defun opencode-shell-permission-allow-always ()
+(defun opencode-shell--permission-allow-always ()
   "Always allow the inline permission after confirmation."
   (interactive)
   (opencode-shell--permission-reply "always"))
 
-(defun opencode-shell-permission-reject ()
+(defun opencode-shell--permission-reject ()
   "Reject the inline permission."
   (interactive)
   (opencode-shell--permission-reply "reject"))
 
-(defun opencode-shell-questions ()
+(defun opencode-shell--questions ()
   "Explicitly answer or reject a pending question."
   (interactive)
   (opencode-shell--choose-pending
@@ -1331,13 +1331,13 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
   (evil-set-initial-state 'opencode-shell-mode 'normal)
   (evil-set-initial-state 'opencode-shell-sessions-mode 'normal)
   (evil-define-key* 'normal opencode-shell-mode-map
-    (kbd "g r") #'opencode-shell-resync
-    (kbd "C-c C-c") #'opencode-shell-submit
-    (kbd "C-c C-v") #'opencode-shell-select-model
-    (kbd "C-c C-m") #'opencode-shell-select-agent)
+    (kbd "g r") #'opencode-shell--resync
+    (kbd "C-c C-c") #'opencode-shell--submit
+    (kbd "C-c C-v") #'opencode-shell--select-model
+    (kbd "C-c C-m") #'opencode-shell--select-agent)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
-    (kbd "RET") #'opencode-shell-open-at-point
-    (kbd "g r") #'opencode-shell-refresh))
+    (kbd "RET") #'opencode-shell--open-at-point
+    (kbd "g r") #'opencode-shell--refresh))
 
 (defun opencode-shell--evil-move-to-composer ()
   "Move point to the composer when entering Evil insert state."

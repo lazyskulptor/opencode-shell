@@ -28,7 +28,7 @@
         (dotimes (index 10)
           (goto-char (point-max))
           (insert (format "질문 %d" (1+ index)))
-          (opencode-shell-submit)
+          (opencode-shell--submit)
           (funcall success nil)
           (opencode-shell--render-messages
            (opencode-shell-acceptance--messages (1+ index)))
