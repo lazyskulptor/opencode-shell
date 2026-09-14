@@ -68,8 +68,8 @@ and status requests. A transcript buffer has a multiline composer after
 submits it. Submitted prompts and polled responses above the composer are
 read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear in the header and affect subsequent prompt payloads.
-Each prompt carries a stable message ID. SSE events trigger low-latency updates,
-while periodic history reconciliation remains active as a loss-recovery path.
+Each prompt carries a stable message ID. Periodic history polling is the sole
+transcript data path and reconciles responses without deleting known history.
 The transcript shows stable sending, waiting, receiving, recovering, aborting,
 or error state and never replaces an already completed response with stale data.
 Model completion is limited to providers reported as connected by the server;
@@ -88,8 +88,8 @@ bottom composer is writable; each submitted user prompt and its response are
 separate read-only regions owned by a buffer-local turn record. Poll updates
 replace turn regions without changing composer text or point. Evil's ordinary
 insert commands are left intact and entering insert state focuses the composer.
-A failed `prompt_async` request marks the attempted turn as failed and restores
-the submitted draft for retry when no newer draft exists.
+An ambiguous `prompt_async` failure keeps the attempted turn visible and polls
+history for its stable ID instead of automatically submitting it again.
 
 ## Security
 

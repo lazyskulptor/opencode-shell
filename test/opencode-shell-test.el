@@ -393,7 +393,6 @@
   (let (timers cancelled)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'opencode-shell--resync) #'ignore)
-              ((symbol-function 'opencode-shell--event-connect) (lambda () nil))
               ((symbol-function 'run-at-time)
                (lambda (&rest _) (let ((timer (list 'timer))) (push timer timers) timer)))
               ((symbol-function 'timerp) (lambda (value) (eq (car-safe value) 'timer)))
@@ -655,20 +654,20 @@
       (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)))))
 
-(ert-deftest opencode-shell-sse-parser-handles-split-and-duplicate-frames ()
+(ert-deftest opencode-shell-partial-snapshot-preserves-known-turn-order ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--session-id "s")
-    (let ((count 0)
-          (frame "data: {\"id\":\"e1\",\"type\":\"message.updated\",\"properties\":{\"info\":{\"sessionID\":\"s\"}}}\n\n"))
-      (cl-letf (((symbol-function 'opencode-shell--resync)
-                 (lambda (&rest _) (cl-incf count))))
-        (opencode-shell--event-filter nil (substring frame 0 17))
-        (should (= count 0))
-        (opencode-shell--event-filter nil (substring frame 17))
-        (should (= count 1))
-        (opencode-shell--event-filter nil frame)
-        (should (= count 2))))))
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "first")) 1)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u2" "user" "second")) 2)
+    (should (equal (mapcar #'opencode-shell--turn-server-user-id
+                           opencode-shell--turns)
+                   '("u1" "u2")))))
+
+(ert-deftest opencode-shell-does-not-define-sse-transport ()
+  (should-not (fboundp 'opencode-shell--event-connect))
+  (should-not (boundp 'opencode-shell--event-process)))
 
 (ert-deftest opencode-shell-submit-includes-stable-message-id ()
   (with-temp-buffer
@@ -851,7 +850,6 @@
     (let ((opencode-shell-poll-interval 60) buffers)
       (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
                ((symbol-function 'opencode-shell--resync) #'ignore)
-               ((symbol-function 'opencode-shell--event-connect) (lambda () nil))
                 ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
         (unwind-protect
             (progn

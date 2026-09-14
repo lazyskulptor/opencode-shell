@@ -12,7 +12,6 @@
 | `GET` | `/session/:id/message` | Read transcript messages |
 | `POST` | `/session/:id/prompt_async` | Submit a prompt |
 | `POST` | `/session/:id/abort` | Abort generation |
-| `GET` | `/event` | Directory-scoped SSE bus events; first frame is `server.connected` |
 | `GET` | `/provider` | List providers and models |
 | `GET` | `/agent` | List agents |
 | `GET` | `/permission` | List pending permissions |
@@ -27,8 +26,6 @@ Session list requests include an absolute server-native `directory` and a high
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 
-Live verification against 1.18.30 confirmed `text/event-stream` frames formatted
-as `data: <JSON>` followed by a blank line. The initial envelope contains stable
-`id`, type `server.connected`, and `properties`. The client treats events only as
-change notifications and always reconciles authoritative session message history,
-so a dropped, duplicated, or split SSE frame cannot silently drop transcript data.
+The client deliberately uses `/session/:id/message` polling as its only
+transcript data path. It does not require `/event`; stable message identities and
+monotonic history reconciliation provide recovery after request interruption.
