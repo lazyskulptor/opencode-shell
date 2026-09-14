@@ -672,7 +672,8 @@
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
                     opencode-shell--default-profile opencode-shell--read-profile
-                    opencode-shell--profile opencode-shell--profile-remote-p))
+                    opencode-shell--resolve-or-read-profile
+                    opencode-shell--profile-remote-p))
     (should (fboundp symbol)))
   (should (boundp 'opencode-shell-profiles))
   (should (boundp 'opencode-shell--servers)))

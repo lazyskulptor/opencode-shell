@@ -183,7 +183,7 @@ and lifecycle keys."
          (seq-find (lambda (p) (equal value (opencode-shell--profile-name p)))
                      opencode-shell-profiles))))
 
-(defun opencode-shell--profile (value)
+(defun opencode-shell--resolve-or-read-profile (value)
   "Resolve VALUE or prompt for an OpenCode server profile."
   (or (opencode-shell--resolve-profile value) value
       (opencode-shell--read-profile)))
@@ -552,8 +552,7 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--sessions (&optional directory profile)
   "Open PROFILE's server-wide session browser.
-DIRECTORY, when non-nil, is only an initial directory view filter.
-For compatibility, DIRECTORY may itself be a profile plist or profile name."
+DIRECTORY, when non-nil, is only an initial directory view filter."
   (interactive)
   (setq profile (or (opencode-shell--resolve-profile profile)
                     profile opencode-shell--profile
@@ -1588,13 +1587,14 @@ auto-started."
 (defun opencode-shell (&optional profile)
   "Select an OpenCode server and open its complete session browser."
   (interactive (list (opencode-shell--read-profile)))
-  (opencode-shell--open-sessions (opencode-shell--profile profile)))
+  (opencode-shell--open-sessions
+   (opencode-shell--resolve-or-read-profile profile)))
 
 (defun opencode-shell--open-profile (profile &optional directory server-wide)
   "Open PROFILE's session browser, optionally scoped to DIRECTORY.
 When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
   (opencode-shell--open-sessions
-   (opencode-shell--profile profile)
+   (opencode-shell--resolve-or-read-profile profile)
    (unless server-wide (or directory default-directory))))
 
 ;;;###autoload
@@ -1602,7 +1602,7 @@ When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
   "Select PROFILE and report its health and client ownership."
   (interactive (list (opencode-shell--read-profile)))
   (opencode-shell--server-ready
-   (opencode-shell--profile profile)
+   (opencode-shell--resolve-or-read-profile profile)
    (lambda (ready checked-profile)
      (let* ((state (gethash (opencode-shell--server-key checked-profile)
                             opencode-shell--servers))
@@ -1615,7 +1615,8 @@ When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
 (defun opencode-shell-restart (profile)
   "Select and restart an owned local PROFILE server."
   (interactive (list (opencode-shell--read-profile)))
-  (opencode-shell--restart-server (opencode-shell--profile profile)))
+  (opencode-shell--restart-server
+   (opencode-shell--resolve-or-read-profile profile)))
 
 ;;;###autoload
 (defun opencode-shell-reload ()
