@@ -166,31 +166,6 @@ and lifecycle keys."
     (file-name-as-directory
      (if (file-remote-p directory) directory (expand-file-name directory)))))
 
-(defun opencode-shell--profile-match-p (profile directory)
-  "Return non-nil when PROFILE matches DIRECTORY."
-  (let ((match (plist-get profile :match))
-        (regexp (plist-get profile :match-regexp)))
-    (cond ((functionp match) (funcall match directory))
-          (regexp (string-match-p regexp directory))
-          (t (let ((root (or match (plist-get profile :directory))))
-               (and (stringp root)
-                    (string-prefix-p (opencode-shell--canonical-directory root)
-                                     (opencode-shell--canonical-directory directory))))))))
-
-(defun opencode-shell--matching-profile (&optional directory)
-  "Return the first profile matching DIRECTORY."
-  (opencode-shell--validate-profiles)
-  (let* ((directory (or directory default-directory))
-         (matches (seq-filter (lambda (profile)
-                                (opencode-shell--profile-match-p profile directory))
-                              opencode-shell-profiles)))
-    (car (sort matches
-               (lambda (a b)
-                 (> (length (format "%s" (or (plist-get a :match)
-                                               (plist-get a :directory) "")))
-                    (length (format "%s" (or (plist-get b :match)
-                                               (plist-get b :directory) "")))))))))
-
 (defun opencode-shell--read-profile ()
   "Read and return a configured profile."
   (unless opencode-shell-profiles (user-error "No OpenCode profiles configured"))
@@ -206,7 +181,12 @@ and lifecycle keys."
   (cond ((and (listp value) (plist-member value :base-url)) value)
         ((stringp value)
          (seq-find (lambda (p) (equal value (opencode-shell--profile-name p)))
-                    opencode-shell-profiles))))
+                     opencode-shell-profiles))))
+
+(defun opencode-shell--profile (value)
+  "Resolve VALUE or prompt for an OpenCode server profile."
+  (or (opencode-shell--resolve-profile value) value
+      (opencode-shell--read-profile)))
 
 (defun opencode-shell--profile-command-segment (name)
   "Return a safe command segment for profile NAME."
@@ -214,6 +194,14 @@ and lifecycle keys."
     (unless (string-match-p "\\`[a-z0-9]+\\(?:-[a-z0-9]+\\)*\\'" segment)
       (user-error "OpenCode profile name cannot form a command: %s" name))
     segment))
+
+(defun opencode-shell--generated-command (name action)
+  "Return an interactive command that applies ACTION to profile NAME."
+  (lambda ()
+    (interactive)
+    (funcall action
+             (or (opencode-shell--resolve-profile name)
+                 (user-error "Unknown OpenCode server alias: %s" name)))))
 
 (defun opencode-shell--register-profile-commands ()
   "Refresh session and start commands for configured server aliases."
@@ -238,16 +226,11 @@ and lifecycle keys."
     (dolist (definition (nreverse definitions))
       (pcase-let ((`((,sessions-symbol ,start-symbol) ,name) definition))
         (defalias sessions-symbol
-          (lambda ()
-            (interactive)
-            (opencode-shell--open-profile name nil t))
+          (opencode-shell--generated-command
+           name (lambda (profile) (opencode-shell--open-profile profile nil t)))
           (format "Open the %s OpenCode session browser." name))
         (defalias start-symbol
-          (lambda ()
-            (interactive)
-            (opencode-shell--start-server
-             (or (opencode-shell--resolve-profile name)
-                 (user-error "Unknown OpenCode server alias: %s" name))))
+          (opencode-shell--generated-command name #'opencode-shell--start-server)
           (format "Start or connect to the %s OpenCode server." name))
         (push sessions-symbol opencode-shell--generated-profile-commands)
         (push start-symbol opencode-shell--generated-profile-commands)))
@@ -572,11 +555,8 @@ Each retained session keeps its server-reported directory unchanged."
 DIRECTORY, when non-nil, is only an initial directory view filter.
 For compatibility, DIRECTORY may itself be a profile plist or profile name."
   (interactive)
-  (when-let ((as-profile (opencode-shell--resolve-profile directory)))
-    (setq profile as-profile directory nil))
   (setq profile (or (opencode-shell--resolve-profile profile)
                     profile opencode-shell--profile
-                    (opencode-shell--matching-profile (or directory default-directory))
                     (opencode-shell--default-profile)))
   (opencode-shell--validate-profiles)
   (let* ((list-directory (opencode-shell--session-list-directory profile))
@@ -1596,36 +1576,33 @@ auto-started."
 
 (add-hook 'kill-emacs-hook #'opencode-shell--stop-all-servers)
 
+(defun opencode-shell--open-sessions (profile &optional directory)
+  "Prepare PROFILE and open its session browser filtered by DIRECTORY."
+  (if (and (plist-get profile :start-command)
+           (not (opencode-shell--profile-remote-p profile)))
+      (opencode-shell--start-server
+       profile (lambda (ready) (opencode-shell--sessions directory ready)))
+    (opencode-shell--sessions directory profile)))
+
 ;;;###autoload
 (defun opencode-shell (&optional profile)
   "Select an OpenCode server and open its complete session browser."
   (interactive (list (opencode-shell--read-profile)))
-  (let ((profile (or (opencode-shell--resolve-profile profile) profile
-                     (opencode-shell--read-profile))))
-    (if (and (plist-get profile :start-command)
-             (not (opencode-shell--profile-remote-p profile)))
-        (opencode-shell--start-server
-         profile (lambda (ready) (opencode-shell--sessions nil ready)))
-      (opencode-shell--sessions nil profile))))
+  (opencode-shell--open-sessions (opencode-shell--profile profile)))
 
 (defun opencode-shell--open-profile (profile &optional directory server-wide)
   "Open PROFILE's session browser, optionally scoped to DIRECTORY.
 When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
-  (interactive (list (opencode-shell--read-profile) nil))
-  (setq profile (or (opencode-shell--resolve-profile profile) profile))
-  (let ((directory (unless server-wide (or directory default-directory))))
-    (if (and (plist-get profile :start-command)
-             (not (opencode-shell--profile-remote-p profile)))
-        (opencode-shell--start-server
-         profile (lambda (ready) (opencode-shell--sessions directory ready)))
-      (opencode-shell--sessions directory profile))))
+  (opencode-shell--open-sessions
+   (opencode-shell--profile profile)
+   (unless server-wide (or directory default-directory))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)
   "Select PROFILE and report its health and client ownership."
   (interactive (list (opencode-shell--read-profile)))
   (opencode-shell--server-ready
-   profile
+   (opencode-shell--profile profile)
    (lambda (ready checked-profile)
      (let* ((state (gethash (opencode-shell--server-key checked-profile)
                             opencode-shell--servers))
@@ -1638,7 +1615,7 @@ When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
 (defun opencode-shell-restart (profile)
   "Select and restart an owned local PROFILE server."
   (interactive (list (opencode-shell--read-profile)))
-  (opencode-shell--restart-server profile))
+  (opencode-shell--restart-server (opencode-shell--profile profile)))
 
 ;;;###autoload
 (defun opencode-shell-reload ()

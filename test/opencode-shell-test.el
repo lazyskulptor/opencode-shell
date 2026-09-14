@@ -672,7 +672,7 @@
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
                     opencode-shell--default-profile opencode-shell--read-profile
-                    opencode-shell--matching-profile opencode-shell--profile-remote-p))
+                    opencode-shell--profile opencode-shell--profile-remote-p))
     (should (fboundp symbol)))
   (should (boundp 'opencode-shell-profiles))
   (should (boundp 'opencode-shell--servers)))
@@ -680,7 +680,7 @@
 (ert-deftest opencode-shell-default-local-endpoint-is-4199 ()
   (should (equal opencode-shell-base-url "http://127.0.0.1:4199")))
 
-(ert-deftest opencode-shell-profile-key-name-default-read-and-match ()
+(ert-deftest opencode-shell-profile-key-name-default-and-read ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile
                opencode-shell-test--remote-profile))
@@ -693,8 +693,6 @@
                     (list :name "default" :base-url opencode-shell-base-url
                           :directory opencode-shell-directory
                           :session-list-directory (expand-file-name "~/"))))
-    (should (equal (opencode-shell--matching-profile)
-                   opencode-shell-test--local-profile))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt candidates &rest _)
                  (setq choice candidates) "remote")))
@@ -807,7 +805,11 @@
                        (push (list profile directory server-wide) opened))))
             (call-interactively 'local-sessions)
             (call-interactively 'remote-sessions))
-          (should (equal opened '(("remote" nil t) ("local" nil t))))
+          (should (equal (mapcar (lambda (entry)
+                                   (cons (opencode-shell--profile-name (car entry))
+                                         (cdr entry)))
+                                 opened)
+                         '(("remote" nil t) ("local" nil t))))
           (setq opencode-shell-profiles (list opencode-shell-test--local-profile))
           (opencode-shell--register-profile-commands)
           (should-not (fboundp 'remote-sessions))
@@ -866,7 +868,7 @@
           (progn
              (opencode-shell--sessions "/legacy/directory")
              (should (equal (caar seen) (expand-file-name "~/")))
-            (opencode-shell--sessions opencode-shell-test--remote-profile)
+            (opencode-shell--sessions nil opencode-shell-test--remote-profile)
             (should (equal (cadar seen) opencode-shell-test--remote-profile))
              (opencode-shell--sessions "/explicit" opencode-shell-test--local-profile)
              (should (equal (car seen)
@@ -1194,15 +1196,7 @@
                            (opencode-shell--get (car opencode-shell--sessions) 'id)) "two")))
       (kill-buffer one) (kill-buffer two))))
 
-(ert-deftest opencode-shell-profile-specificity-regexp-and-validation ()
-  (let ((opencode-shell-profiles
-         '((:name "broad" :base-url "http://localhost:1" :match "/work")
-           (:name "specific" :base-url "http://localhost:2" :match "/work/app")
-           (:name "regexp" :base-url "http://localhost:3" :match-regexp "^/special/"))))
-    (should (equal (plist-get (opencode-shell--matching-profile "/work/app/src") :name)
-                   "specific"))
-    (should (equal (plist-get (opencode-shell--matching-profile "/special/x") :name)
-                   "regexp")))
+(ert-deftest opencode-shell-profile-validation-rejects-duplicate-identities ()
   (let ((opencode-shell-profiles
          '((:name "duplicate" :id "one") (:name "duplicate" :id "two"))))
     (should-error (opencode-shell--validate-profiles) :type 'user-error))
