@@ -53,7 +53,6 @@ and lifecycle keys."
 (defvar opencode-shell--generated-profile-commands nil)
 (defconst opencode-shell--mode-commands
   '(opencode-shell--refresh opencode-shell--filter
-    opencode-shell--filter-directory opencode-shell--show-all-sessions
     opencode-shell--create-session opencode-shell--open-at-point
     opencode-shell--delete-session opencode-shell--resync
     opencode-shell--select-model opencode-shell--select-agent
@@ -207,13 +206,12 @@ and lifecycle keys."
              (or (opencode-shell--resolve-profile name)
                  (user-error "Unknown OpenCode server alias: %s" name)))))
 
-(defun opencode-shell--read-session-directory (profile)
-  "Read a directory and return its path as understood by PROFILE's server."
-  (let ((directory (read-directory-name
-                    (format "%s session directory: "
-                            (opencode-shell--profile-name profile))
-                    default-directory nil t)))
-    (opencode-shell--server-directory directory profile)))
+(defun opencode-shell--current-server-directory (profile)
+  "Return current `default-directory' as an absolute PROFILE server path."
+  (let ((directory (opencode-shell--server-directory default-directory profile)))
+    (unless (and (stringp directory) (file-name-absolute-p directory))
+      (user-error "Current directory cannot be mapped to the OpenCode server"))
+    (file-name-as-directory directory)))
 
 (defun opencode-shell--create-and-open-session (profile directory)
   "Create and open a title-less PROFILE session in DIRECTORY."
@@ -230,9 +228,9 @@ and lifecycle keys."
          (opencode-shell-open-session
           (opencode-shell--get session 'id) directory profile))))))
 
-(defun opencode-shell--start-session (profile)
-  "Prompt for PROFILE directory, ensure readiness, and create a session."
-  (let ((directory (opencode-shell--read-session-directory profile)))
+(defun opencode-shell--start-session (profile &optional directory)
+  "Ensure PROFILE readiness and create a session in DIRECTORY or the current path."
+  (let ((directory (or directory (opencode-shell--current-server-directory profile))))
     (if (and (plist-get profile :start-command)
              (not (opencode-shell--profile-remote-p profile)))
         (opencode-shell--start-server
@@ -264,11 +262,13 @@ and lifecycle keys."
       (pcase-let ((`((,sessions-symbol ,start-symbol) ,name) definition))
         (defalias sessions-symbol
           (opencode-shell--generated-command
-           name (lambda (profile) (opencode-shell--open-profile profile nil t)))
+            name (lambda (profile)
+                   (opencode-shell--open-sessions
+                    profile (opencode-shell--current-server-directory profile))))
           (format "Open the %s OpenCode session browser." name))
         (defalias start-symbol
           (opencode-shell--generated-command name #'opencode-shell--start-session)
-          (format "Create a %s OpenCode session after choosing its directory." name))
+          (format "Create a %s OpenCode session in the current directory." name))
         (push sessions-symbol opencode-shell--generated-profile-commands)
         (push start-symbol opencode-shell--generated-profile-commands)))
     (setq opencode-shell--generated-profile-commands
@@ -349,7 +349,6 @@ and lifecycle keys."
 (defvar-local opencode-shell--permission-sending nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
-(defvar-local opencode-shell--directory-filter nil)
 
 (defface opencode-shell-user-face
   '((((class color) (background dark)) :foreground "#dca3a3" :weight bold)
@@ -534,8 +533,6 @@ Each retained session keeps its server-reported directory unchanged."
     (list id (vector
               (or (opencode-shell--get session 'title) "Untitled")
               (truncate-string-to-width id 10 nil nil t)
-              (or (opencode-shell--get session 'directory)
-                  (opencode-shell--get session 'project) "")
               (or (opencode-shell--get session 'agent) "")
               (or model "") (opencode-shell--status id)
               (if (> (opencode-shell--time session) 0)
@@ -546,12 +543,9 @@ Each retained session keeps its server-reported directory unchanged."
   (mapcar #'opencode-shell--session-row
           (seq-filter
            (lambda (session)
-             (and (or (null opencode-shell--directory-filter)
-                      (equal opencode-shell--directory-filter
-                             (opencode-shell--get session 'directory)))
-                  (or (string-empty-p opencode-shell--filter)
-                      (string-match-p (regexp-quote (downcase opencode-shell--filter))
-                                      (downcase (opencode-shell--session-text session))))))
+             (or (string-empty-p opencode-shell--filter)
+                 (string-match-p (regexp-quote (downcase opencode-shell--filter))
+                                 (downcase (opencode-shell--session-text session)))))
            opencode-shell--sessions)))
 
 (defvar opencode-shell-sessions-mode-map
@@ -560,40 +554,40 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "RET") #'opencode-shell--open-at-point)
     (define-key map (kbd "c") #'opencode-shell--create-session)
     (define-key map (kbd "/") #'opencode-shell--filter)
-    (define-key map (kbd "p") #'opencode-shell--filter-directory)
-    (define-key map (kbd "A") #'opencode-shell--show-all-sessions)
     (define-key map (kbd "d") #'opencode-shell--delete-session)
     map))
 
 (define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
   "Browse canonical OpenCode sessions."
   (setq tabulated-list-format
-        [("Title" 28 t) ("ID" 10 t) ("Project" 28 t) ("Agent" 12 t)
+        [("Title" 28 t) ("ID" 10 t) ("Agent" 12 t)
          ("Model" 18 t) ("Status" 10 t) ("Updated" 16 t)])
+  (setq-local header-line-format
+              '(:eval (format " OpenCode %s  %s"
+                              (opencode-shell--profile-name opencode-shell--profile)
+                              (or opencode-shell--directory "-"))))
   (setq tabulated-list-padding 2 tabulated-list-sort-key '("Updated" . t))
   (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
   (tabulated-list-init-header))
 
-(defun opencode-shell--sessions (&optional directory profile)
-  "Open PROFILE's server-wide session browser.
-DIRECTORY, when non-nil, is only an initial directory view filter."
+(defun opencode-shell--sessions (directory &optional profile)
+  "Open PROFILE's session browser scoped to server-native DIRECTORY."
   (setq profile (or (opencode-shell--resolve-profile profile)
                     profile opencode-shell--profile
                     (opencode-shell--default-profile)))
   (opencode-shell--validate-profiles)
-  (let* ((directory-filter (and directory
-                                 (opencode-shell--server-directory directory profile)))
-          (buffer (get-buffer-create
-                   (format "*OpenCode Shell Sessions:%s*"
-                           (opencode-shell--profile-key profile)))))
+  (unless (and (stringp directory) (file-name-absolute-p directory))
+    (user-error "OpenCode session directory must be absolute"))
+  (let ((buffer (get-buffer-create
+                 (format "*OpenCode Shell Sessions:%s:%s*"
+                         (opencode-shell--profile-key profile) directory))))
     (with-current-buffer buffer
       (opencode-shell-sessions-mode)
       (setq-local opencode-shell--profile profile)
       (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
-      (setq-local opencode-shell--directory nil)
-      (setq-local opencode-shell--directory-filter directory-filter)
+      (setq-local opencode-shell--directory (file-name-as-directory directory))
       (opencode-shell--refresh))
     (pop-to-buffer buffer)))
 
@@ -607,14 +601,16 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
      (lambda (statuses)
        (when (= generation opencode-shell--generation)
          (setq opencode-shell--session-status statuses)
-         (opencode-shell--request
-          "GET" "/session"
+          (opencode-shell--request
+           "GET" "/session"
           (lambda (sessions)
             (when (= generation opencode-shell--generation)
               (setq opencode-shell--sessions (opencode-shell--normalize-sessions sessions)
                     tabulated-list-entries (opencode-shell--session-entries))
               (tabulated-list-print t)
-              (when id (goto-char (point-min)) (search-forward id nil t))))))))))
+               (when id (goto-char (point-min)) (search-forward id nil t)))))
+           nil `((directory . ,opencode-shell--directory)
+                 (limit . 1000)))))))
 
 (defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
@@ -623,33 +619,12 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
-(defun opencode-shell--filter-directory (directory)
-  "Show only sessions whose server-reported directory equals DIRECTORY."
-  (interactive
-   (list (completing-read
-          "Session directory: "
-          (delete-dups
-           (delq nil (mapcar (lambda (session)
-                               (opencode-shell--get session 'directory))
-                             opencode-shell--sessions)))
-          nil t)))
-  (setq opencode-shell--directory-filter directory
-        tabulated-list-entries (opencode-shell--session-entries))
-  (tabulated-list-print t))
-
-(defun opencode-shell--show-all-sessions ()
-  "Clear browser text and directory filters and show all sessions."
-  (interactive)
-  (setq opencode-shell--filter ""
-        opencode-shell--directory-filter nil
-        tabulated-list-entries (opencode-shell--session-entries))
-  (tabulated-list-print t))
-
 (defun opencode-shell--create-session ()
-  "Choose a directory and create a session for the browser's server."
+  "Create a session in the browser's fixed directory."
   (interactive)
   (opencode-shell--start-session
-   (or opencode-shell--profile (opencode-shell--default-profile))))
+   (or opencode-shell--profile (opencode-shell--default-profile))
+   opencode-shell--directory))
 
 (defun opencode-shell--open-at-point ()
   "Open the session at point."
@@ -1588,7 +1563,8 @@ auto-started."
 (add-hook 'kill-emacs-hook #'opencode-shell--stop-all-servers)
 
 (defun opencode-shell--open-sessions (profile &optional directory)
-  "Prepare PROFILE and open its session browser filtered by DIRECTORY."
+  "Prepare PROFILE and open its session browser for DIRECTORY."
+  (setq directory (or directory (opencode-shell--current-server-directory profile)))
   (if (and (plist-get profile :start-command)
            (not (opencode-shell--profile-remote-p profile)))
       (opencode-shell--start-server
@@ -1597,17 +1573,10 @@ auto-started."
 
 ;;;###autoload
 (defun opencode-shell (&optional profile)
-  "Select an OpenCode server and open its complete session browser."
+  "Select an OpenCode server and open sessions for the current directory."
   (interactive (list (opencode-shell--read-profile)))
   (opencode-shell--open-sessions
    (opencode-shell--resolve-or-read-profile profile)))
-
-(defun opencode-shell--open-profile (profile &optional directory server-wide)
-  "Open PROFILE's session browser, optionally scoped to DIRECTORY.
-When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
-  (opencode-shell--open-sessions
-   (opencode-shell--resolve-or-read-profile profile)
-   (unless server-wide (or directory default-directory))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)

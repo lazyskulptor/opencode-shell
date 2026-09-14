@@ -5,7 +5,7 @@
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Check server readiness; profiles may override the path |
-| `GET` | `/session` | List all server sessions when `directory` is omitted; 1.18.30 exposes no session pagination parameters |
+| `GET` | `/session` | List sessions for exact `directory`; `limit` overrides the default 100-row truncation |
 | `POST` | `/session` | Create a session |
 | `GET` | `/session/status` | Read session status |
 | `DELETE` | `/session/:id` | Delete a session |
@@ -20,6 +20,8 @@
 | `POST` | `/question/:id/reply` | Answer a question |
 | `POST` | `/question/:id/reject` | Reject a question |
 
-Requests may include the OpenCode `directory` query parameter. JSON request and
-response shapes follow OpenCode 1.18.30. This contract contains no Athena or
+Session list requests include an absolute server-native `directory` and a high
+`limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
+`start`, and `search`. Other requests may include `directory` as appropriate.
+JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.

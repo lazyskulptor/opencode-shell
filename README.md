@@ -9,18 +9,19 @@ Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
 original single-server setup, the local endpoint defaults to
 `http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it and
 optionally configure `opencode-shell-directory`, then run `M-x opencode-shell`
-to select a server and open its complete session browser.
+to select a server and open sessions for the current Emacs directory.
 
 ## Profiles
 
 `opencode-shell-profiles` is a list of named plists. A profile can select its
 `:base-url`, client `:directory`, server `:workspace`,
-authentication source, and local server lifecycle settings. Local profiles
-request session inventory without directory scope so every server path appears.
+authentication source, and local server lifecycle settings. Session inventory
+is scoped to the invocation buffer's `default-directory`, translated to the
+server-native absolute path.
 `M-x opencode-shell` always selects a server first. Each alias also generates
-`<alias>-sessions` and `<alias>-start`, such as `opencode-shell-local-sessions` and
-`opencode-shell-local-start`. The start command asks for a directory, creates a title-less
-session there, and opens it.
+`opencode-shell-<alias>-sessions` and `opencode-shell-<alias>-start`, such as
+`opencode-shell-local-sessions` and `opencode-shell-local-start`. The start
+command creates a title-less session in the current directory and opens it.
 
 Profile `:name` values and identity keys must be unique; set an explicit `:id`
 when an identity must survive a name or URL change. A string `:match` is a
@@ -57,11 +58,10 @@ owned process; use the explicit restart command to replace it.
 
 ## Commands
 
-The session browser omits directory scope and shows the active server's sessions
-across project directories regardless of the current buffer. Its `p` directory
-filter and `/` text filter are view-only; `A` clears both. Use `g` refresh,
-`c` to choose a directory and create, `RET` open, and `d` confirmed
-delete. `RET` uses the selected row's exact server-reported directory, which is
+Each session browser is fixed to one server-native directory, shown in its
+header and reflected in its buffer identity. Use `/` for a text filter, `g` to
+refresh, `c` to create in that fixed directory, `RET` to open, and `d` for
+confirmed delete. `RET` uses the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
 and status requests. A transcript buffer has a multiline composer after
 `Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET`
