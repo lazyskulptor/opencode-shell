@@ -353,8 +353,31 @@
             (patterns . ("git status")))))
         (should-not opencode-shell--permissions)
         (should (= (length opencode-shell--resolved-permissions) 1))
-        (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
-        (should (equal (opencode-shell--composer-text) "draft"))))))
+         (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
+         (should (equal (opencode-shell--composer-text) "draft"))))))
+
+(ert-deftest opencode-shell-message-and-permission-renders-do-not-orphan-cards ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (insert "draft")
+    (goto-char (+ opencode-shell--composer-start 2))
+    (let ((permission '(((id . "p1") (sessionID . "s")
+                         (permission . "bash") (patterns . ("git status")))))
+          (messages (list (opencode-shell-test--message "u1" "user" "question")
+                          (opencode-shell-test--message "a1" "assistant" "answer" "u1"))))
+      (dotimes (_ 5)
+        (opencode-shell--receive-permissions permission)
+        (opencode-shell--render-messages messages))
+      (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
+      (should (= 1 (how-many "git status" (point-min) (point-max))))
+      (goto-char opencode-shell--permission-begin)
+      (should (search-forward "PERMISSION" opencode-shell--permission-end t))
+      (should-not (text-property-any (point-min) opencode-shell--permission-begin
+                                     'opencode-shell-permission permission))
+      (should (equal (opencode-shell--composer-text) "draft"))
+      (goto-char (+ opencode-shell--composer-start 2))
+      (should (= (- (point) opencode-shell--composer-start) 2)))))
 
 (ert-deftest opencode-shell-polling-generation-and-capabilities ()
   (with-temp-buffer

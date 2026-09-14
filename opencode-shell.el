@@ -821,7 +821,9 @@ Each retained session keeps its server-reported directory unchanged."
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (insert (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
+    (insert (propertize "Prompt> " 'read-only t
+                        'opencode-shell-composer-label t
+                        'rear-nonsticky '(read-only opencode-shell-composer-label)))
     (setq opencode-shell--composer-start (copy-marker (point) nil)
           opencode-shell--transcript-end (copy-marker (point) nil)
           opencode-shell--permission-begin (copy-marker (point) nil)
@@ -1104,6 +1106,11 @@ Each retained session keeps its server-reported directory unchanged."
                       (- (point) opencode-shell--composer-start)))
          (inhibit-read-only t))
     (save-excursion
+      (when-let ((label-pos (text-property-any
+                            (point-min) opencode-shell--composer-start
+                            'opencode-shell-composer-label t)))
+        (delete-region label-pos (+ label-pos (length "Prompt> ")))
+        (setq opencode-shell--composer-label-visible nil))
       (goto-char opencode-shell--permission-begin)
       (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
       (when (looking-back "Prompt> " (line-beginning-position))
@@ -1133,7 +1140,8 @@ Each retained session keeps its server-reported directory unchanged."
       (set-marker opencode-shell--permission-end (point))
       (when (opencode-shell--composer-visible-p)
         (insert (propertize "Prompt> " 'read-only t
-                            'rear-nonsticky '(read-only))))
+                            'opencode-shell-composer-label t
+                            'rear-nonsticky '(read-only opencode-shell-composer-label))))
       (setq opencode-shell--composer-label-visible
             (opencode-shell--composer-visible-p))
       (set-marker opencode-shell--composer-start (point)))
@@ -1257,10 +1265,13 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--render-turns ()
   "Render immutable turn blocks without changing composer bytes or point."
   (let* ((composer-offset (and (opencode-shell--in-composer-p)
-                               (- (point) opencode-shell--composer-start)))
+                                (- (point) opencode-shell--composer-start)))
          (composer-text (opencode-shell--composer-text))
          (old-point (point))
          (inhibit-read-only t))
+    (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
+    (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
+    (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
     (let* ((known-count (length opencode-shell--rendered-turns))
            (append-only
              (and (<= known-count (length opencode-shell--turns))
@@ -1282,11 +1293,7 @@ Each retained session keeps its server-reported directory unchanged."
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
         (dolist (turn opencode-shell--turns) (opencode-shell--insert-turn-blocks turn))
-        (when (opencode-shell--composer-visible-p)
-          (insert (propertize "Prompt> " 'read-only t
-                              'rear-nonsticky '(read-only))))
-        (setq opencode-shell--composer-label-visible
-              (opencode-shell--composer-visible-p)))
+        (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
                  opencode-shell--composer-label-visible
@@ -1299,17 +1306,23 @@ Each retained session keeps its server-reported directory unchanged."
                  (not opencode-shell--composer-label-visible)
                  (or opencode-shell--submit-in-flight
                      opencode-shell--rendered-turns))
+        (when-let ((label-pos (text-property-any
+                              (point-min) opencode-shell--composer-start
+                              'opencode-shell-composer-label t)))
+          (delete-region label-pos (+ label-pos (length "Prompt> "))))
         (goto-char opencode-shell--composer-start)
         (insert (propertize "Prompt> " 'read-only t
-                            'rear-nonsticky '(read-only)))
+                            'opencode-shell-composer-label t
+                            'rear-nonsticky '(read-only opencode-shell-composer-label)))
         (setq opencode-shell--composer-label-visible t))
       (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
       (save-excursion
         (goto-char (- (point-max) (length composer-text)))
         (set-marker opencode-shell--transcript-end (point))
         (set-marker opencode-shell--permission-begin (point))
-        (set-marker opencode-shell--permission-end (point))
-        (set-marker opencode-shell--composer-start (point))))
+         (set-marker opencode-shell--permission-end (point))
+         (set-marker opencode-shell--composer-start (point))))
+    (opencode-shell--render-permissions)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
       (goto-char (min old-point opencode-shell--transcript-end)))))
