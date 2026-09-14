@@ -361,6 +361,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--request-status "idle")
 (defvar-local opencode-shell--message-request-sequence 0)
 (defvar-local opencode-shell--message-applied-sequence 0)
+(defvar-local opencode-shell--poll-heartbeat 0)
 (defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
@@ -882,6 +883,18 @@ Each retained session keeps its server-reported directory unchanged."
         (and (member type '("tool" "tool_use" "tool-result"))
              (member status '("completed" "error"))))))
 
+(defun opencode-shell--response-phase (turn)
+  "Return the nonterminal response phase for TURN's authoritative parts."
+  (let ((parts (opencode-shell--turn-parts turn)))
+    (cond ((seq-some (lambda (part)
+                       (member (format "%s" (opencode-shell--get part 'type))
+                               '("text" "tool" "tool_use" "tool-result")))
+                     parts) 'receiving)
+          ((seq-some (lambda (part)
+                       (equal (format "%s" (opencode-shell--get part 'type)) "reasoning"))
+                     parts) 'thinking)
+          (t 'waiting))))
+
 (defun opencode-shell--turn-by-server-id (id turns)
   "Find the turn with server user ID ID in TURNS."
   (seq-find (lambda (turn) (equal id (opencode-shell--turn-server-user-id turn))) turns))
@@ -942,7 +955,7 @@ Each retained session keeps its server-reported directory unchanged."
                       (opencode-shell--turn-status turn)
                        (if (seq-some #'opencode-shell--terminal-part-p
                                     (opencode-shell--turn-parts turn))
-                           'complete 'receiving)))))))))
+                           'complete (opencode-shell--response-phase turn))))))))))
     (setq observed (nreverse observed))
     (let ((result (copy-sequence old)))
       (dolist (turn observed)
@@ -1036,12 +1049,13 @@ Each retained session keeps its server-reported directory unchanged."
                   answer "\n\n")
         (insert (propertize
      (pcase (opencode-shell--turn-status turn)
-       ('sending "Sending prompt…\n\n")
-       ('receiving "Receiving response…\n\n")
-       ('recovering "Recovering response from server history…\n\n")
-       ('aborting "Aborting response…\n\n")
+       ('sending (opencode-shell--status-display "Sending"))
+       ('thinking (opencode-shell--status-display "Thinking"))
+       ('receiving (opencode-shell--status-display "Receiving"))
+       ('recovering (opencode-shell--status-display "Recovering"))
+       ('aborting (opencode-shell--status-display "Aborting"))
        ('error "Request state is uncertain; resync with g r\n\n")
-       (_ "Waiting for response…\n\n"))
+       (_ (opencode-shell--status-display "Waiting for response")))
                  'face (if (eq (opencode-shell--turn-status turn) 'error)
                            'opencode-shell-error-face 'opencode-shell-waiting-face))))
       (let ((response-end (point)))
@@ -1073,10 +1087,20 @@ Each retained session keeps its server-reported directory unchanged."
       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
               answer "\n\n")
     (propertize
-     (if (eq (opencode-shell--turn-status turn) 'error)
-         "Request failed\n\n" "Waiting for response…\n\n")
+     (pcase (opencode-shell--turn-status turn)
+       ('sending (opencode-shell--status-display "Sending"))
+       ('thinking (opencode-shell--status-display "Thinking"))
+       ('receiving (opencode-shell--status-display "Receiving"))
+       ('recovering (opencode-shell--status-display "Recovering"))
+       ('aborting (opencode-shell--status-display "Aborting"))
+       ('error "Request failed\n\n")
+       (_ (opencode-shell--status-display "Waiting for response")))
      'face (if (eq (opencode-shell--turn-status turn) 'error)
-               'opencode-shell-error-face 'opencode-shell-waiting-face))))
+                'opencode-shell-error-face 'opencode-shell-waiting-face))))
+
+(defun opencode-shell--status-display (label)
+  "Return LABEL with the current history-poll heartbeat."
+  (format "%s %s\n\n" label (make-string (1+ (% opencode-shell--poll-heartbeat 3)) ?·)))
 
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
@@ -1139,7 +1163,9 @@ Each retained session keeps its server-reported directory unchanged."
     (when sequence (setq opencode-shell--message-applied-sequence sequence))
     (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
     (setq opencode-shell--request-status
-        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
+        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'thinking))
+                         opencode-shell--turns) "thinking")
+              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
                          opencode-shell--turns) "receiving")
               ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'recovering))
                          opencode-shell--turns) "recovering")
@@ -1161,7 +1187,7 @@ Each retained session keeps its server-reported directory unchanged."
   "Complete the active receiving turn when server status is idle."
   (when (equal (opencode-shell--status opencode-shell--session-id) "idle")
     (when-let ((turn (car (last opencode-shell--turns))))
-      (when (and (eq (opencode-shell--turn-status turn) 'receiving)
+      (when (and (memq (opencode-shell--turn-status turn) '(thinking receiving))
                  (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
                      (opencode-shell--turn-parts turn)))
         (setf (opencode-shell--turn-status turn) 'complete)
@@ -1220,6 +1246,8 @@ Each retained session keeps its server-reported directory unchanged."
   "Fully resync transcript, status, models, agents, and pending state."
   (interactive (list t))
   (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
+    (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
+    (when opencode-shell--turns (opencode-shell--render-turns))
     (opencode-shell--guarded-request
      'messages
      "GET" (format "/session/%s/message" opencode-shell--session-id)

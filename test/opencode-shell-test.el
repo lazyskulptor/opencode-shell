@@ -551,6 +551,33 @@
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
       (should (equal opencode-shell--request-status "receiving")))))
 
+(ert-deftest opencode-shell-reasoning-only-response-is-thinking ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "r1") (type . "reasoning") (text . "thinking")))))))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'thinking))
+    (should (equal opencode-shell--request-status "thinking"))))
+
+(ert-deftest opencode-shell-history-poll-advances-buffer-local-heartbeat ()
+  (let ((first (generate-new-buffer " *heartbeat-1*"))
+        (second (generate-new-buffer " *heartbeat-2*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
+          (with-current-buffer first
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "s")
+            (dotimes (_ 4) (opencode-shell--resync))
+            (should (= opencode-shell--poll-heartbeat 1))
+            (should (equal (opencode-shell--status-display "Waiting") "Waiting ··\n\n")))
+          (with-current-buffer second
+            (opencode-shell-mode)
+            (should (= opencode-shell--poll-heartbeat 0))))
+      (kill-buffer first)
+      (kill-buffer second))))
+
 (ert-deftest opencode-shell-idle-status-completes-text-response-without-finish-part ()
   (with-temp-buffer
     (opencode-shell-mode)

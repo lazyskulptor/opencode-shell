@@ -72,6 +72,9 @@ Each prompt carries a stable message ID. Periodic history polling is the sole
 transcript data path and reconciles responses without deleting known history.
 The transcript shows stable sending, waiting, receiving, recovering, aborting,
 or error state and never replaces an already completed response with stale data.
+Pending status cycles `·`, `··`, `···` once per message-history poll. Reasoning-only
+updates show `Thinking`; text or tool activity shows `Receiving`. The dots indicate
+polling activity, not estimated progress.
 Model completion is limited to providers reported as connected by the server;
 agent completion shows only server-advertised visible primary agents.
 `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question

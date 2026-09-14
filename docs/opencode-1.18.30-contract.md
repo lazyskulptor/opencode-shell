@@ -29,3 +29,7 @@ Aider concepts.
 The client deliberately uses `/session/:id/message` polling as its only
 transcript data path. It does not require `/event`; stable message identities and
 monotonic history reconciliation provide recovery after request interruption.
+
+A session may be absent from `/session/status` while its history still contains an
+assistant message with a running tool and no `step-finish`. This is not completion:
+the client keeps the turn active and exposes the authoritative reasoning/tool phase.
