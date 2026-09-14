@@ -373,6 +373,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
 (defvar-local opencode-shell--permission-sending nil)
+(defvar-local opencode-shell--resolved-permissions nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
 
@@ -1009,6 +1010,12 @@ Each retained session keeps its server-reported directory unchanged."
       (when (looking-back "Prompt> " (line-beginning-position))
         (delete-region (- (point) (length "Prompt> ")) (point)))
       (set-marker opencode-shell--permission-begin (point))
+      (dolist (resolved opencode-shell--resolved-permissions)
+        (insert (propertize
+                 (format "PERMISSION %s: %s\n"
+                         (upcase (cdr resolved)) (car resolved))
+                 'font-lock-face 'shadow
+                 'read-only t 'rear-nonsticky '(read-only face))))
       (dolist (item opencode-shell--permissions)
         (let ((begin (point)))
           (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
@@ -1438,7 +1445,10 @@ Each retained session keeps its server-reported directory unchanged."
     (opencode-shell--request
      "POST" (format "/permission/%s/reply" id)
      (lambda (_)
-       (setq opencode-shell--permission-sending nil
+       (setq opencode-shell--resolved-permissions
+             (append opencode-shell--resolved-permissions
+                     (list (cons (opencode-shell--permission-description item) reply)))
+             opencode-shell--permission-sending nil
              opencode-shell--permissions
              (seq-remove (lambda (entry)
                            (equal id (opencode-shell--get entry 'id)))

@@ -306,6 +306,7 @@
         (should-error (opencode-shell--permission-reject) :type 'user-error)
         (funcall callback nil)
         (should-not opencode-shell--permissions)
+        (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
         (should (equal (opencode-shell--composer-text) "draft"))))))
 
 (ert-deftest opencode-shell-polling-generation-and-capabilities ()
