@@ -16,6 +16,11 @@
 | `GET` | `/agent` | List agents |
 | `GET` | `/permission` | List pending permissions |
 | `POST` | `/permission/:id/reply` | Answer a permission request |
+
+Permission list snapshots may overlap reply callbacks. The client therefore keys
+pending and resolved state by permission `id`, treats duplicate snapshots and
+callbacks idempotently, and does not declare an active response ready while a
+permission is pending or its reply is in flight.
 | `GET` | `/question` | List pending questions |
 | `POST` | `/question/:id/reply` | Answer a question |
 | `POST` | `/question/:id/reject` | Reject a question |
