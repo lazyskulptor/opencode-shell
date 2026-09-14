@@ -464,6 +464,19 @@
     (should-not opencode-shell--capabilities-loading)
     (should (= opencode-shell--generation 5))))
 
+(ert-deftest opencode-shell-private-mode-commands-are-hidden-from-completion ()
+  (dolist (command opencode-shell--mode-commands)
+    (should (commandp command))
+    (should-not (funcall (get command 'completion-predicate) command nil)))
+  (dolist (command '(opencode-shell opencode-shell-status
+                     opencode-shell-restart opencode-shell-reload))
+    (should (commandp command))
+    (should-not (get command 'completion-predicate)))
+  (should (eq (lookup-key opencode-shell-sessions-mode-map (kbd "RET"))
+              'opencode-shell--open-at-point))
+  (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c"))
+              'opencode-shell--submit)))
+
 (defun opencode-shell-test--message (id role text &optional parent)
   "Build a minimal message envelope for conversation tests."
   `((info . ((id . ,id) (role . ,role) ,@(and parent `((parentID . ,parent)))))

@@ -51,6 +51,17 @@ and lifecycle keys."
 
 (defvar opencode-shell--servers (make-hash-table :test #'equal))
 (defvar opencode-shell--generated-profile-commands nil)
+(defconst opencode-shell--mode-commands
+  '(opencode-shell--refresh opencode-shell--filter
+    opencode-shell--filter-directory opencode-shell--show-all-sessions
+    opencode-shell--create-session opencode-shell--open-at-point
+    opencode-shell--delete-session opencode-shell--resync
+    opencode-shell--select-model opencode-shell--select-agent
+    opencode-shell--submit opencode-shell--abort opencode-shell--permissions
+    opencode-shell--permission-allow-once
+    opencode-shell--permission-allow-always
+    opencode-shell--permission-reject opencode-shell--questions)
+  "Private interactive commands used only by OpenCode mode maps.")
 (defvar-local opencode-shell--profile nil)
 (defvar-local opencode-shell--base-url nil)
 (defvar-local opencode-shell--workspace nil)
@@ -1640,6 +1651,9 @@ When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
     (message "Reloaded OpenCode Shell")))
 
 (opencode-shell--register-profile-commands)
+
+(dolist (command opencode-shell--mode-commands)
+  (put command 'completion-predicate #'ignore))
 
 (with-eval-after-load 'evil
   (opencode-shell--setup-evil)
