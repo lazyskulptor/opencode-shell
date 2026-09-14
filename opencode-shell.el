@@ -1609,7 +1609,8 @@ auto-started."
       (opencode-shell--sessions nil profile))))
 
 (defun opencode-shell--open-profile (profile &optional directory server-wide)
-  "Open PROFILE's session browser, optionally scoped to DIRECTORY."
+  "Open PROFILE's session browser, optionally scoped to DIRECTORY.
+When SERVER-WIDE is non-nil, do not infer a filter from `default-directory'."
   (interactive (list (opencode-shell--read-profile) nil))
   (setq profile (or (opencode-shell--resolve-profile profile) profile))
   (let ((directory (unless server-wide (or directory default-directory))))
