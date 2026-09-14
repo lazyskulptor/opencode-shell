@@ -14,8 +14,11 @@
                             ((info . ((id . ,(format "a%d" n))
                                       (role . "assistant")
                                       (parentID . ,(format "u%d" n))))
-                             (parts . (((type . "text")
-                                        (text . ,(format "응답 %d" n))))))))))
+                             (parts . (((id . ,(format "a%d-text" n))
+                                        (type . "text")
+                                        (text . ,(format "응답 %d" n)))
+                                       ((id . ,(format "a%d-finish" n))
+                                        (type . "step-finish")))))))))
 
 (ert-deftest opencode-shell-acceptance-ten-turn-conversation ()
   (with-temp-buffer

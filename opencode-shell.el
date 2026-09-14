@@ -837,7 +837,44 @@ Each retained session keeps its server-reported directory unchanged."
                    (mapcar (lambda (part)
                              (when (equal (format "%s" (opencode-shell--get part 'type)) "text")
                                (opencode-shell--get part 'text)))
-                           (opencode-shell--get envelope 'parts))) ""))
+                            (opencode-shell--get envelope 'parts))) ""))
+
+(defun opencode-shell--part-id (part)
+  "Return PART's stable identity, when available."
+  (or (opencode-shell--get part 'id)
+      (opencode-shell--get part 'callID)
+      (opencode-shell--get part 'callId)))
+
+(defun opencode-shell--merge-parts (known incoming)
+  "Merge INCOMING message parts into KNOWN without dropping omitted parts."
+  (let ((result (copy-sequence known)))
+    (dolist (part incoming)
+      (let* ((id (opencode-shell--part-id part))
+             (cell (and id (seq-find (lambda (known-part)
+                                       (equal id (opencode-shell--part-id known-part)))
+                                     result))))
+        (if cell
+            (setcar (memq cell result) part)
+          (setq result (append result (list part))))))
+    result))
+
+(defun opencode-shell--merge-envelope (known incoming)
+  "Merge partial assistant envelope INCOMING into KNOWN."
+  (let ((merged (copy-tree incoming)))
+    (setf (alist-get 'parts merged)
+          (opencode-shell--merge-parts (opencode-shell--get known 'parts)
+                                       (opencode-shell--get incoming 'parts)))
+    merged))
+
+(defun opencode-shell--terminal-part-p (part)
+  "Return non-nil when PART authoritatively ends an assistant turn."
+  (let ((type (format "%s" (opencode-shell--get part 'type)))
+        (status (format "%s" (or (opencode-shell--get
+                                   (opencode-shell--get part 'state) 'status)
+                                  (opencode-shell--get part 'status) ""))))
+    (or (equal type "step-finish")
+        (and (member type '("tool" "tool_use" "tool-result"))
+             (member status '("completed" "error"))))))
 
 (defun opencode-shell--turn-by-server-id (id turns)
   "Find the turn with server user ID ID in TURNS."
@@ -886,8 +923,8 @@ Each retained session keeps its server-reported directory unchanged."
             (when turn
               (let* ((messages (opencode-shell--turn-assistant-messages turn))
                      (entry (assoc id messages)))
-                (if entry (setcdr entry envelope)
-                  (setq messages (append messages (list (cons id envelope)))))
+                 (if entry (setcdr entry (opencode-shell--merge-envelope (cdr entry) envelope))
+                   (setq messages (append messages (list (cons id envelope)))))
                 (setf (opencode-shell--turn-assistant-messages turn) messages
                       (opencode-shell--turn-parts turn)
                       (apply #'append (mapcar (lambda (item)
@@ -897,12 +934,9 @@ Each retained session keeps its server-reported directory unchanged."
                       (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
                                  messages "")
                       (opencode-shell--turn-status turn)
-                      (if (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
-                              (seq-some (lambda (part)
-                                          (member (format "%s" (opencode-shell--get part 'type))
-                                                  '("step-finish" "tool" "reasoning")))
-                                        (opencode-shell--turn-parts turn)))
-                          'complete 'waiting)))))))))
+                       (if (seq-some #'opencode-shell--terminal-part-p
+                                    (opencode-shell--turn-parts turn))
+                           'complete 'receiving)))))))))
     (setq observed (nreverse observed))
     (let ((result (copy-sequence old)))
       (dolist (turn observed)
@@ -1098,12 +1132,22 @@ Each retained session keeps its server-reported directory unchanged."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
     (when sequence (setq opencode-shell--message-applied-sequence sequence))
     (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
-  (setq opencode-shell--request-status
-        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
+    (setq opencode-shell--request-status
+        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
+                         opencode-shell--turns) "receiving")
+              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'recovering))
+                         opencode-shell--turns) "recovering")
+              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
                          opencode-shell--turns) "waiting")
               ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
                          opencode-shell--turns) "error")
-              (t "idle")))
+               (t "idle")))
+    (unless (seq-find (lambda (turn)
+                        (and (equal opencode-shell--submit-in-flight
+                                    (opencode-shell--turn-id turn))
+                             (not (eq (opencode-shell--turn-status turn) 'complete))))
+                      opencode-shell--turns)
+      (setq opencode-shell--submit-in-flight nil))
     (opencode-shell--render-turns)
     (force-mode-line-update)))
 
@@ -1237,15 +1281,13 @@ Each retained session keeps its server-reported directory unchanged."
       (force-mode-line-update)
        (opencode-shell--request
         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
-       (lambda (_)
-         (setq opencode-shell--submit-in-flight nil)
+        (lambda (_)
          (setf (opencode-shell--turn-status turn) 'waiting)
          (opencode-shell--render-turns)
          (opencode-shell--resync))
         (cons `(messageID . ,(opencode-shell--turn-id turn))
               (opencode-shell--prompt-body text)) nil
-       (lambda ()
-         (setq opencode-shell--submit-in-flight nil)
+        (lambda ()
          (setf (opencode-shell--turn-status turn) 'recovering)
          (setq opencode-shell--request-status "recovering")
          (opencode-shell--render-turns)
@@ -1261,7 +1303,9 @@ Each retained session keeps its server-reported directory unchanged."
       (setf (opencode-shell--turn-status turn) 'aborting)
       (opencode-shell--render-turns)))
   (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
-                            (lambda (_) (opencode-shell--resync)) '()))
+                            (lambda (_)
+                              (setq opencode-shell--submit-in-flight nil)
+                              (opencode-shell--resync)) '()))
 
 (defun opencode-shell--choose-pending (kind callback)
   "Fetch pending KIND and invoke CALLBACK with the selected object."

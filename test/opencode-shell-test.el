@@ -481,12 +481,15 @@
 (defun opencode-shell-test--message (id role text &optional parent)
   "Build a minimal message envelope for conversation tests."
   `((info . ((id . ,id) (role . ,role) ,@(and parent `((parentID . ,parent)))))
-    (parts . (((type . "text") (text . ,text))))))
+    (parts . (((id . ,(concat id "-text")) (type . "text") (text . ,text))
+              ,@(and (equal role "assistant")
+                     `(((id . ,(concat id "-finish")) (type . "step-finish"))))))))
 
-(defun opencode-shell-test--tool-message (id parent)
+(defun opencode-shell-test--tool-message (id parent &optional status)
   "Build a tool-only assistant envelope for conversation tests."
   `((info . ((id . ,id) (role . "assistant") (parentID . ,parent)))
-    (parts . (((type . "tool") (tool . "read"))))))
+    (parts . (((id . ,(concat id "-tool")) (type . "tool") (tool . "read")
+               (state . ((status . ,(or status "completed")))))))))
 
 (ert-deftest opencode-shell-reconciles-identical-local-prompts-in-order ()
   (with-temp-buffer
@@ -518,6 +521,35 @@
              (opencode-shell-test--message "a2" "assistant" "answer" "u1")))
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
       (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer")))))
+
+(ert-deftest opencode-shell-partial-assistant-update-retains-known-parts ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((user (opencode-shell-test--message "u1" "user" "question"))
+           (initial '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                      (parts . (((id . "p1") (type . "text") (text . "answer"))
+                                ((id . "p2") (type . "tool") (tool . "read")
+                                 (state . ((status . "running"))))))))
+           (partial '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                      (parts . (((id . "p2") (type . "tool") (tool . "read")
+                                 (state . ((status . "completed")))))))))
+      (opencode-shell--render-messages (list user initial) 1)
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
+      (opencode-shell--render-messages (list user partial) 2)
+      (let ((turn (car opencode-shell--turns)))
+        (should (equal (opencode-shell--turn-assistant turn) "answer"))
+        (should (= (length (opencode-shell--turn-parts turn)) 2))
+        (should (eq (opencode-shell--turn-status turn) 'complete))))))
+
+(ert-deftest opencode-shell-partial-text-does-not-complete-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user (opencode-shell-test--message "u1" "user" "question"))
+          (partial '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                     (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+      (opencode-shell--render-messages (list user partial))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
+      (should (equal opencode-shell--request-status "receiving")))))
 
 (ert-deftest opencode-shell-composer-boundary-is-multiline-and-transcript-read-only ()
   (with-temp-buffer
@@ -568,7 +600,9 @@
         (should (equal (opencode-shell--turn-user (car opencode-shell--turns)) "hello\nworld"))
         (should (eq (get-text-property (point-min) 'read-only) t))
         (funcall failure)
-        (should (string-empty-p (opencode-shell--composer-text)))
+        (insert "retry")
+        (should-error (opencode-shell--submit) :type 'user-error)
+        (should (equal (opencode-shell--composer-text) "retry"))
         (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'recovering))
         (should (equal opencode-shell--request-status "recovering"))))))
 
