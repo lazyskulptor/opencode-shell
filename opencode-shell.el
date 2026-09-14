@@ -412,6 +412,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--permission-end nil)
 (defvar-local opencode-shell--permission-sending nil)
 (defvar-local opencode-shell--resolved-permissions nil)
+(defvar-local opencode-shell--permission-refresh-pending nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
 
@@ -1150,8 +1151,26 @@ Each retained session keeps its server-reported directory unchanged."
     (unless (equal draft (opencode-shell--composer-text))
       (error "Permission rendering changed composer text"))))
 
+(defun opencode-shell--refresh-permissions ()
+  "Fetch the current `/permission' snapshot outside the normal poll cadence.
+Defers to `opencode-shell--permission-refresh-pending' when a `/permission'
+request is already in flight, so the deferred fetch still runs once that
+request settles."
+  (if (alist-get 'permissions opencode-shell--in-flight)
+      (setq opencode-shell--permission-refresh-pending t)
+    (opencode-shell--guarded-request
+     'permissions "GET" "/permission" #'opencode-shell--receive-permissions
+     nil #'opencode-shell--consume-permission-refresh-pending)))
+
+(defun opencode-shell--consume-permission-refresh-pending ()
+  "Reissue a `/permission' fetch deferred while one was already in flight."
+  (when opencode-shell--permission-refresh-pending
+    (setq opencode-shell--permission-refresh-pending nil)
+    (opencode-shell--refresh-permissions)))
+
 (defun opencode-shell--receive-permissions (items)
   "Store session-scoped permission ITEMS and update their display."
+  (opencode-shell--consume-permission-refresh-pending)
   (setq opencode-shell--permissions
         (seq-remove
          (lambda (item)
@@ -1427,7 +1446,8 @@ Each retained session keeps its server-reported directory unchanged."
      (setq opencode-shell--session-status statuses)
      (opencode-shell--complete-idle-turn)))
   (opencode-shell--guarded-request
-   'permissions "GET" "/permission" #'opencode-shell--receive-permissions)
+   'permissions "GET" "/permission" #'opencode-shell--receive-permissions
+   nil #'opencode-shell--consume-permission-refresh-pending)
   (when (and (or capabilities (not opencode-shell--capabilities-loaded))
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
@@ -1596,18 +1616,21 @@ Each retained session keeps its server-reported directory unchanged."
                                (description . ,(opencode-shell--permission-description item)))))))
        (when (equal opencode-shell--permission-sending id)
          (setq opencode-shell--permission-sending nil))
-       (setq opencode-shell--permissions
-             (seq-remove (lambda (entry)
-                           (equal id (opencode-shell--permission-id entry)))
-                         opencode-shell--permissions))
-       (unless (opencode-shell--permission-blocked-p)
-         (opencode-shell--resync))
-       (opencode-shell--render-permissions)
-       (message "Permission %s" reply))
+        (setq opencode-shell--permissions
+              (seq-remove (lambda (entry)
+                            (equal id (opencode-shell--permission-id entry)))
+                          opencode-shell--permissions))
+        (opencode-shell--refresh-permissions)
+        (unless (opencode-shell--permission-blocked-p)
+          (opencode-shell--resync))
+        (opencode-shell--render-permissions)
+        (message "Permission %s" reply))
      `((reply . ,reply)) nil
      (lambda ()
        (when (equal opencode-shell--permission-sending id)
-         (setq opencode-shell--permission-sending nil))))))
+         (setq opencode-shell--permission-sending nil))
+       (opencode-shell--refresh-permissions)
+       (message "Permission reply failed; refreshing pending permissions")))))
 
 (defun opencode-shell--permission-allow-once ()
   "Allow the inline permission once."

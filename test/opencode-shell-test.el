@@ -388,6 +388,82 @@
          (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
          (should (equal (opencode-shell--composer-text) "draft"))))))
 
+(ert-deftest opencode-shell-reply-success-refreshes-permissions-even-when-blocked ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash") (patterns . ("first")))
+       ((id . "p2") (sessionID . "s") (permission . "bash") (patterns . ("second")))))
+    (let (paths)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (push path paths)
+                   (when (equal path "/permission/p1/reply") (funcall callback nil)))))
+        (goto-char opencode-shell--permission-begin)
+        (opencode-shell--permission-allow-once)
+        (should (member "/permission" paths))))))
+
+(ert-deftest opencode-shell-reply-defers-refresh-when-permission-poll-in-flight ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--in-flight '((permissions . t)))
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash") (patterns . ("first")))))
+    (let (paths)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (push path paths)
+                   (when (equal path "/permission/p1/reply") (funcall callback nil)))))
+        (goto-char opencode-shell--permission-begin)
+        (opencode-shell--permission-allow-once)
+        (should-not (member "/permission" paths))
+        (should opencode-shell--permission-refresh-pending)
+        (setf (alist-get 'permissions opencode-shell--in-flight) nil)
+        (opencode-shell--receive-permissions nil)
+        (should (member "/permission" paths))
+        (should-not opencode-shell--permission-refresh-pending)))))
+
+(ert-deftest opencode-shell-reply-defers-refresh-until-failed-permission-poll-settles ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--in-flight '((permissions . t)))
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash") (patterns . ("first")))))
+    (let (paths)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (push path paths)
+                   (when (equal path "/permission/p1/reply") (funcall callback nil)))))
+        (goto-char opencode-shell--permission-begin)
+        (opencode-shell--permission-allow-once)
+        (should opencode-shell--permission-refresh-pending)
+        (setf (alist-get 'permissions opencode-shell--in-flight) nil)
+        (opencode-shell--consume-permission-refresh-pending)
+        (should (member "/permission" paths))
+        (should-not opencode-shell--permission-refresh-pending)))))
+
+(ert-deftest opencode-shell-reply-failure-refreshes-permissions-and-reports ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash") (patterns . ("first")))))
+    (let (paths reported)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path _callback &optional _body _params error-callback)
+                   (push path paths)
+                   (when (and error-callback (equal path "/permission/p1/reply"))
+                     (funcall error-callback))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
+        (goto-char opencode-shell--permission-begin)
+        (opencode-shell--permission-allow-once)
+        (should (member "/permission" paths))
+        (should (string-match-p "failed" reported))))))
+
 (ert-deftest opencode-shell-message-and-permission-renders-do-not-orphan-cards ()
   (with-temp-buffer
     (opencode-shell-mode)

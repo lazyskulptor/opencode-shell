@@ -30,7 +30,10 @@ request. `once` resolves one request; server-side `always` may resolve other
 matching same-session requests, while `reject` may remove all remaining requests
 in that session. Later snapshots remove those siblings from the local queue
 without synthetic result lines. Emacs sends `always` directly and leaves
-persistent matching to OpenCode.
+persistent matching to OpenCode. Every reply outcome, success or failure, immediately refetches `/permission`
+rather than waiting for the next poll tick, so implicitly settled siblings
+correct on screen sooner; if a `/permission` request is already in flight, the
+refetch is deferred until that request settles, whether it succeeds or fails.
 
 Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
