@@ -941,13 +941,26 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--terminal-part-p (part)
   "Return non-nil when PART authoritatively ends an assistant turn."
+  (equal (format "%s" (opencode-shell--get part 'type)) "step-finish"))
+
+(defun opencode-shell--running-tool-part-p (part)
+  "Return non-nil when PART describes an unsettled tool invocation."
   (let ((type (format "%s" (opencode-shell--get part 'type)))
         (status (format "%s" (or (opencode-shell--get
                                    (opencode-shell--get part 'state) 'status)
                                   (opencode-shell--get part 'status) ""))))
-    (or (equal type "step-finish")
-        (and (member type '("tool" "tool_use" "tool-result"))
-             (member status '("completed" "error"))))))
+    (and (member type '("tool" "tool_use" "tool-result"))
+         (not (member status '("completed" "error"))))))
+
+(defun opencode-shell--assistant-envelope-complete-p (envelope)
+  "Return non-nil when ENVELOPE contains authoritative completion evidence."
+  (let ((info (opencode-shell--get envelope 'info))
+        (parts (opencode-shell--get envelope 'parts)))
+    (and (not (seq-some #'opencode-shell--running-tool-part-p parts))
+         (or (seq-some #'opencode-shell--terminal-part-p parts)
+             (and (opencode-shell--get info 'finish)
+                  (opencode-shell--get (opencode-shell--get info 'time)
+                                       'completed))))))
 
 (defun opencode-shell--response-phase (turn)
   "Return the nonterminal response phase for TURN's authoritative parts."
@@ -1019,9 +1032,13 @@ Each retained session keeps its server-reported directory unchanged."
                       (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
                                  messages "")
                       (opencode-shell--turn-status turn)
-                       (if (seq-some #'opencode-shell--terminal-part-p
-                                    (opencode-shell--turn-parts turn))
-                           'complete (opencode-shell--response-phase turn))))))))))
+                       (if (and (seq-some (lambda (item)
+                                           (opencode-shell--assistant-envelope-complete-p
+                                            (cdr item)))
+                                         messages)
+                                (not (seq-some #'opencode-shell--running-tool-part-p
+                                               (opencode-shell--turn-parts turn))))
+                            'complete (opencode-shell--response-phase turn))))))))))
     (setq observed (nreverse observed))
     (let ((result (copy-sequence old)))
       (dolist (turn observed)

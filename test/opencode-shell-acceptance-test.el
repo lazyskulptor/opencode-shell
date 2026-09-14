@@ -13,12 +13,12 @@
                                         (text . ,(format "질문 %d" n))))))
                             ((info . ((id . ,(format "a%d" n))
                                       (role . "assistant")
-                                      (parentID . ,(format "u%d" n))))
+                                      (parentID . ,(format "u%d" n))
+                                      (finish . "stop")
+                                      (time . ((completed . ,n)))))
                              (parts . (((id . ,(format "a%d-text" n))
                                         (type . "text")
-                                        (text . ,(format "응답 %d" n)))
-                                       ((id . ,(format "a%d-finish" n))
-                                        (type . "step-finish")))))))))
+                                        (text . ,(format "응답 %d" n))))))))))
 
 (ert-deftest opencode-shell-acceptance-ten-turn-conversation ()
   (with-temp-buffer

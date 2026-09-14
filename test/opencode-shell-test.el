@@ -539,12 +539,12 @@
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c"))
               'opencode-shell--submit)))
 
-(defun opencode-shell-test--message (id role text &optional parent)
+(defun opencode-shell-test--message (id role text &optional parent incomplete)
   "Build a minimal message envelope for conversation tests."
-  `((info . ((id . ,id) (role . ,role) ,@(and parent `((parentID . ,parent)))))
-    (parts . (((id . ,(concat id "-text")) (type . "text") (text . ,text))
-              ,@(and (equal role "assistant")
-                     `(((id . ,(concat id "-finish")) (type . "step-finish"))))))))
+  `((info . ((id . ,id) (role . ,role) ,@(and parent `((parentID . ,parent)))
+             ,@(and (equal role "assistant") (not incomplete)
+                    '((finish . "stop") (time . ((completed . 2)))))))
+    (parts . (((id . ,(concat id "-text")) (type . "text") (text . ,text))))))
 
 (defun opencode-shell-test--tool-message (id parent &optional status)
   "Build a tool-only assistant envelope for conversation tests."
@@ -567,15 +567,15 @@
       (should (equal (mapcar #'opencode-shell--turn-server-user-id opencode-shell--turns)
                      '("u1" "u2"))))))
 
-(ert-deftest opencode-shell-tool-only-assistant-is-retained-as-complete ()
+(ert-deftest opencode-shell-completed-tool-alone-does-not-complete-turn ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((user (opencode-shell-test--message "u1" "user" "question")))
       (opencode-shell--render-messages
        (list user (opencode-shell-test--tool-message "a1" "u1")))
-      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
       (should (string-empty-p (opencode-shell--turn-assistant (car opencode-shell--turns))))
-      (should (equal opencode-shell--request-status "idle"))
+      (should (equal opencode-shell--request-status "receiving"))
       (opencode-shell--render-messages
        (list user
              (opencode-shell-test--tool-message "a1" "u1")
@@ -600,7 +600,30 @@
       (let ((turn (car opencode-shell--turns)))
         (should (equal (opencode-shell--turn-assistant turn) "answer"))
         (should (= (length (opencode-shell--turn-parts turn)) 2))
-        (should (eq (opencode-shell--turn-status turn) 'complete))))))
+        (should (eq (opencode-shell--turn-status turn) 'receiving))))))
+
+(ert-deftest opencode-shell-completion-metadata-waits-for-running-tool ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user (opencode-shell-test--message "u1" "user" "question"))
+          (assistant '((info . ((id . "a1") (role . "assistant")
+                                (parentID . "u1") (finish . "stop")
+                                (time . ((completed . 2)))))
+                       (parts . (((id . "p1") (type . "text") (text . "answer"))
+                                 ((id . "p2") (type . "tool") (tool . "read")
+                                  (state . ((status . "running")))))))))
+      (opencode-shell--render-messages (list user assistant))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving)))))
+
+(ert-deftest opencode-shell-step-finish-remains-terminal-evidence ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p1") (type . "text") (text . "answer"))
+                       ((id . "p2") (type . "step-finish")))))))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
 
 (ert-deftest opencode-shell-partial-text-does-not-complete-turn ()
   (with-temp-buffer
