@@ -749,7 +749,7 @@
     (opencode-shell--complete-idle-turn)
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))))
 
-(ert-deftest opencode-shell-idle-status-requires-two-polls-to-complete-text-response ()
+(ert-deftest opencode-shell-idle-status-never-completes-text-response ()
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
@@ -758,13 +758,15 @@
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "p1") (type . "text") (text . "answer")))))))
     (setq opencode-shell--session-status '((s . ((type . "idle"))))
-          opencode-shell--submit-in-flight "u1")
+          opencode-shell--submit-in-flight "u1"
+          opencode-shell--composer-visible nil)
     (opencode-shell--complete-idle-turn)
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
     (should opencode-shell--submit-in-flight)
     (opencode-shell--complete-idle-turn)
-    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-    (should-not opencode-shell--submit-in-flight)))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
+    (should opencode-shell--submit-in-flight)
+    (should-not opencode-shell--composer-visible)))
 
 (ert-deftest opencode-shell-permission-blocks-idle-completion-and-prompt ()
   (with-temp-buffer
@@ -783,6 +785,25 @@
     (should opencode-shell--submit-in-flight)
     (should-not opencode-shell--composer-visible)
     (should (= opencode-shell--idle-completion-count 0))))
+
+(ert-deftest opencode-shell-authoritative-completion-waits-for-permission-settlement ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--submit-in-flight "u1"
+          opencode-shell--composer-visible nil
+          opencode-shell--permissions '(((id . "p1") (sessionID . "s"))))
+    (let ((messages (list (opencode-shell-test--message "u1" "user" "question")
+                          (opencode-shell-test--message "a1" "assistant" "answer" "u1"))))
+      (opencode-shell--render-messages messages)
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (should opencode-shell--submit-in-flight)
+      (should-not opencode-shell--composer-visible)
+      (setq opencode-shell--permissions nil)
+      (opencode-shell--render-messages messages)
+      (should-not opencode-shell--submit-in-flight)
+      (should opencode-shell--composer-visible)
+      (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))))
 
 (ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
   (let* ((known '((id . "p1") (type . "tool") (tool . "read")

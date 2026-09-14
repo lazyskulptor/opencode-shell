@@ -1343,29 +1343,8 @@ Each retained session keeps its server-reported directory unchanged."
     (force-mode-line-update)))
 
 (defun opencode-shell--complete-idle-turn ()
-  "Complete the active response after two consecutive authoritative idle polls."
-  (let ((idle (and (opencode-shell--get opencode-shell--session-status
-                                         opencode-shell--session-id)
-                   (equal (opencode-shell--status opencode-shell--session-id) "idle"))))
-    (if (or (not idle) (opencode-shell--permission-blocked-p))
-        (setq opencode-shell--idle-completion-count 0)
-      (if-let ((turn (car (last opencode-shell--turns))))
-          (progn
-            (if (and (memq (opencode-shell--turn-status turn) '(thinking receiving))
-                 (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
-                     (opencode-shell--turn-parts turn)))
-                (cl-incf opencode-shell--idle-completion-count)
-              (setq opencode-shell--idle-completion-count 0))
-            (when (>= opencode-shell--idle-completion-count 2)
-              (setf (opencode-shell--turn-status turn) 'complete)
-              (setq opencode-shell--submit-in-flight nil
-                    opencode-shell--composer-visible t
-                    opencode-shell--idle-completion-count 0
-                    opencode-shell--request-status "idle")
-              (opencode-shell--render-turns)
-              (opencode-shell--stop-polling)
-              (force-mode-line-update)))
-        (setq opencode-shell--idle-completion-count 0)))))
+  "Record that idle status alone is not assistant completion evidence."
+  (setq opencode-shell--idle-completion-count 0))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
