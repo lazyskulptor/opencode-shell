@@ -625,6 +625,28 @@
                        ((id . "p2") (type . "step-finish")))))))
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
 
+(ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user (opencode-shell-test--message "u1" "user" "question"))
+          (complete (opencode-shell-test--message "a1" "assistant" "answer" "u1"))
+          (partial '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                     (parts . (((id . "a1-text") (type . "text")
+                                (text . "answer")))))))
+      (opencode-shell--render-messages (list user complete) 1)
+      (opencode-shell--render-messages (list user partial) 2)
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)))))
+
+(ert-deftest opencode-shell-later-assistant-envelope-must-be-complete ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user (opencode-shell-test--message "u1" "user" "question")))
+      (opencode-shell--render-messages
+       (list user
+             (opencode-shell-test--message "a1" "assistant" "first" "u1")
+             (opencode-shell-test--message "a2" "assistant" "second" "u1" t)))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving)))))
+
 (ert-deftest opencode-shell-partial-text-does-not-complete-turn ()
   (with-temp-buffer
     (opencode-shell-mode)

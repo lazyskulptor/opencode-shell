@@ -934,6 +934,9 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--merge-envelope (known incoming)
   "Merge partial assistant envelope INCOMING into KNOWN."
   (let ((merged (copy-tree incoming)))
+    (setf (alist-get 'info merged)
+          (opencode-shell--merge-alist (opencode-shell--get known 'info)
+                                       (opencode-shell--get incoming 'info)))
     (setf (alist-get 'parts merged)
           (opencode-shell--merge-parts (opencode-shell--get known 'parts)
                                        (opencode-shell--get incoming 'parts)))
@@ -1032,10 +1035,8 @@ Each retained session keeps its server-reported directory unchanged."
                       (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
                                  messages "")
                       (opencode-shell--turn-status turn)
-                       (if (and (seq-some (lambda (item)
-                                           (opencode-shell--assistant-envelope-complete-p
-                                            (cdr item)))
-                                         messages)
+                       (if (and (opencode-shell--assistant-envelope-complete-p
+                                 (cdar (last messages)))
                                 (not (seq-some #'opencode-shell--running-tool-part-p
                                                (opencode-shell--turn-parts turn))))
                             'complete (opencode-shell--response-phase turn))))))))))
