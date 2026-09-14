@@ -93,13 +93,15 @@ agent completion shows only server-advertised visible primary agents.
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
 
-Pending permissions appear in a boxed read-only block above `Prompt>`. Use
+Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
 `C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`
-to allow once, `C-c C-l` to always allow after confirmation, or `C-c C-n` to
+to allow once, `C-c C-l` to always allow, or `C-c C-n` to
 reject. The request context remains visible and the composer draft is preserved.
 Permission IDs are authoritative: repeated server snapshots and reply callbacks
 do not duplicate a box or resolved result. Distinct pending IDs remain separately
-actionable. During an active response, `Prompt>` stays hidden and polling continues
+queued. A reply replaces the current card with its result and advances to the next
+pending card. Persistent `always` matching is delegated to OpenCode without an
+additional Emacs confirmation. During an active response, `Prompt>` stays hidden and polling continues
 until both the assistant response and every permission request are settled.
 
 The session buffer uses normal text editing rather than `special-mode`. Only the
