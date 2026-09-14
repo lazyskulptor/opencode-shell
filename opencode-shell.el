@@ -636,18 +636,11 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
 
-(defun opencode-shell-create-session (title)
-  "Create a session named TITLE and open it."
-  (interactive "sSession title: ")
-  (let ((directory opencode-shell--directory)
-        (profile opencode-shell--profile))
-    (opencode-shell--request
-     "POST" "/session"
-     (lambda (session)
-       (if profile
-           (opencode-shell-open-session (opencode-shell--get session 'id) directory profile)
-         (opencode-shell-open-session (opencode-shell--get session 'id) directory)))
-     `((title . ,title)))))
+(defun opencode-shell-create-session ()
+  "Choose a directory and create a session for the browser's server."
+  (interactive)
+  (opencode-shell--start-session
+   (or opencode-shell--profile (opencode-shell--default-profile))))
 
 (defun opencode-shell-open-at-point ()
   "Open the session at point."

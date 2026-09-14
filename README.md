@@ -57,10 +57,10 @@ owned process; use the explicit restart command to replace it.
 
 ## Commands
 
-The session browser queries the active profile's `:session-list-directory`, so
-it shows that server's sessions across project directories regardless of the
-current buffer. Its `p` directory filter and `/` text filter are view-only;
-`A` clears both. Use `g` refresh, `c` create, `RET` open, and `d` confirmed
+The session browser omits directory scope and shows the active server's sessions
+across project directories regardless of the current buffer. Its `p` directory
+filter and `/` text filter are view-only; `A` clears both. Use `g` refresh,
+`c` to choose a directory and create, `RET` open, and `d` confirmed
 delete. `RET` uses the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
 and status requests. A transcript buffer has a multiline composer after

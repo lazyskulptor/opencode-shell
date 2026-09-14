@@ -50,18 +50,14 @@
         (opencode-shell-open-at-point)
         (should (equal opened '("s1" "/scope/exact")))))))
 
-(ert-deftest opencode-shell-create-session-captures-explicit-directory ()
+(ert-deftest opencode-shell-browser-create-reuses-start-session-flow ()
   (with-temp-buffer
-    (setq-local opencode-shell--directory "/scope/origin")
-    (let (callback opened)
-      (cl-letf (((symbol-function 'opencode-shell--request)
-                 (lambda (_method _path cb &rest _) (setq callback cb)))
-                ((symbol-function 'opencode-shell-open-session)
-                 (lambda (id directory) (setq opened (list id directory)))))
-        (opencode-shell-create-session "New")
-        (setq-local opencode-shell--directory "/scope/changed")
-        (funcall callback '((id . "created")))
-        (should (equal opened '("created" "/scope/origin")))))))
+    (setq-local opencode-shell--profile opencode-shell-test--remote-profile)
+    (let (started)
+      (cl-letf (((symbol-function 'opencode-shell--start-session)
+                 (lambda (profile) (setq started profile))))
+        (opencode-shell-create-session)
+        (should (equal started opencode-shell-test--remote-profile))))))
 
 (ert-deftest opencode-shell-start-session-reads-directory-and-creates-titleless-session ()
   (let ((profile opencode-shell-test--local-profile) created)
@@ -686,14 +682,13 @@
 (defconst opencode-shell-test--local-profile
   '(:name "local" :base-url "http://127.0.0.1:7777/"
     :directory "/client/project" :workspace "/server/project"
-    :session-list-directory "/home/local"
     :start-command ("opencode" "serve") :server-directory "/tmp"
     :startup-timeout 2 :auth-source (:host "localhost" :port 7777)))
 
 (defconst opencode-shell-test--remote-profile
   '(:name "remote" :base-url "https://code.example.test"
     :directory "/ssh:code.example.test:/srv/project"
-    :workspace "/srv/project" :session-list-directory "/home/remote"
+    :workspace "/srv/project"
     :start-command ("opencode" "serve")))
 
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
@@ -863,8 +858,7 @@
 
 (ert-deftest opencode-shell-broad-profile-launch-scopes-request-and-buffers ()
   (let* ((profile '(:name "workspace" :base-url "http://127.0.0.1:4096"
-                     :directory "/Workspace" :workspace "/server/Workspace"
-                     :session-list-directory "/home/user"))
+                      :directory "/Workspace" :workspace "/server/Workspace"))
          (default-directory "/Workspace/personal/translator/")
          requests buffers)
     (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
