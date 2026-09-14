@@ -349,6 +349,10 @@ and lifecycle keys."
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--poll-timer nil)
+(defvar-local opencode-shell--event-process nil)
+(defvar-local opencode-shell--event-buffer "")
+(defvar-local opencode-shell--event-reconnect-timer nil)
+(defvar-local opencode-shell--event-reconnect-attempt 0)
 (defvar-local opencode-shell--generation 0)
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
@@ -359,6 +363,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
 (defvar-local opencode-shell--request-status "idle")
+(defvar-local opencode-shell--message-request-sequence 0)
+(defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
@@ -385,7 +391,7 @@ and lifecycle keys."
   "Face for pending permission requests." :group 'opencode-shell)
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
-  id server-user-id user assistant parts status user-begin user-end
+  id server-user-id user assistant parts status acknowledged user-begin user-end
   response-begin response-end)
 
 (defun opencode-shell--get (object key)
@@ -776,7 +782,13 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--cleanup ()
   "Cancel this buffer's timer and invalidate outstanding callbacks."
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
+  (when (timerp opencode-shell--event-reconnect-timer)
+    (cancel-timer opencode-shell--event-reconnect-timer))
+  (when (process-live-p opencode-shell--event-process)
+    (delete-process opencode-shell--event-process))
   (setq opencode-shell--poll-timer nil)
+  (setq opencode-shell--event-process nil
+        opencode-shell--event-reconnect-timer nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
   (cl-incf opencode-shell--generation))
@@ -809,6 +821,7 @@ Each retained session keeps its server-reported directory unchanged."
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
       (opencode-shell--resync t)
+      (opencode-shell--event-connect)
       (setq opencode-shell--poll-timer
             (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
                          (lambda (target)
@@ -862,10 +875,11 @@ Each retained session keeps its server-reported directory unchanged."
                            (opencode-shell--make-turn
                             :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter)))))))
             (setf (opencode-shell--turn-server-user-id turn) id
+                  (opencode-shell--turn-acknowledged turn) t
                   (opencode-shell--turn-user turn) text
-                  (opencode-shell--turn-assistant turn) nil
                   (opencode-shell--turn-parts turn) nil
-                  (opencode-shell--turn-status turn) 'waiting)
+                  (opencode-shell--turn-status turn)
+                  (if (opencode-shell--turn-assistant turn) 'complete 'waiting))
             (setq current turn)
             (push turn used)
             (push turn result)))
@@ -876,9 +890,8 @@ Each retained session keeps its server-reported directory unchanged."
             (when turn
               (setf (opencode-shell--turn-parts turn) (opencode-shell--get envelope 'parts))
               (unless (string-empty-p text)
-                (setf (opencode-shell--turn-assistant turn)
-                      (concat (or (opencode-shell--turn-assistant turn) "") text)
-                      (opencode-shell--turn-status turn) 'complete))))))))
+                 (setf (opencode-shell--turn-assistant turn) text
+                       (opencode-shell--turn-status turn) 'complete))))))))
     (setq result (nreverse result))
     (dolist (turn old)
       (when (and (null (opencode-shell--turn-server-user-id turn))
@@ -971,8 +984,13 @@ Each retained session keeps its server-reported directory unchanged."
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
                   answer "\n\n")
         (insert (propertize
-                 (if (eq (opencode-shell--turn-status turn) 'error)
-                     "Request failed\n\n" "Waiting for response…\n\n")
+     (pcase (opencode-shell--turn-status turn)
+       ('sending "Sending prompt…\n\n")
+       ('receiving "Receiving response…\n\n")
+       ('recovering "Recovering response from server history…\n\n")
+       ('aborting "Aborting response…\n\n")
+       ('error "Request state is uncertain; resync with g r\n\n")
+       (_ "Waiting for response…\n\n"))
                  'face (if (eq (opencode-shell--turn-status turn) 'error)
                            'opencode-shell-error-face 'opencode-shell-waiting-face))))
       (let ((response-end (point)))
@@ -1064,17 +1082,19 @@ Each retained session keeps its server-reported directory unchanged."
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
       (goto-char (min old-point opencode-shell--transcript-end)))))
 
-(defun opencode-shell--render-messages (messages)
+(defun opencode-shell--render-messages (messages &optional sequence)
   "Reconcile and render chronological message envelopes from MESSAGES."
-  (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+  (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
+    (when sequence (setq opencode-shell--message-applied-sequence sequence))
+    (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
   (setq opencode-shell--request-status
         (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
                          opencode-shell--turns) "waiting")
               ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
                          opencode-shell--turns) "error")
               (t "idle")))
-  (opencode-shell--render-turns)
-  (force-mode-line-update))
+    (opencode-shell--render-turns)
+    (force-mode-line-update)))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
@@ -1091,7 +1111,93 @@ Each retained session keeps its server-reported directory unchanged."
        (lambda ()
          (when (= generation opencode-shell--generation)
            (setf (alist-get key opencode-shell--in-flight) nil)
-           (when error-callback (funcall error-callback))))))))
+            (when error-callback (funcall error-callback))))))))
+
+(defun opencode-shell--event-relevant-p (event)
+  "Return non-nil when EVENT can affect the current session."
+  (let* ((properties (opencode-shell--get event 'properties))
+         (session (or (opencode-shell--get properties 'sessionID)
+                      (opencode-shell--get properties 'sessionId)
+                      (opencode-shell--get (opencode-shell--get properties 'info) 'sessionID)
+                      (opencode-shell--get (opencode-shell--get properties 'part) 'sessionID))))
+    (or (equal (opencode-shell--get event 'type) "server.connected")
+        (equal session opencode-shell--session-id))))
+
+(defun opencode-shell--event-dispatch (payload)
+  "Handle one decoded SSE PAYLOAD as a reconciliation trigger."
+  (condition-case nil
+      (let ((event (json-parse-string payload :object-type 'alist
+                                      :array-type 'list :null-object nil
+                                      :false-object nil)))
+        (when (opencode-shell--event-relevant-p event)
+          (setq opencode-shell--event-reconnect-attempt 0)
+          (unless (equal (opencode-shell--get event 'type) "server.connected")
+            (setq opencode-shell--request-status "receiving"))
+          (opencode-shell--resync)))
+    (json-parse-error nil)))
+
+(defun opencode-shell--event-filter (_process chunk)
+  "Incrementally parse SSE CHUNK without assuming frame boundaries."
+  (setq opencode-shell--event-buffer (concat opencode-shell--event-buffer chunk))
+  (let ((separator "\r?\n\r?\n") frame)
+    (while (string-match separator opencode-shell--event-buffer)
+      (setq frame (substring opencode-shell--event-buffer 0 (match-beginning 0))
+            opencode-shell--event-buffer
+            (substring opencode-shell--event-buffer (match-end 0)))
+      (let ((data (mapconcat
+                   (lambda (line) (string-remove-prefix "data:" line))
+                   (seq-filter (lambda (line) (string-prefix-p "data:" line))
+                               (split-string frame "\r?\n"))
+                   "\n")))
+        (unless (string-empty-p data)
+          (opencode-shell--event-dispatch (string-trim-left data)))))))
+
+(defun opencode-shell--event-schedule-reconnect ()
+  "Schedule a bounded-backoff SSE reconnect for the current buffer."
+  (unless (timerp opencode-shell--event-reconnect-timer)
+    (setq opencode-shell--request-status "reconnecting")
+    (let ((target (current-buffer))
+          (delay (min 30 (expt 2 (min 5 opencode-shell--event-reconnect-attempt)))))
+      (cl-incf opencode-shell--event-reconnect-attempt)
+      (setq opencode-shell--event-reconnect-timer
+            (run-at-time delay nil
+                         (lambda ()
+                           (when (buffer-live-p target)
+                             (with-current-buffer target
+                               (setq opencode-shell--event-reconnect-timer nil)
+                               (opencode-shell--event-connect)))))))))
+
+(defun opencode-shell--event-sentinel (_process event)
+  "Recover the current session after an SSE process EVENT."
+  (unless (string-match-p "open" event)
+    (setq opencode-shell--event-process nil
+          opencode-shell--request-status "recovering")
+    (opencode-shell--resync)
+    (opencode-shell--event-schedule-reconnect)))
+
+(defun opencode-shell--event-connect ()
+  "Connect the current session buffer to OpenCode's SSE event stream."
+  (unless (process-live-p opencode-shell--event-process)
+    (let ((url-request-extra-headers
+           (append '(("Accept" . "text/event-stream"))
+                   (when-let ((header (opencode-shell--auth-header opencode-shell--profile)))
+                     (list header))))
+          (origin (current-buffer)))
+      (setq opencode-shell--event-buffer "")
+      (condition-case nil
+          (setq opencode-shell--event-process
+                (url-retrieve
+                 (opencode-shell--url "/event")
+                 (lambda (_status)
+                   (when (buffer-live-p origin)
+                     (with-current-buffer origin
+                       (setq opencode-shell--event-reconnect-attempt 0)
+                       (opencode-shell--resync))))
+                 nil t t))
+        (error (opencode-shell--event-schedule-reconnect)))
+      (when (processp opencode-shell--event-process)
+        (set-process-filter opencode-shell--event-process #'opencode-shell--event-filter)
+        (set-process-sentinel opencode-shell--event-process #'opencode-shell--event-sentinel)))))
 
 (defun opencode-shell--question-prompt (question)
   "Return a readable answer prompt for QUESTION."
@@ -1125,10 +1231,11 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--resync (&optional capabilities)
   "Fully resync transcript, status, models, agents, and pending state."
   (interactive (list t))
-  (opencode-shell--guarded-request
-   'messages
-    "GET" (format "/session/%s/message" opencode-shell--session-id)
-    #'opencode-shell--render-messages)
+  (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
+    (opencode-shell--guarded-request
+     'messages
+     "GET" (format "/session/%s/message" opencode-shell--session-id)
+     (lambda (messages) (opencode-shell--render-messages messages sequence))))
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions)
   (when (and (or capabilities (not opencode-shell--capabilities-loaded))
@@ -1192,31 +1299,37 @@ Each retained session keeps its server-reported directory unchanged."
   (let ((text (opencode-shell--composer-text)))
     (when (string-blank-p text) (user-error "Prompt is blank"))
     (let ((turn (opencode-shell--make-turn
-                 :id (format "local-%d" (cl-incf opencode-shell--turn-counter))
-                 :user text :status 'waiting)))
+                  :id (format "msg_%s_%d" (format-time-string "%s%N")
+                              (cl-incf opencode-shell--turn-counter))
+                  :user text :status 'sending)))
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
             opencode-shell--request-status "waiting")
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)
       (force-mode-line-update)
-      (opencode-shell--request
-       "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
-       (lambda (_) (opencode-shell--resync))
-       (opencode-shell--prompt-body text) nil
-       (lambda ()
-         (setf (opencode-shell--turn-status turn) 'error)
-         (setq opencode-shell--request-status "error")
-         (when (and (string-empty-p (opencode-shell--composer-text))
-                    (eq turn (car (last opencode-shell--turns))))
-           (let ((position (point)))
-             (opencode-shell--replace-composer text)
-             (goto-char (min (point-max) position))))
+       (opencode-shell--request
+        "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
+       (lambda (_)
+         (setf (opencode-shell--turn-status turn) 'waiting)
          (opencode-shell--render-turns)
+         (opencode-shell--resync))
+        (cons `(messageID . ,(opencode-shell--turn-id turn))
+              (opencode-shell--prompt-body text)) nil
+       (lambda ()
+         (setf (opencode-shell--turn-status turn) 'recovering)
+         (setq opencode-shell--request-status "recovering")
+         (opencode-shell--render-turns)
+         (opencode-shell--resync)
          (force-mode-line-update))))))
 
 (defun opencode-shell--abort ()
   "Abort work in the current session."
   (interactive)
+  (setq opencode-shell--request-status "aborting")
+  (when-let ((turn (car (last opencode-shell--turns))))
+    (unless (eq (opencode-shell--turn-status turn) 'complete)
+      (setf (opencode-shell--turn-status turn) 'aborting)
+      (opencode-shell--render-turns)))
   (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
                             (lambda (_) (opencode-shell--resync)) '()))
 

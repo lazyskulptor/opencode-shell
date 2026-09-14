@@ -568,12 +568,9 @@
         (should (equal (opencode-shell--turn-user (car opencode-shell--turns)) "hello\nworld"))
         (should (eq (get-text-property (point-min) 'read-only) t))
         (funcall failure)
-        (should (equal (opencode-shell--composer-text) "hello\nworld"))
-        (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'error))
-        (goto-char (point-min)) (search-forward "Request failed")
-        (should (eq (get-text-property (match-beginning 0) 'face)
-                    'opencode-shell-error-face))
-        (should (equal opencode-shell--request-status "error"))))))
+        (should (string-empty-p (opencode-shell--composer-text)))
+        (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'recovering))
+        (should (equal opencode-shell--request-status "recovering"))))))
 
 (ert-deftest opencode-shell-failure-does-not-overwrite-edited-composer ()
   (with-temp-buffer
@@ -606,7 +603,7 @@
         (funcall (car failures))
         (should (string-empty-p (opencode-shell--composer-text)))
         (funcall (cadr failures))
-        (should (equal (opencode-shell--composer-text) "second"))
+        (should (string-empty-p (opencode-shell--composer-text)))
         (should (equal (mapcar #'opencode-shell--turn-user opencode-shell--turns)
                        '("first" "second")))))))
 
@@ -646,7 +643,46 @@
                       (opencode-shell--turn-user-end
                        (car opencode-shell--turns)))))
         (opencode-shell--render-messages messages)
-        (should (equal id (opencode-shell--turn-id (car opencode-shell--turns))))))))
+         (should (equal id (opencode-shell--turn-id (car opencode-shell--turns))))))))
+
+(ert-deftest opencode-shell-stale-snapshot-cannot-regress-completed-response ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((complete (list (opencode-shell-test--message "u1" "user" "q")
+                          (opencode-shell-test--message "a1" "assistant" "answer" "u1"))))
+      (opencode-shell--render-messages complete 2)
+      (opencode-shell--render-messages
+       (list (opencode-shell-test--message "u1" "user" "q")) 1)
+      (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)))))
+
+(ert-deftest opencode-shell-sse-parser-handles-split-and-duplicate-frames ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let ((count 0)
+          (frame "data: {\"id\":\"e1\",\"type\":\"message.updated\",\"properties\":{\"info\":{\"sessionID\":\"s\"}}}\n\n"))
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf count))))
+        (opencode-shell--event-filter nil (substring frame 0 17))
+        (should (= count 0))
+        (opencode-shell--event-filter nil (substring frame 17))
+        (should (= count 1))
+        (opencode-shell--event-filter nil frame)
+        (should (= count 2))))))
+
+(ert-deftest opencode-shell-submit-includes-stable-message-id ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (insert "hello")
+    (let (body)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path _callback &optional value &rest _)
+                   (setq body value))))
+        (opencode-shell--submit)
+        (should (equal (alist-get 'messageID body)
+                       (opencode-shell--turn-id (car opencode-shell--turns))))))))
 
 (ert-deftest opencode-shell-waiting-face-model-agent-keys-and-header ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c")) #'opencode-shell--submit))

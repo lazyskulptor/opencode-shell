@@ -68,6 +68,10 @@ and status requests. A transcript buffer has a multiline composer after
 submits it. Submitted prompts and polled responses above the composer are
 read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear in the header and affect subsequent prompt payloads.
+Each prompt carries a stable message ID. SSE events trigger low-latency updates,
+while periodic history reconciliation remains active as a loss-recovery path.
+The transcript shows stable sending, waiting, receiving, recovering, aborting,
+or error state and never replaces an already completed response with stale data.
 Model completion is limited to providers reported as connected by the server;
 agent completion shows only server-advertised visible primary agents.
 `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question
