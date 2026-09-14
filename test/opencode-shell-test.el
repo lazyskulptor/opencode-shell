@@ -578,6 +578,25 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest opencode-shell-overlapping-resync-does-not-advance-heartbeat ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--in-flight '((messages . t)))
+    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
+      (opencode-shell--resync)
+      (should (= opencode-shell--poll-heartbeat 0)))))
+
+(ert-deftest opencode-shell-missing-status-does-not-complete-running-tool ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--tool-message "a1" "u1" "running")))
+    (opencode-shell--complete-idle-turn)
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))))
+
 (ert-deftest opencode-shell-idle-status-completes-text-response-without-finish-part ()
   (with-temp-buffer
     (opencode-shell-mode)

@@ -1185,7 +1185,8 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--complete-idle-turn ()
   "Complete the active receiving turn when server status is idle."
-  (when (equal (opencode-shell--status opencode-shell--session-id) "idle")
+  (when (and (opencode-shell--get opencode-shell--session-status opencode-shell--session-id)
+             (equal (opencode-shell--status opencode-shell--session-id) "idle"))
     (when-let ((turn (car (last opencode-shell--turns))))
       (when (and (memq (opencode-shell--turn-status turn) '(thinking receiving))
                  (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
@@ -1245,13 +1246,14 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--resync (&optional capabilities)
   "Fully resync transcript, status, models, agents, and pending state."
   (interactive (list t))
-  (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
-    (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
-    (when opencode-shell--turns (opencode-shell--render-turns))
-    (opencode-shell--guarded-request
-     'messages
-     "GET" (format "/session/%s/message" opencode-shell--session-id)
-     (lambda (messages) (opencode-shell--render-messages messages sequence))))
+  (unless (alist-get 'messages opencode-shell--in-flight)
+    (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
+      (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
+      (when opencode-shell--turns (opencode-shell--render-turns))
+      (opencode-shell--guarded-request
+       'messages
+       "GET" (format "/session/%s/message" opencode-shell--session-id)
+       (lambda (messages) (opencode-shell--render-messages messages sequence)))))
   (opencode-shell--guarded-request
    'status "GET" "/session/status"
    (lambda (statuses)
