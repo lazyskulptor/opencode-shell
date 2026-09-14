@@ -1124,8 +1124,8 @@ Each retained session keeps its server-reported directory unchanged."
                          (opencode-shell--get resolved 'description))
                  'font-lock-face 'shadow
                  'read-only t 'rear-nonsticky '(read-only face))))
-      (dolist (item (opencode-shell--deduplicate-permissions
-                     opencode-shell--permissions))
+      (dolist (item (seq-take (opencode-shell--deduplicate-permissions
+                               opencode-shell--permissions) 1))
         (let ((begin (point)))
           (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
@@ -1585,9 +1585,6 @@ Each retained session keeps its server-reported directory unchanged."
          (id (opencode-shell--permission-id item)))
     (when opencode-shell--permission-sending
       (user-error "Permission reply already in progress"))
-    (when (and (equal reply "always")
-               (not (yes-or-no-p "Always allow this permission? ")))
-      (user-error "Permission reply cancelled"))
     (setq opencode-shell--permission-sending id)
     (opencode-shell--request
      "POST" (format "/permission/%s/reply" id)

@@ -242,15 +242,7 @@
       (setq requests nil opencode-shell--permission-sending nil)
       (opencode-shell--permission-allow-always)
       (should (equal (caddar requests) '((reply . "always"))))
-      (should (string-match-p "Always allow" (car confirmations)))
-
-      (setq requests nil confirmations nil opencode-shell--permission-sending nil)
-      (cl-letf (((symbol-function 'yes-or-no-p)
-                 (lambda (shown) (push shown confirmations) nil)))
-        (should-error (opencode-shell--permission-allow-always)
-                      :type 'user-error))
-      (should confirmations)
-      (should-not requests))))
+      (should-not confirmations))))
 
 (ert-deftest opencode-shell-api-log-uses-dedicated-read-only-buffer ()
   (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
@@ -315,6 +307,46 @@
          (items (opencode-shell--deduplicate-permissions
                  (list first duplicate '((permission . "missing")) second))))
     (should (equal items (list first second)))))
+
+(ert-deftest opencode-shell-renders-only-first-pending-permission ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash")
+        (patterns . ("first")))
+       ((id . "p2") (sessionID . "s") (permission . "bash")
+        (patterns . ("second")))))
+    (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
+    (should (string-match-p "first" (buffer-string)))
+    (should-not (string-match-p "second" (buffer-string)))
+    (should (= 2 (length opencode-shell--permissions)))))
+
+(ert-deftest opencode-shell-always-replies-without-emacs-confirmation ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "bash")
+        (patterns . ("first")) (always . ("first")))
+       ((id . "p2") (sessionID . "s") (permission . "bash")
+        (patterns . ("second")))))
+    (let (request callback)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) (ert-fail "unexpected confirmation")))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (method path success &optional body &rest _)
+                   (setq request (list method path body) callback success))))
+        (goto-char opencode-shell--permission-begin)
+        (opencode-shell--permission-allow-always)
+        (should (equal request
+                       '("POST" "/permission/p1/reply" ((reply . "always")))))
+        (funcall callback nil)
+        (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+        (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
+        (should (string-match-p "second" (buffer-string)))
+        (opencode-shell--receive-permissions nil)
+        (should (= 0 (how-many "┌─ PERMISSION" (point-min) (point-max))))))))
 
 (ert-deftest opencode-shell-inline-permission-preserves-composer-and-replies ()
   (with-temp-buffer
