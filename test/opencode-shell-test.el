@@ -743,6 +743,24 @@
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
     (should-not opencode-shell--submit-in-flight)))
 
+(ert-deftest opencode-shell-permission-blocks-idle-completion-and-prompt ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--submit-in-flight "u1"
+          opencode-shell--composer-visible nil
+          opencode-shell--permissions '(((id . "p1") (sessionID . "s")))
+          opencode-shell--session-status '((s . ((type . "idle")))))
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p") (type . "text") (text . "answer")))))))
+    (opencode-shell--complete-idle-turn)
+    (opencode-shell--complete-idle-turn)
+    (should opencode-shell--submit-in-flight)
+    (should-not opencode-shell--composer-visible)
+    (should (= opencode-shell--idle-completion-count 0))))
+
 (ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
   (let* ((known '((id . "p1") (type . "tool") (tool . "read")
                   (state . ((status . "running"))) (metadata . ((path . "x")))))

@@ -1037,6 +1037,14 @@ Each retained session keeps its server-reported directory unchanged."
   "Return non-nil when the prompt composer should be displayed."
   opencode-shell--composer-visible)
 
+(defun opencode-shell--permission-blocked-p ()
+  "Return non-nil while permission interaction blocks new input."
+  (or opencode-shell--permissions opencode-shell--permission-sending))
+
+(defun opencode-shell--permission-awaiting-response-p ()
+  "Return non-nil when a permission blocks an active submitted response."
+  (and opencode-shell--submit-in-flight (opencode-shell--permission-blocked-p)))
+
 (defun opencode-shell--session-permissions (items)
   "Return permission ITEMS belonging to the current session."
   (seq-filter
@@ -1124,6 +1132,10 @@ Each retained session keeps its server-reported directory unchanged."
             (opencode-shell--permission-id item)))
          (opencode-shell--deduplicate-permissions
           (opencode-shell--session-permissions items))))
+  (when (opencode-shell--permission-awaiting-response-p)
+    (setq opencode-shell--composer-visible nil
+          opencode-shell--idle-completion-count 0)
+    (opencode-shell--start-polling))
   (opencode-shell--render-permissions))
 
 (defun opencode-shell--replace-composer (text &optional offset)
@@ -1306,10 +1318,12 @@ Each retained session keeps its server-reported directory unchanged."
                                (opencode-shell--turn-id entry)))
                       opencode-shell--turns)))
       (when (eq (opencode-shell--turn-status turn) 'complete)
-        (setq opencode-shell--submit-in-flight nil
-              opencode-shell--composer-visible t)))
+        (unless (opencode-shell--permission-awaiting-response-p)
+          (setq opencode-shell--submit-in-flight nil
+                opencode-shell--composer-visible t))))
     (opencode-shell--render-turns)
-    (when (and (null opencode-shell--submit-in-flight)
+    (when (and (not (opencode-shell--permission-awaiting-response-p))
+               (null opencode-shell--submit-in-flight)
                (equal opencode-shell--request-status "idle"))
       (opencode-shell--stop-polling))
     (force-mode-line-update)))
@@ -1319,7 +1333,7 @@ Each retained session keeps its server-reported directory unchanged."
   (let ((idle (and (opencode-shell--get opencode-shell--session-status
                                          opencode-shell--session-id)
                    (equal (opencode-shell--status opencode-shell--session-id) "idle"))))
-    (if (not idle)
+    (if (or (not idle) (opencode-shell--permission-awaiting-response-p))
         (setq opencode-shell--idle-completion-count 0)
       (if-let ((turn (car (last opencode-shell--turns))))
           (progn
@@ -1578,6 +1592,8 @@ Each retained session keeps its server-reported directory unchanged."
              (seq-remove (lambda (entry)
                            (equal id (opencode-shell--permission-id entry)))
                          opencode-shell--permissions))
+       (unless (opencode-shell--permission-blocked-p)
+         (opencode-shell--resync))
        (opencode-shell--render-permissions)
        (message "Permission %s" reply))
      `((reply . ,reply)) nil
