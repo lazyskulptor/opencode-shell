@@ -308,6 +308,14 @@
     (should (< (length description) 250))
     (should (string-match-p "metadata=" description))))
 
+(ert-deftest opencode-shell-permission-state-deduplicates-by-id ()
+  (let* ((first '((id . "p1") (permission . "bash")))
+         (duplicate '((id . "p1") (permission . "read")))
+         (second '((id . "p2") (permission . "bash")))
+         (items (opencode-shell--deduplicate-permissions
+                 (list first duplicate '((permission . "missing")) second))))
+    (should (equal items (list first second)))))
+
 (ert-deftest opencode-shell-inline-permission-preserves-composer-and-replies ()
   (with-temp-buffer
     (opencode-shell-mode)

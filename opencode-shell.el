@@ -1046,6 +1046,25 @@ Each retained session keeps its server-reported directory unchanged."
        (equal session opencode-shell--session-id)))
    items))
 
+(defun opencode-shell--permission-id (item)
+  "Return ITEM's usable permission ID, or nil."
+  (let ((id (opencode-shell--get item 'id)))
+    (and id (not (string-empty-p (format "%s" id))) (format "%s" id))))
+
+(defun opencode-shell--deduplicate-permissions (items)
+  "Return ID-bearing ITEMS once each, preserving their first order."
+  (let (seen result)
+    (dolist (item items (nreverse result))
+      (when-let ((id (opencode-shell--permission-id item)))
+        (unless (member id seen)
+          (push id seen)
+          (push item result))))))
+
+(defun opencode-shell--resolved-permission (id)
+  "Return the resolved permission record for ID."
+  (seq-find (lambda (record) (equal id (opencode-shell--get record 'id)))
+            opencode-shell--resolved-permissions))
+
 (defun opencode-shell--permission-at-point ()
   "Return the permission object at point, or the first pending request."
   (or (get-text-property (point) 'opencode-shell-permission)
@@ -1064,10 +1083,12 @@ Each retained session keeps its server-reported directory unchanged."
       (when (looking-back "Prompt> " (line-beginning-position))
         (delete-region (- (point) (length "Prompt> ")) (point)))
       (set-marker opencode-shell--permission-begin (point))
-      (dolist (resolved opencode-shell--resolved-permissions)
+      (dolist (resolved (opencode-shell--deduplicate-permissions
+                         opencode-shell--resolved-permissions))
         (insert (propertize
                  (format "PERMISSION %s: %s\n"
-                         (upcase (cdr resolved)) (car resolved))
+                         (upcase (opencode-shell--get resolved 'reply))
+                         (opencode-shell--get resolved 'description))
                  'font-lock-face 'shadow
                  'read-only t 'rear-nonsticky '(read-only face))))
       (dolist (item opencode-shell--permissions)
@@ -1541,8 +1562,9 @@ Each retained session keeps its server-reported directory unchanged."
      "POST" (format "/permission/%s/reply" id)
      (lambda (_)
        (setq opencode-shell--resolved-permissions
-             (append opencode-shell--resolved-permissions
-                     (list (cons (opencode-shell--permission-description item) reply)))
+              (append opencode-shell--resolved-permissions
+                      (list `((id . ,id) (reply . ,reply)
+                              (description . ,(opencode-shell--permission-description item)))))
              opencode-shell--permission-sending nil
              opencode-shell--permissions
              (seq-remove (lambda (entry)
