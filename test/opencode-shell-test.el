@@ -264,6 +264,27 @@
                      "OpenCode API #1.*GET /session" (buffer-string)))))
       (kill-buffer opencode-shell-log-buffer-name))))
 
+(ert-deftest opencode-shell-api-log-is-separated-by-session ()
+  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
+        (opencode-shell-log-requests t)
+        (opencode-shell--session-id "session-1"))
+    (unwind-protect
+        (progn
+          (opencode-shell--log "session request")
+          (should (get-buffer " *opencode-shell-test-log*<default:session-1>"))
+          (should-not (get-buffer opencode-shell-log-buffer-name)))
+      (when-let ((buffer (get-buffer " *opencode-shell-test-log*<default:session-1>")))
+        (kill-buffer buffer)))))
+
+(ert-deftest opencode-shell-api-log-separates-identical-session-ids-by-profile ()
+  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
+        (opencode-shell--session-id "same"))
+    (should-not
+     (equal (let ((opencode-shell--profile '(:name "one")))
+              (opencode-shell--log-buffer-name))
+            (let ((opencode-shell--profile '(:name "two")))
+              (opencode-shell--log-buffer-name))))))
+
 (ert-deftest opencode-shell-permission-pending-label-shows-patterns ()
   (let (candidates)
     (cl-letf (((symbol-function 'opencode-shell--request)

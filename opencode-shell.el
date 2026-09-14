@@ -342,15 +342,26 @@ and lifecycle keys."
   :type 'boolean :group 'opencode-shell)
 
 (defcustom opencode-shell-log-buffer-name "*OpenCode Shell Log*"
-  "Buffer used for API request logs."
+  "Base name for API request log buffers."
   :type 'string :group 'opencode-shell)
 
 (defvar opencode-shell--request-log-counter 0)
+(defvar opencode-shell--session-id)
+(defvar opencode-shell--profile)
+
+(defun opencode-shell--log-buffer-name ()
+  "Return the log buffer name for the current session or global requests."
+  (if opencode-shell--session-id
+      (format "%s<%s:%s>" opencode-shell-log-buffer-name
+              (opencode-shell--profile-name
+               (or opencode-shell--profile (opencode-shell--default-profile)))
+              opencode-shell--session-id)
+    opencode-shell-log-buffer-name))
 
 (defun opencode-shell--log (format-string &rest args)
   "Append a timestamped API log line formatted with FORMAT-STRING and ARGS."
   (when opencode-shell-log-requests
-    (with-current-buffer (get-buffer-create opencode-shell-log-buffer-name)
+    (with-current-buffer (get-buffer-create (opencode-shell--log-buffer-name))
       (unless (derived-mode-p 'special-mode)
         (special-mode))
       (let ((inhibit-read-only t))
@@ -361,7 +372,7 @@ and lifecycle keys."
 (defun opencode-shell-log ()
   "Display the OpenCode Shell API log buffer."
   (interactive)
-  (let ((buffer (get-buffer-create opencode-shell-log-buffer-name)))
+  (let ((buffer (get-buffer-create (opencode-shell--log-buffer-name))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'special-mode)
         (special-mode)))

@@ -76,9 +76,11 @@ Pending status cycles `·`, `··`, `···` once per message-history poll. Reas
 updates show `Thinking`; text or tool activity shows `Receiving`. The dots indicate
 polling activity, not estimated progress.
 
-API requests are correlated in `*Messages*` by a short ID. Non-poll requests log
-their start; all outcomes log method, path, status, and duration. Successful
-message-history polls emit only their outcome to limit noise. Customize
+API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
+session exists and in a session-specific log buffer afterwards. Open the relevant
+buffer with `M-x opencode-shell-log`. Non-poll requests log their start; all
+outcomes log method, path, status, and duration. Successful message-history polls
+emit only their outcome to limit noise. Customize
 `opencode-shell-log-requests` to disable logs. Bodies, query parameters,
 authentication headers, and error response bodies are never logged.
 Model completion is limited to providers reported as connected by the server;
