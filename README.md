@@ -71,9 +71,16 @@ and status requests. A transcript buffer has a multiline composer after
 submits it. Submitted prompts and polled responses above the composer are
 read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear in the header and affect subsequent prompt payloads.
+Model completion is limited to providers reported as connected by the server;
+agent completion shows only server-advertised visible primary agents.
 `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
+
+Pending permissions appear in a boxed read-only block above `Prompt>`. Use
+`C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`
+to allow once, `C-c C-l` to always allow after confirmation, or `C-c C-n` to
+reject. The request context remains visible and the composer draft is preserved.
 
 The session buffer uses normal text editing rather than `special-mode`. Only the
 bottom composer is writable; each submitted user prompt and its response are
@@ -98,3 +105,14 @@ public configuration.
 ## Limitations
 
 This beta polls instead of streaming SSE. It intentionally defers rich Markdown/tool rendering, folding, retention pruning, partial assistant streaming, pagination, and file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.
+
+## Acceptance check
+
+Run `make verify` before loading a changed checkout. It deletes stale bytecode,
+runs source ERT, compiles the package and tests, then runs compiled ERT.
+
+For a live check, restart Emacs, close old OpenCode transcript buffers, open or
+create a localhost session, enter insert state with several of `i`, `a`, `A`,
+`o`, and `O`, then submit two multiline Korean/Markdown prompts. Confirm each
+submitted prompt and response is read-only, the bottom composer remains
+writable, and polling does not move or erase a draft being edited.

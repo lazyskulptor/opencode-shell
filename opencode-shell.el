@@ -289,6 +289,10 @@ and lifecycle keys."
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
 (defvar-local opencode-shell--request-status "idle")
+(defvar-local opencode-shell--permissions nil)
+(defvar-local opencode-shell--permission-begin nil)
+(defvar-local opencode-shell--permission-end nil)
+(defvar-local opencode-shell--permission-sending nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
 (defvar-local opencode-shell--directory-filter nil)
@@ -307,6 +311,9 @@ and lifecycle keys."
   "Face for a turn awaiting a response." :group 'opencode-shell)
 (defface opencode-shell-error-face '((t :inherit error))
   "Face for conversation transport errors." :group 'opencode-shell)
+(defface opencode-shell-permission-face
+  '((t :inherit warning :weight bold))
+  "Face for pending permission requests." :group 'opencode-shell)
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
   id server-user-id user assistant parts status user-begin user-end
@@ -628,27 +635,38 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
                                 (lambda (_) (opencode-shell-refresh))))))
 
 (defun opencode-shell--normalize-models (response)
-  "Return provider/model pairs normalized from provider RESPONSE."
-  (mapcan
-   (lambda (provider)
-     (let ((provider-id (opencode-shell--get provider 'id)))
-       (mapcar
-        (lambda (entry)
-          (let* ((key (and (consp entry) (atom (car entry)) (car entry)))
-                 (model (if key (cdr entry) entry))
-                 (value (or (opencode-shell--model-value model provider-id)
-                            (and key (opencode-shell--model-value
-                                      (format "%s" key) provider-id)))))
-            (cons (opencode-shell--model-name value) value)))
-        (opencode-shell--get provider 'models))))
-   (or (opencode-shell--get response 'all)
-       (opencode-shell--get response 'providers))))
+  "Return models from server-connected providers in RESPONSE."
+  (let* ((connected-present (or (assq 'connected response)
+                                (assoc "connected" response)))
+         (connected (opencode-shell--get response 'connected)))
+    (mapcan
+     (lambda (provider)
+       (let ((provider-id (opencode-shell--get provider 'id)))
+         (when (or (not connected-present) (member provider-id connected))
+           (mapcar
+            (lambda (entry)
+              (let* ((key (and (consp entry) (atom (car entry)) (car entry)))
+                     (model (if key (cdr entry) entry))
+                     (value (or (opencode-shell--model-value model provider-id)
+                                (and key (opencode-shell--model-value
+                                          (format "%s" key) provider-id)))))
+                (cons (opencode-shell--model-name value) value)))
+            (opencode-shell--get provider 'models)))))
+     (or (opencode-shell--get response 'all)
+         (opencode-shell--get response 'providers)))))
 
 (defun opencode-shell--normalize-agents (response)
-  "Return name/agent pairs normalized from agent RESPONSE."
+  "Return server-advertised visible primary agents from RESPONSE."
   (mapcar (lambda (agent)
             (let ((name (opencode-shell--get agent 'name))) (cons name agent)))
-          response))
+          (seq-filter
+           (lambda (agent)
+             (and (not (opencode-shell--get agent 'hidden))
+                  (not (opencode-shell--get agent 'disabled))
+                  (not (opencode-shell--get agent 'disable))
+                  (let ((mode (opencode-shell--get agent 'mode)))
+                    (or (null mode) (equal (format "%s" mode) "primary")))))
+           response)))
 
 (defun opencode-shell--preserve-choice (choice choices)
   "Preserve CHOICE only when it still occurs in CHOICES."
@@ -672,8 +690,19 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
     (define-key map (kbd "C-c C-g") #'opencode-shell-resync)
     (define-key map (kbd "C-c C-a") #'opencode-shell-abort)
     (define-key map (kbd "C-c C-p") #'opencode-shell-permissions)
+    (define-key map (kbd "C-c C-y") #'opencode-shell-permission-allow-once)
+    (define-key map (kbd "C-c C-l") #'opencode-shell-permission-allow-always)
+    (define-key map (kbd "C-c C-n") #'opencode-shell-permission-reject)
     (define-key map (kbd "C-c C-q") #'opencode-shell-questions)
     (define-key map (kbd "C-c C-h") #'describe-mode)
+    map))
+
+(defvar opencode-shell-permission-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "y") #'opencode-shell-permission-allow-once)
+    (define-key map (kbd "a") #'opencode-shell-permission-allow-always)
+    (define-key map (kbd "n") #'opencode-shell-permission-reject)
+    (define-key map (kbd "r") #'opencode-shell-permission-reject)
     map))
 
 (defun opencode-shell--in-composer-p ()
@@ -697,12 +726,15 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
+              opencode-shell--permissions nil
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "Prompt> " 'read-only t 'rear-nonsticky '(read-only)))
     (setq opencode-shell--composer-start (copy-marker (point) nil)
-          opencode-shell--transcript-end (copy-marker (point) nil)))
+          opencode-shell--transcript-end (copy-marker (point) nil)
+          opencode-shell--permission-begin (copy-marker (point) nil)
+          opencode-shell--permission-end (copy-marker (point) nil)))
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
@@ -825,6 +857,59 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
   "Return the composer contents without properties."
   (buffer-substring-no-properties opencode-shell--composer-start (point-max)))
 
+(defun opencode-shell--session-permissions (items)
+  "Return permission ITEMS belonging to the current session."
+  (seq-filter
+   (lambda (item)
+     (let ((session (or (opencode-shell--get item 'sessionID)
+                        (opencode-shell--get item 'sessionId))))
+       (equal session opencode-shell--session-id)))
+   items))
+
+(defun opencode-shell--permission-at-point ()
+  "Return the permission object at point, or the first pending request."
+  (or (get-text-property (point) 'opencode-shell-permission)
+      (car opencode-shell--permissions)
+      (user-error "No pending permission")))
+
+(defun opencode-shell--render-permissions ()
+  "Render pending permissions as one boxed read-only region before composer."
+  (let* ((draft (opencode-shell--composer-text))
+         (offset (and (opencode-shell--in-composer-p)
+                      (- (point) opencode-shell--composer-start)))
+         (inhibit-read-only t))
+    (save-excursion
+      (goto-char opencode-shell--permission-begin)
+      (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
+      (when (looking-back "Prompt> " (line-beginning-position))
+        (delete-region (- (point) (length "Prompt> ")) (point)))
+      (set-marker opencode-shell--permission-begin (point))
+      (dolist (item opencode-shell--permissions)
+        (let ((begin (point)))
+          (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
+                              'font-lock-face 'opencode-shell-permission-face)
+                  "│ " (opencode-shell--permission-description item) "\n"
+                  "│ C-c C-y once  C-c C-l always  C-c C-n reject\n"
+                  "└───────────────────────────────────────────\n")
+          (add-text-properties
+           begin (point)
+           `(read-only t rear-nonsticky (read-only keymap)
+             keymap ,opencode-shell-permission-map
+             opencode-shell-permission ,item))))
+      (set-marker opencode-shell--permission-end (point))
+      (insert (propertize "Prompt> " 'read-only t
+                          'rear-nonsticky '(read-only)))
+      (set-marker opencode-shell--composer-start (point)))
+    (when offset
+      (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
+    (unless (equal draft (opencode-shell--composer-text))
+      (error "Permission rendering changed composer text"))))
+
+(defun opencode-shell--receive-permissions (items)
+  "Store session-scoped permission ITEMS and update their display."
+  (setq opencode-shell--permissions (opencode-shell--session-permissions items))
+  (opencode-shell--render-permissions))
+
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
   (let ((inhibit-read-only t))
@@ -939,6 +1024,8 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
       (save-excursion
         (goto-char (- (point-max) (length composer-text)))
         (set-marker opencode-shell--transcript-end (point))
+        (set-marker opencode-shell--permission-begin (point))
+        (set-marker opencode-shell--permission-end (point))
         (set-marker opencode-shell--composer-start (point))))
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
@@ -1009,6 +1096,8 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
    'messages
     "GET" (format "/session/%s/message" opencode-shell--session-id)
     #'opencode-shell--render-messages)
+  (opencode-shell--guarded-request
+   'permissions "GET" "/permission" #'opencode-shell--receive-permissions)
   (when (and (or capabilities (not opencode-shell--capabilities-loaded))
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
@@ -1141,26 +1230,48 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
    " | "))
 
 (defun opencode-shell-permissions ()
-  "Explicitly reply to a pending permission request."
+  "Move to the first pending inline permission request."
   (interactive)
-  (opencode-shell--choose-pending
-   "permission"
-   (lambda (item)
-     (let* ((choices '(("Allow once" . "once")
-                       ("Always allow" . "always")
-                       ("Reject" . "reject")))
-            (description (opencode-shell--permission-description item))
-            (choice (completing-read
-                     (format "%s: " description)
-                     choices nil t))
-            (reply (cdr (assoc choice choices))))
-       (when (or (not (equal reply "always"))
-                 (yes-or-no-p
-                  (format "WARNING: Always allow persists for this session. %s? "
-                          description)))
-         (opencode-shell--request
-          "POST" (format "/permission/%s/reply" (opencode-shell--get item 'id))
-          (lambda (_) (message "Permission reply sent")) `((reply . ,reply))))))))
+  (unless opencode-shell--permissions (user-error "No pending permission"))
+  (goto-char opencode-shell--permission-begin))
+
+(defun opencode-shell--permission-reply (reply)
+  "Send REPLY for the inline permission at point."
+  (let* ((item (opencode-shell--permission-at-point))
+         (id (opencode-shell--get item 'id)))
+    (when opencode-shell--permission-sending
+      (user-error "Permission reply already in progress"))
+    (when (and (equal reply "always")
+               (not (yes-or-no-p "Always allow this permission? ")))
+      (user-error "Permission reply cancelled"))
+    (setq opencode-shell--permission-sending id)
+    (opencode-shell--request
+     "POST" (format "/permission/%s/reply" id)
+     (lambda (_)
+       (setq opencode-shell--permission-sending nil
+             opencode-shell--permissions
+             (seq-remove (lambda (entry)
+                           (equal id (opencode-shell--get entry 'id)))
+                         opencode-shell--permissions))
+       (opencode-shell--render-permissions)
+       (message "Permission %s" reply))
+     `((reply . ,reply)) nil
+     (lambda () (setq opencode-shell--permission-sending nil)))))
+
+(defun opencode-shell-permission-allow-once ()
+  "Allow the inline permission once."
+  (interactive)
+  (opencode-shell--permission-reply "once"))
+
+(defun opencode-shell-permission-allow-always ()
+  "Always allow the inline permission after confirmation."
+  (interactive)
+  (opencode-shell--permission-reply "always"))
+
+(defun opencode-shell-permission-reject ()
+  "Reject the inline permission."
+  (interactive)
+  (opencode-shell--permission-reply "reject"))
 
 (defun opencode-shell-questions ()
   "Explicitly answer or reject a pending question."
