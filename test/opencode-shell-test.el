@@ -346,7 +346,13 @@
         (should (equal request '("POST" "/permission/p/reply" ((reply . "once")))))
         (should-error (opencode-shell--permission-reject) :type 'user-error)
         (funcall callback nil)
+        (funcall callback nil)
         (should-not opencode-shell--permissions)
+        (opencode-shell--receive-permissions
+         '(((id . "p") (sessionID . "s") (permission . "bash")
+            (patterns . ("git status")))))
+        (should-not opencode-shell--permissions)
+        (should (= (length opencode-shell--resolved-permissions) 1))
         (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
         (should (equal (opencode-shell--composer-text) "draft"))))))
 

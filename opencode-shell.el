@@ -1117,7 +1117,13 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--receive-permissions (items)
   "Store session-scoped permission ITEMS and update their display."
-  (setq opencode-shell--permissions (opencode-shell--session-permissions items))
+  (setq opencode-shell--permissions
+        (seq-remove
+         (lambda (item)
+           (opencode-shell--resolved-permission
+            (opencode-shell--permission-id item)))
+         (opencode-shell--deduplicate-permissions
+          (opencode-shell--session-permissions items))))
   (opencode-shell--render-permissions))
 
 (defun opencode-shell--replace-composer (text &optional offset)
@@ -1561,14 +1567,16 @@ Each retained session keeps its server-reported directory unchanged."
     (opencode-shell--request
      "POST" (format "/permission/%s/reply" id)
      (lambda (_)
-       (setq opencode-shell--resolved-permissions
-              (append opencode-shell--resolved-permissions
-                      (list `((id . ,id) (reply . ,reply)
-                              (description . ,(opencode-shell--permission-description item)))))
-             opencode-shell--permission-sending nil
-             opencode-shell--permissions
+       (unless (opencode-shell--resolved-permission id)
+         (setq opencode-shell--resolved-permissions
+               (append opencode-shell--resolved-permissions
+                       (list `((id . ,id) (reply . ,reply)
+                               (description . ,(opencode-shell--permission-description item)))))))
+       (when (equal opencode-shell--permission-sending id)
+         (setq opencode-shell--permission-sending nil))
+       (setq opencode-shell--permissions
              (seq-remove (lambda (entry)
-                           (equal id (opencode-shell--get entry 'id)))
+                           (equal id (opencode-shell--permission-id entry)))
                          opencode-shell--permissions))
        (opencode-shell--render-permissions)
        (message "Permission %s" reply))
