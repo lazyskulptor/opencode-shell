@@ -252,6 +252,18 @@
       (should confirmations)
       (should-not requests))))
 
+(ert-deftest opencode-shell-api-log-uses-dedicated-read-only-buffer ()
+  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
+        (opencode-shell-log-requests t))
+    (unwind-protect
+        (progn
+          (opencode-shell--log "OpenCode API #%d → GET /session" 1)
+          (with-current-buffer opencode-shell-log-buffer-name
+            (should buffer-read-only)
+            (should (string-match-p
+                     "OpenCode API #1.*GET /session" (buffer-string)))))
+      (kill-buffer opencode-shell-log-buffer-name))))
+
 (ert-deftest opencode-shell-permission-pending-label-shows-patterns ()
   (let (candidates)
     (cl-letf (((symbol-function 'opencode-shell--request)

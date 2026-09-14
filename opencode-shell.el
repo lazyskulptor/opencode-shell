@@ -338,10 +338,34 @@ and lifecycle keys."
   :type 'number :group 'opencode-shell)
 
 (defcustom opencode-shell-log-requests t
-  "When non-nil, log API results to *Messages* without payloads or secrets."
+  "When non-nil, log API results without payloads or secrets."
   :type 'boolean :group 'opencode-shell)
 
+(defcustom opencode-shell-log-buffer-name "*OpenCode Shell Log*"
+  "Buffer used for API request logs."
+  :type 'string :group 'opencode-shell)
+
 (defvar opencode-shell--request-log-counter 0)
+
+(defun opencode-shell--log (format-string &rest args)
+  "Append a timestamped API log line formatted with FORMAT-STRING and ARGS."
+  (when opencode-shell-log-requests
+    (with-current-buffer (get-buffer-create opencode-shell-log-buffer-name)
+      (unless (derived-mode-p 'special-mode)
+        (special-mode))
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ")
+                (apply #'format format-string args) "\n")))))
+
+(defun opencode-shell-log ()
+  "Display the OpenCode Shell API log buffer."
+  (interactive)
+  (let ((buffer (get-buffer-create opencode-shell-log-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'special-mode)
+        (special-mode)))
+    (pop-to-buffer buffer)))
 
 (defvar opencode-shell--composer-start)
 (defvar opencode-shell--transcript-end)
@@ -456,7 +480,7 @@ called after a transport, status, or decoding failure."
          (started (float-time))
          (poll-p (string-match-p "/session/[^/]+/message\\'" path)))
     (when (and opencode-shell-log-requests (not poll-p))
-      (message "OpenCode API #%d → %s %s" request-id method path))
+      (opencode-shell--log "OpenCode API #%d → %s %s" request-id method path))
     (url-retrieve
      (opencode-shell--url path params)
      (lambda (status)
@@ -466,8 +490,8 @@ called after a transport, status, or decoding failure."
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
                       (when opencode-shell-log-requests
-                        (message "OpenCode API #%d ← transport-error %.2fs [%s %s]"
-                                 request-id (- (float-time) started) method path))
+                         (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
+                                             request-id (- (float-time) started) method path))
                       (message "OpenCode: %s" (opencode-shell--bounded-error err))
                      (when error-callback (funcall error-callback))))
                (condition-case err
@@ -476,8 +500,8 @@ called after a transport, status, or decoding failure."
                           (when (buffer-live-p origin)
                             (with-current-buffer origin
                               (when opencode-shell-log-requests
-                                (message "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
-                                         request-id code (- (float-time) started) method path))
+                                 (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
+                                                     request-id code (- (float-time) started) method path))
                               (message "OpenCode: HTTP %s request failed" code)
                               (when error-callback (funcall error-callback))))
                         (let ((value (unless (= code 204)
@@ -485,15 +509,15 @@ called after a transport, status, or decoding failure."
                           (when (buffer-live-p origin)
                             (with-current-buffer origin
                               (when opencode-shell-log-requests
-                                (message "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
-                                         request-id code (- (float-time) started) method path))
+                                 (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
+                                                     request-id code (- (float-time) started) method path))
                               (funcall callback value))))))
                  (error
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
                       (when opencode-shell-log-requests
-                        (message "OpenCode API #%d ← decode-error %.2fs [%s %s]"
-                                 request-id (- (float-time) started) method path))
+                         (opencode-shell--log "OpenCode API #%d ← decode-error %.2fs [%s %s]"
+                                             request-id (- (float-time) started) method path))
                       (message "OpenCode: %s" (opencode-shell--bounded-error
                                                 (error-message-string err)))
                       (when error-callback (funcall error-callback)))))))
