@@ -159,7 +159,8 @@
                      (funcall callback nil)))))
         (opencode-shell--request "GET" "/bad" (lambda (_) (setq called t))))
       (should-not called)
-      (should (string-match-p "HTTP 300: not success" (car messages))))))
+      (should (string-match-p "HTTP 300 request failed" (car messages)))
+      (should-not (seq-some (lambda (text) (string-match-p "not success" text)) messages)))))
 
 (ert-deftest opencode-shell-question-multiple-custom-semantics ()
   (let ((item '((id . "q")
@@ -571,6 +572,29 @@
              (parts . (((id . "p1") (type . "text") (text . "partial")))))))
     (should (string-match-p "Receiving" (buffer-string)))
     (should-not (string-match-p "ASSISTANT>" (buffer-string)))))
+
+(ert-deftest opencode-shell-updating-local-turn-keeps-receiving-visible ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u1" :user "question" :status 'waiting)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns)
+      (opencode-shell--render-messages
+       (list (opencode-shell-test--message "u1" "user" "question")
+             '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+               (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+      (should (string-match-p "Receiving" (buffer-string)))
+      (should-not (string-match-p "ASSISTANT>" (buffer-string))))))
+
+(ert-deftest opencode-shell-full-rerender-keeps-one-prompt-label ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+    (set-marker (opencode-shell--turn-user-begin (car opencode-shell--turns)) nil)
+    (opencode-shell--render-turns)
+    (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-identical-completed-poll-is-render-no-op ()
   (with-temp-buffer

@@ -337,6 +337,12 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
+(defcustom opencode-shell-log-requests t
+  "When non-nil, log API results to *Messages* without payloads or secrets."
+  :type 'boolean :group 'opencode-shell)
+
+(defvar opencode-shell--request-log-counter 0)
+
 (defvar opencode-shell--composer-start)
 (defvar opencode-shell--transcript-end)
 
@@ -451,7 +457,12 @@ called after a transport, status, or decoding failure."
                                    (opencode-shell--default-profile)))))
                     (list header))))
          (url-request-data (and body (encode-coding-string (json-serialize body) 'utf-8)))
-         (origin (current-buffer)))
+         (origin (current-buffer))
+         (request-id (cl-incf opencode-shell--request-log-counter))
+         (started (float-time))
+         (poll-p (string-match-p "/session/[^/]+/message\\'" path)))
+    (when (and opencode-shell-log-requests (not poll-p))
+      (message "OpenCode API #%d → %s %s" request-id method path))
     (url-retrieve
      (opencode-shell--url path params)
      (lambda (status)
@@ -460,24 +471,35 @@ called after a transport, status, or decoding failure."
               (if-let ((err (plist-get status :error)))
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
+                      (when opencode-shell-log-requests
+                        (message "OpenCode API #%d ← transport-error %.2fs [%s %s]"
+                                 request-id (- (float-time) started) method path))
                       (message "OpenCode: %s" (opencode-shell--bounded-error err))
                      (when error-callback (funcall error-callback))))
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
-                          (let ((response-body (opencode-shell--response-body)))
-                            (when (buffer-live-p origin)
-                              (with-current-buffer origin
-                                (message "OpenCode: HTTP %s: %s" code
-                                         (opencode-shell--bounded-error response-body))
-                                (when error-callback (funcall error-callback)))))
+                          (when (buffer-live-p origin)
+                            (with-current-buffer origin
+                              (when opencode-shell-log-requests
+                                (message "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
+                                         request-id code (- (float-time) started) method path))
+                              (message "OpenCode: HTTP %s request failed" code)
+                              (when error-callback (funcall error-callback))))
                         (let ((value (unless (= code 204)
                                        (opencode-shell--json-read-buffer))))
                           (when (buffer-live-p origin)
-                            (with-current-buffer origin (funcall callback value))))))
+                            (with-current-buffer origin
+                              (when opencode-shell-log-requests
+                                (message "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
+                                         request-id code (- (float-time) started) method path))
+                              (funcall callback value))))))
                  (error
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
+                      (when opencode-shell-log-requests
+                        (message "OpenCode API #%d ← decode-error %.2fs [%s %s]"
+                                 request-id (- (float-time) started) method path))
                       (message "OpenCode: %s" (opencode-shell--bounded-error
                                                 (error-message-string err)))
                       (when error-callback (funcall error-callback)))))))
@@ -1084,9 +1106,9 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--response-display (turn)
   "Return the propertized response display for TURN."
-  (if-let ((answer (opencode-shell--turn-assistant turn)))
+  (if (eq (opencode-shell--turn-status turn) 'complete)
       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
-              answer "\n\n")
+              (or (opencode-shell--turn-assistant turn) "") "\n\n")
     (propertize
      (pcase (opencode-shell--turn-status turn)
        ('sending (opencode-shell--status-display "Sending"))
@@ -1141,6 +1163,7 @@ Each retained session keeps its server-reported directory unchanged."
               (dolist (turn (nthcdr known-count opencode-shell--turns))
                 (opencode-shell--insert-turn-blocks turn))))
         (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
+        (delete-region opencode-shell--transcript-end opencode-shell--composer-start)
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
         (dolist (turn opencode-shell--turns) (opencode-shell--insert-turn-blocks turn))
