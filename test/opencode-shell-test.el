@@ -572,6 +572,23 @@
     (should (string-match-p "Receiving" (buffer-string)))
     (should-not (string-match-p "ASSISTANT>" (buffer-string)))))
 
+(ert-deftest opencode-shell-identical-completed-poll-is-render-no-op ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((messages (list (opencode-shell-test--message "u1" "user" "question")
+                          (opencode-shell-test--message "a1" "assistant" "answer" "u1"))))
+      (opencode-shell--render-messages messages)
+      (let* ((turn (car opencode-shell--turns))
+             (begin (opencode-shell--turn-response-begin turn))
+             (end (opencode-shell--turn-response-end turn))
+             (before (buffer-string)))
+        (let ((inhibit-read-only t))
+          (add-text-properties begin end '(opencode-shell-render-token t)))
+        (opencode-shell--render-messages messages)
+        (should (equal before (buffer-string)))
+        (should (get-text-property begin 'opencode-shell-render-token))
+        (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))))
+
 (ert-deftest opencode-shell-history-poll-advances-buffer-local-heartbeat ()
   (let ((first (generate-new-buffer " *heartbeat-1*"))
         (second (generate-new-buffer " *heartbeat-2*")))

@@ -1107,13 +1107,15 @@ Each retained session keeps its server-reported directory unchanged."
   "Update only TURN's immutable response block."
   (let ((begin (opencode-shell--turn-response-begin turn))
         (end (opencode-shell--turn-response-end turn))
+        (display (opencode-shell--response-display turn))
         (inhibit-read-only t))
-    (delete-region begin end)
-    (goto-char begin)
-    (insert (opencode-shell--response-display turn))
-    (add-text-properties begin (point)
-                         '(read-only t rear-nonsticky (read-only face)))
-    (set-marker end (point))))
+    (unless (string= display (buffer-substring begin end))
+      (delete-region begin end)
+      (goto-char begin)
+      (insert display)
+      (add-text-properties begin (point)
+                           '(read-only t rear-nonsticky (read-only face)))
+      (set-marker end (point)))))
 
 (defun opencode-shell--render-turns ()
   "Render immutable turn blocks without changing composer bytes or point."
@@ -1134,13 +1136,10 @@ Each retained session keeps its server-reported directory unchanged."
           (save-excursion (opencode-shell--update-turn-response turn))))
       (if append-only
           (save-excursion
-            (goto-char opencode-shell--composer-start)
-            (delete-region opencode-shell--transcript-end
-                           opencode-shell--composer-start)
-            (dolist (turn (nthcdr known-count opencode-shell--turns))
-              (opencode-shell--insert-turn-blocks turn))
-            (insert (propertize "Prompt> " 'read-only t
-                                'rear-nonsticky '(read-only))))
+            (when (< known-count (length opencode-shell--turns))
+              (goto-char opencode-shell--transcript-end)
+              (dolist (turn (nthcdr known-count opencode-shell--turns))
+                (opencode-shell--insert-turn-blocks turn))))
         (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
