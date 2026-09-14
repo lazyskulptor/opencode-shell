@@ -208,7 +208,23 @@ and lifecycle keys."
 
 (defun opencode-shell--current-server-directory (profile)
   "Return current `default-directory' as an absolute PROFILE server path."
-  (let ((directory (opencode-shell--server-directory default-directory profile)))
+  (let* ((client-root (plist-get profile :directory))
+         (workspace (plist-get profile :workspace))
+         (native (expand-file-name
+                  (or (file-remote-p default-directory 'localname)
+                      default-directory)))
+         (root-native (and client-root
+                           (expand-file-name
+                            (or (file-remote-p client-root 'localname)
+                                client-root))))
+         (mapped (or (null workspace) (null root-native)
+                     (string-prefix-p (file-name-as-directory root-native)
+                                      (file-name-as-directory native))
+                     (string-prefix-p (file-name-as-directory
+                                            (expand-file-name workspace))
+                                      (file-name-as-directory native))))
+         (directory (and mapped
+                         (opencode-shell--server-directory default-directory profile))))
     (unless (and (stringp directory) (file-name-absolute-p directory))
       (user-error "Current directory cannot be mapped to the OpenCode server"))
     (file-name-as-directory directory)))
@@ -578,6 +594,7 @@ Each retained session keeps its server-reported directory unchanged."
   (opencode-shell--validate-profiles)
   (unless (and (stringp directory) (file-name-absolute-p directory))
     (user-error "OpenCode session directory must be absolute"))
+  (setq directory (file-name-as-directory directory))
   (let ((buffer (get-buffer-create
                  (format "*OpenCode Shell Sessions:%s:%s*"
                          (opencode-shell--profile-key profile) directory))))
@@ -609,8 +626,9 @@ Each retained session keeps its server-reported directory unchanged."
                     tabulated-list-entries (opencode-shell--session-entries))
               (tabulated-list-print t)
                (when id (goto-char (point-min)) (search-forward id nil t)))))
-           nil `((directory . ,opencode-shell--directory)
-                 (limit . 1000)))))))
+            nil
+            `((directory . ,opencode-shell--directory)
+              (limit . 1000)))))))
 
 (defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
