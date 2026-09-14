@@ -336,7 +336,7 @@
     (opencode-shell--receive-permissions opencode-shell--permissions)
     (goto-char (point-min))
     (should (= (how-many "PERMISSION" (point-min) (point-max)) 1))
-    (should (= (how-many "Prompt>" (point-min) (point-max)) 1))
+    (should (= (how-many "Prompt>" (point-min) (point-max)) 0))
     (let (request callback)
       (cl-letf (((symbol-function 'opencode-shell--request)
                  (lambda (method path success &optional body &rest _)

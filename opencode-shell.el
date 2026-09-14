@@ -1041,10 +1041,6 @@ Each retained session keeps its server-reported directory unchanged."
   "Return non-nil while permission interaction blocks new input."
   (or opencode-shell--permissions opencode-shell--permission-sending))
 
-(defun opencode-shell--permission-awaiting-response-p ()
-  "Return non-nil when a permission blocks an active submitted response."
-  (and opencode-shell--submit-in-flight (opencode-shell--permission-blocked-p)))
-
 (defun opencode-shell--session-permissions (items)
   "Return permission ITEMS belonging to the current session."
   (seq-filter
@@ -1099,7 +1095,8 @@ Each retained session keeps its server-reported directory unchanged."
                          (opencode-shell--get resolved 'description))
                  'font-lock-face 'shadow
                  'read-only t 'rear-nonsticky '(read-only face))))
-      (dolist (item opencode-shell--permissions)
+      (dolist (item (opencode-shell--deduplicate-permissions
+                     opencode-shell--permissions))
         (let ((begin (point)))
           (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
@@ -1132,7 +1129,7 @@ Each retained session keeps its server-reported directory unchanged."
             (opencode-shell--permission-id item)))
          (opencode-shell--deduplicate-permissions
           (opencode-shell--session-permissions items))))
-  (when (opencode-shell--permission-awaiting-response-p)
+  (when (opencode-shell--permission-blocked-p)
     (setq opencode-shell--composer-visible nil
           opencode-shell--idle-completion-count 0)
     (opencode-shell--start-polling))
@@ -1318,11 +1315,11 @@ Each retained session keeps its server-reported directory unchanged."
                                (opencode-shell--turn-id entry)))
                       opencode-shell--turns)))
       (when (eq (opencode-shell--turn-status turn) 'complete)
-        (unless (opencode-shell--permission-awaiting-response-p)
+        (unless (opencode-shell--permission-blocked-p)
           (setq opencode-shell--submit-in-flight nil
                 opencode-shell--composer-visible t))))
     (opencode-shell--render-turns)
-    (when (and (not (opencode-shell--permission-awaiting-response-p))
+    (when (and (not (opencode-shell--permission-blocked-p))
                (null opencode-shell--submit-in-flight)
                (equal opencode-shell--request-status "idle"))
       (opencode-shell--stop-polling))
@@ -1333,7 +1330,7 @@ Each retained session keeps its server-reported directory unchanged."
   (let ((idle (and (opencode-shell--get opencode-shell--session-status
                                          opencode-shell--session-id)
                    (equal (opencode-shell--status opencode-shell--session-id) "idle"))))
-    (if (or (not idle) (opencode-shell--permission-awaiting-response-p))
+    (if (or (not idle) (opencode-shell--permission-blocked-p))
         (setq opencode-shell--idle-completion-count 0)
       (if-let ((turn (car (last opencode-shell--turns))))
           (progn
@@ -1571,7 +1568,7 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--permission-reply (reply)
   "Send REPLY for the inline permission at point."
   (let* ((item (opencode-shell--permission-at-point))
-         (id (opencode-shell--get item 'id)))
+         (id (opencode-shell--permission-id item)))
     (when opencode-shell--permission-sending
       (user-error "Permission reply already in progress"))
     (when (and (equal reply "always")
@@ -1597,7 +1594,9 @@ Each retained session keeps its server-reported directory unchanged."
        (opencode-shell--render-permissions)
        (message "Permission %s" reply))
      `((reply . ,reply)) nil
-     (lambda () (setq opencode-shell--permission-sending nil)))))
+     (lambda ()
+       (when (equal opencode-shell--permission-sending id)
+         (setq opencode-shell--permission-sending nil))))))
 
 (defun opencode-shell--permission-allow-once ()
   "Allow the inline permission once."
