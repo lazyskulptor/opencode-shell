@@ -393,6 +393,7 @@
   (let (timers cancelled)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'opencode-shell--resync) #'ignore)
+              ((symbol-function 'opencode-shell--event-connect) (lambda () nil))
               ((symbol-function 'run-at-time)
                (lambda (&rest _) (let ((timer (list 'timer))) (push timer timers) timer)))
               ((symbol-function 'timerp) (lambda (value) (eq (car-safe value) 'timer)))
@@ -503,15 +504,15 @@
       (should (equal (mapcar #'opencode-shell--turn-server-user-id opencode-shell--turns)
                      '("u1" "u2"))))))
 
-(ert-deftest opencode-shell-tool-only-assistant-keeps-turn-waiting-until-text ()
+(ert-deftest opencode-shell-tool-only-assistant-is-retained-as-complete ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((user (opencode-shell-test--message "u1" "user" "question")))
       (opencode-shell--render-messages
        (list user (opencode-shell-test--tool-message "a1" "u1")))
-      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'waiting))
-      (should-not (opencode-shell--turn-assistant (car opencode-shell--turns)))
-      (should (equal opencode-shell--request-status "waiting"))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (should (string-empty-p (opencode-shell--turn-assistant (car opencode-shell--turns))))
+      (should (equal opencode-shell--request-status "idle"))
       (opencode-shell--render-messages
        (list user
              (opencode-shell-test--tool-message "a1" "u1")
@@ -599,13 +600,11 @@
         (insert "first")
         (opencode-shell--submit)
         (insert "second")
-        (opencode-shell--submit)
+        (should-error (opencode-shell--submit) :type 'user-error)
         (funcall (car failures))
-        (should (string-empty-p (opencode-shell--composer-text)))
-        (funcall (cadr failures))
-        (should (string-empty-p (opencode-shell--composer-text)))
+        (should (equal (opencode-shell--composer-text) "second"))
         (should (equal (mapcar #'opencode-shell--turn-user opencode-shell--turns)
-                       '("first" "second")))))))
+                       '("first")))))))
 
 (ert-deftest opencode-shell-blank-submit-is-rejected-without-request ()
   (with-temp-buffer
@@ -851,7 +850,8 @@
        (should (equal opened (list "/server/project/current/" opencode-shell-test--local-profile))))
     (let ((opencode-shell-poll-interval 60) buffers)
       (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
-                ((symbol-function 'opencode-shell--resync) #'ignore)
+               ((symbol-function 'opencode-shell--resync) #'ignore)
+               ((symbol-function 'opencode-shell--event-connect) (lambda () nil))
                 ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
         (unwind-protect
             (progn

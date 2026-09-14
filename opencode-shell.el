@@ -365,6 +365,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--request-status "idle")
 (defvar-local opencode-shell--message-request-sequence 0)
 (defvar-local opencode-shell--message-applied-sequence 0)
+(defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
@@ -391,7 +392,7 @@ and lifecycle keys."
   "Face for pending permission requests." :group 'opencode-shell)
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
-  id server-user-id user assistant parts status acknowledged user-begin user-end
+  id server-user-id user assistant parts assistant-messages status acknowledged user-begin user-end
   response-begin response-end)
 
 (defun opencode-shell--get (object key)
@@ -853,6 +854,13 @@ Each retained session keeps its server-reported directory unchanged."
   "Find the turn with server user ID ID in TURNS."
   (seq-find (lambda (turn) (equal id (opencode-shell--turn-server-user-id turn))) turns))
 
+(defun opencode-shell--turn-by-id (id turns)
+  "Find the turn whose stable client or server ID equals ID."
+  (seq-find (lambda (turn)
+              (or (equal id (opencode-shell--turn-id turn))
+                  (equal id (opencode-shell--turn-server-user-id turn))))
+            turns))
+
 (defun opencode-shell--normalize-turns (messages)
   "Reconcile server MESSAGES into stable buffer-local turn records."
   (let ((old opencode-shell--turns) result current used)
@@ -865,7 +873,7 @@ Each retained session keeps its server-reported directory unchanged."
         (cond
          ((equal role "user")
           (let* ((text (opencode-shell--message-text envelope))
-                 (turn (or (opencode-shell--turn-by-server-id id old)
+                  (turn (or (opencode-shell--turn-by-id id old)
                            (seq-find
                             (lambda (candidate)
                               (and (null (opencode-shell--turn-server-user-id candidate))
@@ -883,19 +891,32 @@ Each retained session keeps its server-reported directory unchanged."
             (setq current turn)
             (push turn used)
             (push turn result)))
-         ((equal role "assistant")
-          (let* ((text (opencode-shell--message-text envelope))
-                 (turn (or (and parent (opencode-shell--turn-by-server-id parent (append result old)))
-                           current)))
+          ((equal role "assistant")
+           (let* ((turn (or (and parent (opencode-shell--turn-by-id parent (append result old)))
+                            current)))
             (when turn
-              (setf (opencode-shell--turn-parts turn) (opencode-shell--get envelope 'parts))
-              (unless (string-empty-p text)
-                 (setf (opencode-shell--turn-assistant turn) text
-                       (opencode-shell--turn-status turn) 'complete))))))))
+              (let* ((messages (opencode-shell--turn-assistant-messages turn))
+                     (entry (assoc id messages)))
+                (if entry (setcdr entry envelope)
+                  (setq messages (append messages (list (cons id envelope)))))
+                (setf (opencode-shell--turn-assistant-messages turn) messages
+                      (opencode-shell--turn-parts turn)
+                      (apply #'append (mapcar (lambda (item)
+                                                (opencode-shell--get (cdr item) 'parts))
+                                              messages))
+                      (opencode-shell--turn-assistant turn)
+                      (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
+                                 messages "")
+                      (opencode-shell--turn-status turn)
+                      (if (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
+                              (seq-some (lambda (part)
+                                          (member (format "%s" (opencode-shell--get part 'type))
+                                                  '("step-finish" "tool" "reasoning")))
+                                        (opencode-shell--turn-parts turn)))
+                          'complete 'waiting)))))))))
     (setq result (nreverse result))
     (dolist (turn old)
-      (when (and (null (opencode-shell--turn-server-user-id turn))
-                 (not (memq turn result)))
+      (when (not (memq turn result))
         (setq result (append result (list turn)))))
     result))
 
@@ -1139,6 +1160,11 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--event-filter (_process chunk)
   "Incrementally parse SSE CHUNK without assuming frame boundaries."
   (setq opencode-shell--event-buffer (concat opencode-shell--event-buffer chunk))
+  (when (string-match "\r?\n\r?\n" opencode-shell--event-buffer)
+    (let ((headers (substring opencode-shell--event-buffer 0 (match-beginning 0))))
+      (when (string-prefix-p "HTTP/" headers)
+        (setq opencode-shell--event-buffer
+              (substring opencode-shell--event-buffer (match-end 0))))))
   (let ((separator "\r?\n\r?\n") frame)
     (while (string-match separator opencode-shell--event-buffer)
       (setq frame (substring opencode-shell--event-buffer 0 (match-beginning 0))
@@ -1178,26 +1204,37 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--event-connect ()
   "Connect the current session buffer to OpenCode's SSE event stream."
   (unless (process-live-p opencode-shell--event-process)
-    (let ((url-request-extra-headers
-           (append '(("Accept" . "text/event-stream"))
-                   (when-let ((header (opencode-shell--auth-header opencode-shell--profile)))
-                     (list header))))
-          (origin (current-buffer)))
+    (let* ((url (url-generic-parse-url (opencode-shell--url "/event")))
+           (host (url-host url))
+           (port (or (url-port url) (if (equal (url-type url) "https") 443 80)))
+           (path (concat (url-filename url)
+                         (if (string-match-p "\\?" (url-filename url)) "&" "?")
+                         (opencode-shell--query `((directory . ,opencode-shell--directory)))))
+           (auth (opencode-shell--auth-header opencode-shell--profile))
+           (target (current-buffer))
+           (request (concat "GET " path " HTTP/1.1\r\nHost: " host
+                            "\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n"
+                            (if auth (format "%s: %s\r\n" (car auth) (cdr auth)) "")
+                            "\r\n")))
       (setq opencode-shell--event-buffer "")
       (condition-case nil
-          (setq opencode-shell--event-process
-                (url-retrieve
-                 (opencode-shell--url "/event")
-                 (lambda (_status)
-                   (when (buffer-live-p origin)
-                     (with-current-buffer origin
-                       (setq opencode-shell--event-reconnect-attempt 0)
-                       (opencode-shell--resync))))
-                 nil t t))
-        (error (opencode-shell--event-schedule-reconnect)))
-      (when (processp opencode-shell--event-process)
-        (set-process-filter opencode-shell--event-process #'opencode-shell--event-filter)
-        (set-process-sentinel opencode-shell--event-process #'opencode-shell--event-sentinel)))))
+          (let ((process
+                 (make-network-process
+                  :name (format "opencode-event-%s" opencode-shell--session-id)
+                  :buffer nil :host host :service port :nowait nil
+                  :type (if (equal (url-type url) "https") 'tls 'network)
+                  :coding 'utf-8-unix
+                  :filter (lambda (process chunk)
+                            (when (buffer-live-p target)
+                              (with-current-buffer target
+                                (opencode-shell--event-filter process chunk))))
+                  :sentinel (lambda (process event)
+                              (when (buffer-live-p target)
+                                (with-current-buffer target
+                                  (opencode-shell--event-sentinel process event)))))))
+            (setq opencode-shell--event-process process)
+            (process-send-string process request))
+        (error (opencode-shell--event-schedule-reconnect))))))
 
 (defun opencode-shell--question-prompt (question)
   "Return a readable answer prompt for QUESTION."
@@ -1297,25 +1334,30 @@ Each retained session keeps its server-reported directory unchanged."
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
   (let ((text (opencode-shell--composer-text)))
+    (when opencode-shell--submit-in-flight
+      (user-error "A prompt delivery is already being reconciled"))
     (when (string-blank-p text) (user-error "Prompt is blank"))
     (let ((turn (opencode-shell--make-turn
                   :id (format "msg_%s_%d" (format-time-string "%s%N")
                               (cl-incf opencode-shell--turn-counter))
                   :user text :status 'sending)))
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
-            opencode-shell--request-status "waiting")
+            opencode-shell--request-status "sending"
+            opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)
       (force-mode-line-update)
        (opencode-shell--request
         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
        (lambda (_)
+         (setq opencode-shell--submit-in-flight nil)
          (setf (opencode-shell--turn-status turn) 'waiting)
          (opencode-shell--render-turns)
          (opencode-shell--resync))
         (cons `(messageID . ,(opencode-shell--turn-id turn))
               (opencode-shell--prompt-body text)) nil
        (lambda ()
+         (setq opencode-shell--submit-in-flight nil)
          (setf (opencode-shell--turn-status turn) 'recovering)
          (setq opencode-shell--request-status "recovering")
          (opencode-shell--render-turns)
