@@ -243,7 +243,6 @@ and lifecycle keys."
 
 (defun opencode-shell--register-profile-commands ()
   "Refresh session and start commands for configured server aliases."
-  (interactive)
   (let ((seen (make-hash-table :test #'equal)) definitions)
     (dolist (profile opencode-shell-profiles)
       (let* ((name (opencode-shell--profile-name profile))
@@ -578,7 +577,6 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--sessions (&optional directory profile)
   "Open PROFILE's server-wide session browser.
 DIRECTORY, when non-nil, is only an initial directory view filter."
-  (interactive)
   (setq profile (or (opencode-shell--resolve-profile profile)
                     profile opencode-shell--profile
                     (opencode-shell--default-profile)))
@@ -1519,7 +1517,6 @@ DIRECTORY, when non-nil, is only an initial directory view filter."
   "Start local PROFILE server and invoke CALLBACK when healthy.
 Concurrent starts for one server are coalesced.  Remote profiles are never
 auto-started."
-  (interactive)
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
           (key (opencode-shell--server-key profile))
           (state (gethash key opencode-shell--servers))
@@ -1561,7 +1558,6 @@ auto-started."
 
 (defun opencode-shell--stop-server (&optional profile)
   "Stop PROFILE server only when this client owns its process."
-  (interactive)
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
           (key (opencode-shell--server-key profile))
          (state (gethash key opencode-shell--servers))
@@ -1573,7 +1569,6 @@ auto-started."
 
 (defun opencode-shell--restart-server (&optional profile)
   "Restart an owned local PROFILE server."
-  (interactive)
   (let ((profile (or profile opencode-shell--profile (opencode-shell--read-profile))))
     (opencode-shell--stop-server profile)
     (opencode-shell--start-server profile)))
