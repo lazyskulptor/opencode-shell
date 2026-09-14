@@ -837,6 +837,14 @@
              (:name "foo_bar" :base-url "http://localhost:2"))))
       (should-error (opencode-shell-register-profile-commands) :type 'user-error))))
 
+(ert-deftest opencode-shell-register-profile-commands-does-not-overwrite-existing-functions ()
+  (let ((opencode-shell-profiles
+         '((:name "reserved" :base-url "http://localhost:1")))
+        (opencode-shell--generated-profile-commands nil))
+    (cl-letf (((symbol-function 'opencode-shell-reserved-sessions) #'ignore))
+      (should-error (opencode-shell-register-profile-commands) :type 'user-error)
+      (should (eq (symbol-function 'opencode-shell-reserved-sessions) #'ignore)))))
+
 (ert-deftest opencode-shell-broad-profile-launch-scopes-request-and-buffers ()
   (let* ((profile '(:name "workspace" :base-url "http://127.0.0.1:4096"
                      :directory "/Workspace" :workspace "/server/Workspace"

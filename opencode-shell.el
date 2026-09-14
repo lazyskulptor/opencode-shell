@@ -218,25 +218,31 @@ and lifecycle keys."
 (defun opencode-shell-register-profile-commands ()
   "Refresh namespaced session commands for configured profiles."
   (interactive)
-  (mapc (lambda (symbol) (when (fboundp symbol) (fmakunbound symbol)))
-        opencode-shell--generated-profile-commands)
-  (setq opencode-shell--generated-profile-commands nil)
-  (let ((seen (make-hash-table :test #'equal)))
+  (let ((seen (make-hash-table :test #'equal)) definitions)
     (dolist (profile opencode-shell-profiles)
       (let* ((name (opencode-shell--profile-name profile))
              (segment (opencode-shell--profile-command-segment name))
              (symbol (intern (format "opencode-shell-%s-sessions" segment))))
         (when (gethash symbol seen)
           (user-error "OpenCode profile command collision: %s" symbol))
+        (when (and (fboundp symbol)
+                   (not (memq symbol opencode-shell--generated-profile-commands)))
+          (user-error "OpenCode profile command already exists: %s" symbol))
         (puthash symbol t seen)
+        (push (list symbol name) definitions)))
+    (mapc (lambda (symbol) (when (fboundp symbol) (fmakunbound symbol)))
+          opencode-shell--generated-profile-commands)
+    (setq opencode-shell--generated-profile-commands nil)
+    (dolist (definition (nreverse definitions))
+      (pcase-let ((`(,symbol ,name) definition))
         (defalias symbol
           (lambda ()
             (interactive)
             (opencode-shell-open-profile name))
           (format "Open the %s OpenCode session browser." name))
-        (push symbol opencode-shell--generated-profile-commands))))
-  (setq opencode-shell--generated-profile-commands
-        (nreverse opencode-shell--generated-profile-commands)))
+        (push symbol opencode-shell--generated-profile-commands)))
+    (setq opencode-shell--generated-profile-commands
+          (nreverse opencode-shell--generated-profile-commands))))
 
 (defun opencode-shell--server-directory (directory profile)
   "Map Emacs DIRECTORY to the path understood by PROFILE's server."
