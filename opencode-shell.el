@@ -215,7 +215,7 @@ and lifecycle keys."
       (user-error "OpenCode profile name cannot form a command: %s" name))
     segment))
 
-(defun opencode-shell-register-profile-commands ()
+(defun opencode-shell--register-profile-commands ()
   "Refresh session and start commands for configured server aliases."
   (interactive)
   (let ((seen (make-hash-table :test #'equal)) definitions)
@@ -240,7 +240,7 @@ and lifecycle keys."
         (defalias sessions-symbol
           (lambda ()
             (interactive)
-            (opencode-shell--open-profile name))
+            (opencode-shell--open-profile name nil t))
           (format "Open the %s OpenCode session browser." name))
         (defalias start-symbol
           (lambda ()
@@ -1608,11 +1608,11 @@ auto-started."
          profile (lambda (ready) (opencode-shell--sessions nil ready)))
       (opencode-shell--sessions nil profile))))
 
-(defun opencode-shell--open-profile (profile &optional directory)
+(defun opencode-shell--open-profile (profile &optional directory server-wide)
   "Open PROFILE's session browser, optionally scoped to DIRECTORY."
   (interactive (list (opencode-shell--read-profile) nil))
   (setq profile (or (opencode-shell--resolve-profile profile) profile))
-  (let ((directory (or directory default-directory)))
+  (let ((directory (unless server-wide (or directory default-directory))))
     (if (and (plist-get profile :start-command)
              (not (opencode-shell--profile-remote-p profile)))
         (opencode-shell--start-server
@@ -1651,10 +1651,10 @@ auto-started."
       (user-error "Cannot locate OpenCode Shell source files"))
     (load render nil nil t)
     (load source nil nil t)
-    (opencode-shell-register-profile-commands)
+    (opencode-shell--register-profile-commands)
     (message "Reloaded OpenCode Shell")))
 
-(opencode-shell-register-profile-commands)
+(opencode-shell--register-profile-commands)
 
 (with-eval-after-load 'evil
   (opencode-shell--setup-evil)
