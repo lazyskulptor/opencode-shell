@@ -406,6 +406,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
+(defvar-local opencode-shell--idle-completion-count 0)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
@@ -1287,20 +1288,29 @@ Each retained session keeps its server-reported directory unchanged."
     (force-mode-line-update)))
 
 (defun opencode-shell--complete-idle-turn ()
-  "Complete the active receiving turn when server status is idle."
-  (when (and (opencode-shell--get opencode-shell--session-status opencode-shell--session-id)
-             (equal (opencode-shell--status opencode-shell--session-id) "idle"))
-    (when-let ((turn (car (last opencode-shell--turns))))
-      (when (and (memq (opencode-shell--turn-status turn) '(thinking receiving))
+  "Complete the active response after two consecutive authoritative idle polls."
+  (let ((idle (and (opencode-shell--get opencode-shell--session-status
+                                         opencode-shell--session-id)
+                   (equal (opencode-shell--status opencode-shell--session-id) "idle"))))
+    (if (not idle)
+        (setq opencode-shell--idle-completion-count 0)
+      (if-let ((turn (car (last opencode-shell--turns))))
+          (progn
+            (if (and (memq (opencode-shell--turn-status turn) '(thinking receiving))
                  (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
                      (opencode-shell--turn-parts turn)))
-        (setf (opencode-shell--turn-status turn) 'complete)
-        (setq opencode-shell--submit-in-flight nil
-              opencode-shell--composer-visible t
-              opencode-shell--request-status "idle")
-        (opencode-shell--render-turns)
-        (opencode-shell--stop-polling)
-        (force-mode-line-update)))))
+                (cl-incf opencode-shell--idle-completion-count)
+              (setq opencode-shell--idle-completion-count 0))
+            (when (>= opencode-shell--idle-completion-count 2)
+              (setf (opencode-shell--turn-status turn) 'complete)
+              (setq opencode-shell--submit-in-flight nil
+                    opencode-shell--composer-visible t
+                    opencode-shell--idle-completion-count 0
+                    opencode-shell--request-status "idle")
+              (opencode-shell--render-turns)
+              (opencode-shell--stop-polling)
+              (force-mode-line-update)))
+        (setq opencode-shell--idle-completion-count 0)))))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
@@ -1435,6 +1445,7 @@ Each retained session keeps its server-reported directory unchanged."
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
             opencode-shell--request-status "sending"
             opencode-shell--composer-visible nil
+            opencode-shell--idle-completion-count 0
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)

@@ -712,7 +712,7 @@
     (opencode-shell--complete-idle-turn)
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))))
 
-(ert-deftest opencode-shell-idle-status-completes-text-response-without-finish-part ()
+(ert-deftest opencode-shell-idle-status-requires-two-polls-to-complete-text-response ()
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
@@ -722,6 +722,9 @@
              (parts . (((id . "p1") (type . "text") (text . "answer")))))))
     (setq opencode-shell--session-status '((s . ((type . "idle"))))
           opencode-shell--submit-in-flight "u1")
+    (opencode-shell--complete-idle-turn)
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
+    (should opencode-shell--submit-in-flight)
     (opencode-shell--complete-idle-turn)
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
     (should-not opencode-shell--submit-in-flight)))
