@@ -216,31 +216,41 @@ and lifecycle keys."
     segment))
 
 (defun opencode-shell-register-profile-commands ()
-  "Refresh namespaced session commands for configured profiles."
+  "Refresh session and start commands for configured server aliases."
   (interactive)
   (let ((seen (make-hash-table :test #'equal)) definitions)
     (dolist (profile opencode-shell-profiles)
       (let* ((name (opencode-shell--profile-name profile))
              (segment (opencode-shell--profile-command-segment name))
-             (symbol (intern (format "opencode-shell-%s-sessions" segment))))
-        (when (gethash symbol seen)
-          (user-error "OpenCode profile command collision: %s" symbol))
-        (when (and (fboundp symbol)
-                   (not (memq symbol opencode-shell--generated-profile-commands)))
-          (user-error "OpenCode profile command already exists: %s" symbol))
-        (puthash symbol t seen)
-        (push (list symbol name) definitions)))
+             (symbols (list (intern (format "%s-sessions" segment))
+                            (intern (format "%s-start" segment)))))
+        (dolist (symbol symbols)
+          (when (gethash symbol seen)
+            (user-error "OpenCode profile command collision: %s" symbol))
+          (when (and (fboundp symbol)
+                     (not (memq symbol opencode-shell--generated-profile-commands)))
+            (user-error "OpenCode profile command already exists: %s" symbol))
+          (puthash symbol t seen))
+        (push (list symbols name) definitions)))
     (mapc (lambda (symbol) (when (fboundp symbol) (fmakunbound symbol)))
           opencode-shell--generated-profile-commands)
     (setq opencode-shell--generated-profile-commands nil)
     (dolist (definition (nreverse definitions))
-      (pcase-let ((`(,symbol ,name) definition))
-        (defalias symbol
+      (pcase-let ((`((,sessions-symbol ,start-symbol) ,name) definition))
+        (defalias sessions-symbol
           (lambda ()
             (interactive)
-            (opencode-shell-open-profile name))
+            (opencode-shell--open-profile name))
           (format "Open the %s OpenCode session browser." name))
-        (push symbol opencode-shell--generated-profile-commands)))
+        (defalias start-symbol
+          (lambda ()
+            (interactive)
+            (opencode-shell--start-server
+             (or (opencode-shell--resolve-profile name)
+                 (user-error "Unknown OpenCode server alias: %s" name))))
+          (format "Start or connect to the %s OpenCode server." name))
+        (push sessions-symbol opencode-shell--generated-profile-commands)
+        (push start-symbol opencode-shell--generated-profile-commands)))
     (setq opencode-shell--generated-profile-commands
           (nreverse opencode-shell--generated-profile-commands))))
 
@@ -557,8 +567,7 @@ Each retained session keeps its server-reported directory unchanged."
   (add-hook 'tabulated-list-revert-hook #'opencode-shell-refresh nil t)
   (tabulated-list-init-header))
 
-;;;###autoload
-(defun opencode-shell-sessions (&optional directory profile)
+(defun opencode-shell--sessions (&optional directory profile)
   "Open PROFILE's server-wide session browser.
 DIRECTORY, when non-nil, is only an initial directory view filter.
 For compatibility, DIRECTORY may itself be a profile plist or profile name."
@@ -1510,7 +1519,7 @@ For compatibility, DIRECTORY may itself be a profile plist or profile name."
                key attempt
                (format "could not start server: %s" (error-message-string err))))))))
 
-(defun opencode-shell-start-server (&optional profile callback)
+(defun opencode-shell--start-server (&optional profile callback)
   "Start local PROFILE server and invoke CALLBACK when healthy.
 Concurrent starts for one server are coalesced.  Remote profiles are never
 auto-started."
@@ -1554,7 +1563,7 @@ auto-started."
                         (opencode-shell--finish-start key attempt)
                       (opencode-shell--spawn-server profile attempt)))))))))))
 
-(defun opencode-shell-stop-server (&optional profile)
+(defun opencode-shell--stop-server (&optional profile)
   "Stop PROFILE server only when this client owns its process."
   (interactive)
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
@@ -1566,14 +1575,14 @@ auto-started."
     (delete-process process)
     (remhash key opencode-shell--servers)))
 
-(defun opencode-shell-restart-server (&optional profile)
+(defun opencode-shell--restart-server (&optional profile)
   "Restart an owned local PROFILE server."
   (interactive)
   (let ((profile (or profile opencode-shell--profile (opencode-shell--read-profile))))
-    (opencode-shell-stop-server profile)
-    (opencode-shell-start-server profile)))
+    (opencode-shell--stop-server profile)
+    (opencode-shell--start-server profile)))
 
-(defun opencode-shell-stop-all-servers ()
+(defun opencode-shell--stop-all-servers ()
   "Stop owned servers whose shared lifecycle requests exit cleanup."
   (let (owned)
     (maphash (lambda (_key state)
@@ -1585,40 +1594,50 @@ auto-started."
     (dolist (process owned)
       (when (process-live-p process) (delete-process process)))))
 
-(add-hook 'kill-emacs-hook #'opencode-shell-stop-all-servers)
+(add-hook 'kill-emacs-hook #'opencode-shell--stop-all-servers)
 
 ;;;###autoload
-(defun opencode-shell (&optional choose-profile)
-  "Open sessions for the matching profile, or select one with CHOOSE-PROFILE."
-  (interactive "P")
-  (let ((directory default-directory)
-        (profile (if choose-profile (opencode-shell--read-profile)
-                   (or (opencode-shell--matching-profile)
-                       (and opencode-shell-profiles (opencode-shell--read-profile))
-                       (opencode-shell--default-profile)))))
+(defun opencode-shell (&optional profile)
+  "Select an OpenCode server and open its complete session browser."
+  (interactive (list (opencode-shell--read-profile)))
+  (let ((profile (or (opencode-shell--resolve-profile profile) profile
+                     (opencode-shell--read-profile))))
     (if (and (plist-get profile :start-command)
              (not (opencode-shell--profile-remote-p profile)))
-        (opencode-shell-start-server profile
-                                      (lambda (ready) (opencode-shell-sessions directory ready)))
-      (opencode-shell-sessions directory profile))))
+        (opencode-shell--start-server
+         profile (lambda (ready) (opencode-shell--sessions nil ready)))
+      (opencode-shell--sessions nil profile))))
 
-;;;###autoload
-(defun opencode-shell-launch (&optional choose-profile)
-  "Compatibility wrapper for `opencode-shell'."
-  (interactive "P")
-  (opencode-shell choose-profile))
-
-;;;###autoload
-(defun opencode-shell-open-profile (profile &optional directory)
+(defun opencode-shell--open-profile (profile &optional directory)
   "Open PROFILE's session browser, optionally scoped to DIRECTORY."
   (interactive (list (opencode-shell--read-profile) nil))
   (setq profile (or (opencode-shell--resolve-profile profile) profile))
   (let ((directory (or directory default-directory)))
     (if (and (plist-get profile :start-command)
              (not (opencode-shell--profile-remote-p profile)))
-        (opencode-shell-start-server
-         profile (lambda (ready) (opencode-shell-sessions directory ready)))
-      (opencode-shell-sessions directory profile))))
+        (opencode-shell--start-server
+         profile (lambda (ready) (opencode-shell--sessions directory ready)))
+      (opencode-shell--sessions directory profile))))
+
+;;;###autoload
+(defun opencode-shell-status (profile)
+  "Select PROFILE and report its health and client ownership."
+  (interactive (list (opencode-shell--read-profile)))
+  (opencode-shell--server-ready
+   profile
+   (lambda (ready checked-profile)
+     (let* ((state (gethash (opencode-shell--server-key checked-profile)
+                            opencode-shell--servers))
+            (ownership (if (plist-get state :owned) "owned" "external")))
+       (message "OpenCode %s: %s (%s)"
+                (opencode-shell--profile-name checked-profile)
+                (if ready "ready" "unreachable") ownership)))))
+
+;;;###autoload
+(defun opencode-shell-restart (profile)
+  "Select and restart an owned local PROFILE server."
+  (interactive (list (opencode-shell--read-profile)))
+  (opencode-shell--restart-server profile))
 
 ;;;###autoload
 (defun opencode-shell-reload ()

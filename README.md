@@ -8,9 +8,8 @@ It is an independent early beta workflow, not an ACP bridge.
 Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
 original single-server setup, the local endpoint defaults to
 `http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it and
-optionally configure `opencode-shell-directory`, then run
-`M-x opencode-shell-sessions`. Existing calls such as
-`(opencode-shell-sessions "/work/project")` remain supported.
+optionally configure `opencode-shell-directory`, then run `M-x opencode-shell`
+to select a server and open its complete session browser.
 
 ## Profiles
 
@@ -18,12 +17,10 @@ optionally configure `opencode-shell-directory`, then run
 `:base-url`, client `:directory`, server `:workspace`, session-list root,
 authentication source, and local server lifecycle settings. Local profiles
 default `:session-list-directory` to the local user home. Remote profiles must
-set it to an absolute server-native home/root path, never TRAMP syntax. Use
-`M-x opencode-shell-launch` to pick
-the profile matching the current directory; use a prefix argument to choose a
-profile explicitly. `M-x opencode-shell-open-profile` always prompts. The
-session browser also accepts a profile directly, while retaining the legacy
-directory argument described above.
+set it to an absolute server-native home/root path, never TRAMP syntax.
+`M-x opencode-shell` always selects a server first. Each alias also generates
+`<alias>-sessions` and `<alias>-start`, such as `local-sessions` and
+`local-start`.
 
 Profile `:name` values and identity keys must be unique; set an explicit `:id`
 when an identity must survive a name or URL change. A string `:match` is a
@@ -43,9 +40,9 @@ attempt, owned process, stop/restart state, and exit cleanup while retaining
 their own directory, authentication, sessions, and capabilities. Profiles for
 one endpoint must specify compatible start command, health path, server
 directory, timeout, health authentication header, and `:stop-on-exit` setting;
-configuration conflicts fail before startup. `M-x opencode-shell-start-server`,
-`M-x opencode-shell-stop-server`, and `M-x opencode-shell-restart-server`
-provide explicit control. Stop only terminates a live process started and owned
+configuration conflicts fail before startup. `<alias>-start`,
+`M-x opencode-shell-status`, and `M-x opencode-shell-restart` provide explicit
+control. Internal cleanup only terminates a live process started and owned
 by this Emacs client. Killing a browser or transcript does not stop that
 process. Owned processes are stopped once when Emacs exits unless the shared
 profiles consistently set `:stop-on-exit` to nil. Profiles using a TRAMP
