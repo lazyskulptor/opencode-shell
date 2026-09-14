@@ -316,12 +316,12 @@
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
         (opencode-shell--resync)
-        (should (= (length requests) 4))
+        (should (= (length requests) 5))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
         (opencode-shell--resync)
-        (should (= (length requests) 4))
+        (should (= (length requests) 5))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
         (funcall (cadr (assoc "/agent" requests)) nil)
@@ -338,7 +338,7 @@
           (setq opencode-shell--in-flight nil))
         (opencode-shell--resync)
         (should (equal (mapcar #'car requests)
-                       '("/permission" "/session/s/message")))))))
+                       '("/permission" "/session/status" "/session/s/message")))))))
 
 (ert-deftest opencode-shell-capabilities-retry-after-transient-failure ()
   (with-temp-buffer
@@ -550,6 +550,30 @@
       (opencode-shell--render-messages (list user partial))
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
       (should (equal opencode-shell--request-status "receiving")))))
+
+(ert-deftest opencode-shell-idle-status-completes-text-response-without-finish-part ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p1") (type . "text") (text . "answer")))))))
+    (setq opencode-shell--session-status '((s . ((type . "idle"))))
+          opencode-shell--submit-in-flight "u1")
+    (opencode-shell--complete-idle-turn)
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+    (should-not opencode-shell--submit-in-flight)))
+
+(ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
+  (let* ((known '((id . "p1") (type . "tool") (tool . "read")
+                  (state . ((status . "running"))) (metadata . ((path . "x")))))
+         (incoming '((id . "p1") (state . ((status . "completed")))))
+         (merged (car (opencode-shell--merge-parts (list known) (list incoming)))))
+    (should (equal (opencode-shell--get merged 'tool) "read"))
+    (should (equal (opencode-shell--get merged 'metadata) '((path . "x"))))
+    (should (equal (opencode-shell--get (opencode-shell--get merged 'state) 'status)
+                   "completed"))))
 
 (ert-deftest opencode-shell-composer-boundary-is-multiline-and-transcript-read-only ()
   (with-temp-buffer

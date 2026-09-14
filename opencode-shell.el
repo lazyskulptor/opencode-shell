@@ -845,6 +845,12 @@ Each retained session keeps its server-reported directory unchanged."
       (opencode-shell--get part 'callID)
       (opencode-shell--get part 'callId)))
 
+(defun opencode-shell--merge-alist (known incoming)
+  "Return KNOWN alist with fields present in INCOMING replaced."
+  (let ((result (copy-tree known)))
+    (dolist (field incoming result)
+      (setf (alist-get (car field) result) (cdr field)))))
+
 (defun opencode-shell--merge-parts (known incoming)
   "Merge INCOMING message parts into KNOWN without dropping omitted parts."
   (let ((result (copy-sequence known)))
@@ -854,7 +860,7 @@ Each retained session keeps its server-reported directory unchanged."
                                        (equal id (opencode-shell--part-id known-part)))
                                      result))))
         (if cell
-            (setcar (memq cell result) part)
+            (setcar (memq cell result) (opencode-shell--merge-alist cell part))
           (setq result (append result (list part))))))
     result))
 
@@ -1151,6 +1157,19 @@ Each retained session keeps its server-reported directory unchanged."
     (opencode-shell--render-turns)
     (force-mode-line-update)))
 
+(defun opencode-shell--complete-idle-turn ()
+  "Complete the active receiving turn when server status is idle."
+  (when (equal (opencode-shell--status opencode-shell--session-id) "idle")
+    (when-let ((turn (car (last opencode-shell--turns))))
+      (when (and (eq (opencode-shell--turn-status turn) 'receiving)
+                 (or (not (string-empty-p (opencode-shell--turn-assistant turn)))
+                     (opencode-shell--turn-parts turn)))
+        (setf (opencode-shell--turn-status turn) 'complete)
+        (setq opencode-shell--submit-in-flight nil
+              opencode-shell--request-status "idle")
+        (opencode-shell--render-turns)
+        (force-mode-line-update)))))
+
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
   (unless (alist-get key opencode-shell--in-flight)
@@ -1205,6 +1224,11 @@ Each retained session keeps its server-reported directory unchanged."
      'messages
      "GET" (format "/session/%s/message" opencode-shell--session-id)
      (lambda (messages) (opencode-shell--render-messages messages sequence))))
+  (opencode-shell--guarded-request
+   'status "GET" "/session/status"
+   (lambda (statuses)
+     (setq opencode-shell--session-status statuses)
+     (opencode-shell--complete-idle-turn)))
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions)
   (when (and (or capabilities (not opencode-shell--capabilities-loaded))
