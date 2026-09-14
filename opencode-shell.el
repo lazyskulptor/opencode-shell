@@ -404,6 +404,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--poll-heartbeat 0)
 (defvar-local opencode-shell--submit-in-flight nil)
+(defvar-local opencode-shell--composer-visible t)
+(defvar-local opencode-shell--composer-label-visible t)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
@@ -1018,6 +1020,10 @@ Each retained session keeps its server-reported directory unchanged."
   "Return the composer contents without properties."
   (buffer-substring-no-properties opencode-shell--composer-start (point-max)))
 
+(defun opencode-shell--composer-visible-p ()
+  "Return non-nil when the prompt composer should be displayed."
+  opencode-shell--composer-visible)
+
 (defun opencode-shell--session-permissions (items)
   "Return permission ITEMS belonging to the current session."
   (seq-filter
@@ -1064,8 +1070,11 @@ Each retained session keeps its server-reported directory unchanged."
              keymap ,opencode-shell-permission-map
              opencode-shell-permission ,item))))
       (set-marker opencode-shell--permission-end (point))
-      (insert (propertize "Prompt> " 'read-only t
-                          'rear-nonsticky '(read-only)))
+      (when (opencode-shell--composer-visible-p)
+        (insert (propertize "Prompt> " 'read-only t
+                            'rear-nonsticky '(read-only))))
+      (setq opencode-shell--composer-label-visible
+            (opencode-shell--composer-visible-p))
       (set-marker opencode-shell--composer-start (point)))
     (when offset
       (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
@@ -1183,7 +1192,7 @@ Each retained session keeps its server-reported directory unchanged."
          (inhibit-read-only t))
     (let* ((known-count (length opencode-shell--rendered-turns))
            (append-only
-            (and (<= known-count (length opencode-shell--turns))
+             (and (<= known-count (length opencode-shell--turns))
                  (cl-every #'eq opencode-shell--rendered-turns
                            (seq-take opencode-shell--turns known-count))
                  (seq-every-p #'opencode-shell--turn-rendered-p
@@ -1202,8 +1211,27 @@ Each retained session keeps its server-reported directory unchanged."
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
         (dolist (turn opencode-shell--turns) (opencode-shell--insert-turn-blocks turn))
+        (when (opencode-shell--composer-visible-p)
+          (insert (propertize "Prompt> " 'read-only t
+                              'rear-nonsticky '(read-only))))
+        (setq opencode-shell--composer-label-visible
+              (opencode-shell--composer-visible-p)))
+      (when (and append-only
+                 (not (opencode-shell--composer-visible-p))
+                 opencode-shell--composer-label-visible
+                 (>= opencode-shell--composer-start (length "Prompt> ")))
+        (delete-region (- opencode-shell--composer-start (length "Prompt> "))
+                       opencode-shell--composer-start)
+        (setq opencode-shell--composer-label-visible nil))
+      (when (and append-only
+                 (opencode-shell--composer-visible-p)
+                 (not opencode-shell--composer-label-visible)
+                 (or opencode-shell--submit-in-flight
+                     opencode-shell--rendered-turns))
+        (goto-char opencode-shell--composer-start)
         (insert (propertize "Prompt> " 'read-only t
-                            'rear-nonsticky '(read-only))))
+                            'rear-nonsticky '(read-only)))
+        (setq opencode-shell--composer-label-visible t))
       (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
       (save-excursion
         (goto-char (- (point-max) (length composer-text)))
@@ -1237,7 +1265,8 @@ Each retained session keeps its server-reported directory unchanged."
                                     (opencode-shell--turn-id turn))
                              (not (eq (opencode-shell--turn-status turn) 'complete))))
                       opencode-shell--turns)
-      (setq opencode-shell--submit-in-flight nil))
+      (setq opencode-shell--submit-in-flight nil
+            opencode-shell--composer-visible t))
     (opencode-shell--render-turns)
     (force-mode-line-update)))
 
@@ -1251,6 +1280,7 @@ Each retained session keeps its server-reported directory unchanged."
                      (opencode-shell--turn-parts turn)))
         (setf (opencode-shell--turn-status turn) 'complete)
         (setq opencode-shell--submit-in-flight nil
+              opencode-shell--composer-visible t
               opencode-shell--request-status "idle")
         (opencode-shell--render-turns)
         (force-mode-line-update)))))
@@ -1387,6 +1417,7 @@ Each retained session keeps its server-reported directory unchanged."
                   :user text :status 'sending)))
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
             opencode-shell--request-status "sending"
+            opencode-shell--composer-visible nil
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)

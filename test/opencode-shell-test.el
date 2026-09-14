@@ -630,6 +630,23 @@
     (opencode-shell--render-turns)
     (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
 
+(ert-deftest opencode-shell-hides-composer-label-until-response-completes ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u1" :user "hello"
+                                            :status 'waiting)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--submit-in-flight "u1"
+            opencode-shell--composer-visible nil)
+      (opencode-shell--render-turns)
+      (should (= 1 (how-many "USER>" (point-min) (point-max))))
+      (should (= 0 (how-many "Prompt> " (point-min) (point-max))))
+      (setf (opencode-shell--turn-status turn) 'complete)
+      (setq opencode-shell--submit-in-flight nil)
+      (setq opencode-shell--composer-visible t)
+      (opencode-shell--render-turns)
+      (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))))
+
 (ert-deftest opencode-shell-identical-completed-poll-is-render-no-op ()
   (with-temp-buffer
     (opencode-shell-mode)
