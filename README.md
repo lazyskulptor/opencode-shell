@@ -75,6 +75,10 @@ or error state and never replaces an already completed response with stale data.
 Pending status cycles `·`, `··`, `···` once per message-history poll. Reasoning-only
 updates show `Thinking`; text or tool activity shows `Receiving`. The dots indicate
 polling activity, not estimated progress.
+Assistant completion comes from the matching message's `finish` and
+`time.completed` metadata, with `step-finish` retained for compatible server
+payloads. A completed tool or idle session status does not complete the whole
+assistant turn; running tools keep the response active.
 
 API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
 session exists and in a session-specific log buffer afterwards. Open the relevant

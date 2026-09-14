@@ -38,3 +38,10 @@ monotonic history reconciliation provide recovery after request interruption.
 A session may be absent from `/session/status` while its history still contains an
 assistant message with a running tool and no `step-finish`. This is not completion:
 the client keeps the turn active and exposes the authoritative reasoning/tool phase.
+
+For an assistant envelope attached to the active user message, `info.finish` plus
+`info.time.completed` is the primary message-level completion evidence.
+`step-finish` remains compatible explicit evidence. Neither a completed/error tool
+part nor `/session/status` idle completes the turn by itself, and any running or
+pending tool part blocks readiness. `Prompt>` is restored and polling stops only
+after that message evidence is present and pending permission work is settled.
