@@ -440,6 +440,18 @@
             (should (equal cancelled (list (cadr timers)))))
         (kill-buffer "*OpenCode Shell timer-test*")))))
 
+(ert-deftest opencode-shell-completion-stops-polling ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((timer (run-at-time 60 nil #'ignore)))
+      (unwind-protect
+          (progn
+            (setq opencode-shell--poll-timer timer)
+            (opencode-shell--render-messages nil)
+            (should-not opencode-shell--poll-timer)
+            (should-not (memq timer timer-list)))
+        (when (timerp timer) (cancel-timer timer))))))
+
 (ert-deftest opencode-shell-evil-setup-load-orders ()
   (let (calls)
     (cl-letf (((symbol-function 'evil-set-initial-state)

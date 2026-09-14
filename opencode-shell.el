@@ -838,6 +838,23 @@ Each retained session keeps its server-reported directory unchanged."
         opencode-shell--capabilities-loading nil)
   (cl-incf opencode-shell--generation))
 
+(defun opencode-shell--stop-polling ()
+  "Stop periodic polling in the current session buffer."
+  (when (timerp opencode-shell--poll-timer)
+    (cancel-timer opencode-shell--poll-timer))
+  (setq opencode-shell--poll-timer nil))
+
+(defun opencode-shell--start-polling ()
+  "Start periodic polling in the current session buffer if needed."
+  (unless (timerp opencode-shell--poll-timer)
+    (let ((buffer (current-buffer)))
+      (setq opencode-shell--poll-timer
+            (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
+                         (lambda (target)
+                           (when (buffer-live-p target)
+                             (with-current-buffer target (opencode-shell--resync))))
+                         buffer)))))
+
 ;;;###autoload
 (defun opencode-shell-open-session (id &optional directory profile)
   "Open exact session ID scoped to DIRECTORY and PROFILE."
@@ -866,12 +883,7 @@ Each retained session keeps its server-reported directory unchanged."
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
       (opencode-shell--resync t)
-      (setq opencode-shell--poll-timer
-            (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
-                         (lambda (target)
-                           (when (buffer-live-p target)
-                             (with-current-buffer target (opencode-shell--resync))))
-                         buffer)))
+      (opencode-shell--start-polling))
     (pop-to-buffer buffer)))
 
 (defun opencode-shell--part-text (part)
@@ -1260,14 +1272,18 @@ Each retained session keeps its server-reported directory unchanged."
               ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
                          opencode-shell--turns) "error")
                (t "idle")))
-    (unless (seq-find (lambda (turn)
-                        (and (equal opencode-shell--submit-in-flight
-                                    (opencode-shell--turn-id turn))
-                             (not (eq (opencode-shell--turn-status turn) 'complete))))
-                      opencode-shell--turns)
-      (setq opencode-shell--submit-in-flight nil
-            opencode-shell--composer-visible t))
+    (when-let ((turn (seq-find
+                      (lambda (entry)
+                        (equal opencode-shell--submit-in-flight
+                               (opencode-shell--turn-id entry)))
+                      opencode-shell--turns)))
+      (when (eq (opencode-shell--turn-status turn) 'complete)
+        (setq opencode-shell--submit-in-flight nil
+              opencode-shell--composer-visible t)))
     (opencode-shell--render-turns)
+    (when (and (null opencode-shell--submit-in-flight)
+               (equal opencode-shell--request-status "idle"))
+      (opencode-shell--stop-polling))
     (force-mode-line-update)))
 
 (defun opencode-shell--complete-idle-turn ()
@@ -1283,6 +1299,7 @@ Each retained session keeps its server-reported directory unchanged."
               opencode-shell--composer-visible t
               opencode-shell--request-status "idle")
         (opencode-shell--render-turns)
+        (opencode-shell--stop-polling)
         (force-mode-line-update)))))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
@@ -1421,6 +1438,7 @@ Each retained session keeps its server-reported directory unchanged."
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)
+      (opencode-shell--start-polling)
       (force-mode-line-update)
        (opencode-shell--request
         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
