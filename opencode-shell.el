@@ -436,13 +436,6 @@ and lifecycle keys."
     (json-parse-buffer :object-type 'alist :array-type 'list
                        :null-object nil :false-object nil)))
 
-(defun opencode-shell--response-body ()
-  "Return the response body without moving point."
-  (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "\r?\n\r?\n" nil t)
-        (buffer-substring-no-properties (point) (point-max)) "")))
-
 (defun opencode-shell--request (method path callback &optional body params error-callback)
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
 BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
