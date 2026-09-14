@@ -792,6 +792,51 @@
               (should (= (length (delete-dups buffers)) 2)))
           (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))))
 
+(ert-deftest opencode-shell-entry-selects-profile-and-preserves-launch-wrapper ()
+  (let ((default-directory "/client/project/") opened)
+    (cl-letf (((symbol-function 'opencode-shell--matching-profile)
+               (lambda (&optional _) opencode-shell-test--local-profile))
+              ((symbol-function 'opencode-shell-start-server)
+               (lambda (profile callback) (funcall callback profile)))
+              ((symbol-function 'opencode-shell-sessions)
+               (lambda (&optional directory profile)
+                 (setq opened (list directory profile)))))
+      (opencode-shell)
+      (should (equal opened (list default-directory opencode-shell-test--local-profile)))
+      (setq opened nil)
+      (opencode-shell-launch)
+      (should (equal opened (list default-directory opencode-shell-test--local-profile))))))
+
+(ert-deftest opencode-shell-register-profile-commands-refreshes-and-isolates-profiles ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+        (opencode-shell--generated-profile-commands nil)
+        opened)
+    (unwind-protect
+        (progn
+          (opencode-shell-register-profile-commands)
+          (should (commandp 'opencode-shell-local-sessions))
+          (should (commandp 'opencode-shell-remote-sessions))
+          (cl-letf (((symbol-function 'opencode-shell-open-profile)
+                     (lambda (profile &optional _) (push profile opened))))
+            (call-interactively 'opencode-shell-local-sessions)
+            (call-interactively 'opencode-shell-remote-sessions))
+          (should (equal opened '("remote" "local")))
+          (setq opencode-shell-profiles (list opencode-shell-test--local-profile))
+          (opencode-shell-register-profile-commands)
+          (should-not (fboundp 'opencode-shell-remote-sessions)))
+      (mapc (lambda (symbol) (when (fboundp symbol) (fmakunbound symbol)))
+            opencode-shell--generated-profile-commands))))
+
+(ert-deftest opencode-shell-register-profile-commands-rejects-invalid-and-colliding-names ()
+  (let ((opencode-shell--generated-profile-commands nil))
+    (let ((opencode-shell-profiles '((:name "bad/name" :base-url "http://localhost:1"))))
+      (should-error (opencode-shell-register-profile-commands) :type 'user-error))
+    (let ((opencode-shell-profiles
+           '((:name "foo bar" :base-url "http://localhost:1")
+             (:name "foo_bar" :base-url "http://localhost:2"))))
+      (should-error (opencode-shell-register-profile-commands) :type 'user-error))))
+
 (ert-deftest opencode-shell-broad-profile-launch-scopes-request-and-buffers ()
   (let* ((profile '(:name "workspace" :base-url "http://127.0.0.1:4096"
                      :directory "/Workspace" :workspace "/server/Workspace"

@@ -50,6 +50,7 @@ and lifecycle keys."
   :type '(repeat plist) :group 'opencode-shell)
 
 (defvar opencode-shell--servers (make-hash-table :test #'equal))
+(defvar opencode-shell--generated-profile-commands nil)
 (defvar-local opencode-shell--profile nil)
 (defvar-local opencode-shell--base-url nil)
 (defvar-local opencode-shell--workspace nil)
@@ -205,7 +206,37 @@ and lifecycle keys."
   (cond ((and (listp value) (plist-member value :base-url)) value)
         ((stringp value)
          (seq-find (lambda (p) (equal value (opencode-shell--profile-name p)))
-                   opencode-shell-profiles))))
+                    opencode-shell-profiles))))
+
+(defun opencode-shell--profile-command-segment (name)
+  "Return a safe command segment for profile NAME."
+  (let ((segment (downcase (replace-regexp-in-string "[ _]+" "-" name))))
+    (unless (string-match-p "\\`[a-z0-9]+\\(?:-[a-z0-9]+\\)*\\'" segment)
+      (user-error "OpenCode profile name cannot form a command: %s" name))
+    segment))
+
+(defun opencode-shell-register-profile-commands ()
+  "Refresh namespaced session commands for configured profiles."
+  (interactive)
+  (mapc (lambda (symbol) (when (fboundp symbol) (fmakunbound symbol)))
+        opencode-shell--generated-profile-commands)
+  (setq opencode-shell--generated-profile-commands nil)
+  (let ((seen (make-hash-table :test #'equal)))
+    (dolist (profile opencode-shell-profiles)
+      (let* ((name (opencode-shell--profile-name profile))
+             (segment (opencode-shell--profile-command-segment name))
+             (symbol (intern (format "opencode-shell-%s-sessions" segment))))
+        (when (gethash symbol seen)
+          (user-error "OpenCode profile command collision: %s" symbol))
+        (puthash symbol t seen)
+        (defalias symbol
+          (lambda ()
+            (interactive)
+            (opencode-shell-open-profile name))
+          (format "Open the %s OpenCode session browser." name))
+        (push symbol opencode-shell--generated-profile-commands))))
+  (setq opencode-shell--generated-profile-commands
+        (nreverse opencode-shell--generated-profile-commands)))
 
 (defun opencode-shell--server-directory (directory profile)
   "Map Emacs DIRECTORY to the path understood by PROFILE's server."
@@ -1551,8 +1582,8 @@ auto-started."
 (add-hook 'kill-emacs-hook #'opencode-shell-stop-all-servers)
 
 ;;;###autoload
-(defun opencode-shell-launch (&optional choose-profile)
-  "Launch the matching profile, or select one with prefix CHOOSE-PROFILE."
+(defun opencode-shell (&optional choose-profile)
+  "Open sessions for the matching profile, or select one with CHOOSE-PROFILE."
   (interactive "P")
   (let ((directory default-directory)
         (profile (if choose-profile (opencode-shell--read-profile)
@@ -1566,10 +1597,39 @@ auto-started."
       (opencode-shell-sessions directory profile))))
 
 ;;;###autoload
+(defun opencode-shell-launch (&optional choose-profile)
+  "Compatibility wrapper for `opencode-shell'."
+  (interactive "P")
+  (opencode-shell choose-profile))
+
+;;;###autoload
 (defun opencode-shell-open-profile (profile &optional directory)
   "Open PROFILE's session browser, optionally scoped to DIRECTORY."
   (interactive (list (opencode-shell--read-profile) nil))
-  (opencode-shell-sessions directory profile))
+  (setq profile (or (opencode-shell--resolve-profile profile) profile))
+  (let ((directory (or directory default-directory)))
+    (if (and (plist-get profile :start-command)
+             (not (opencode-shell--profile-remote-p profile)))
+        (opencode-shell-start-server
+         profile (lambda (ready) (opencode-shell-sessions directory ready)))
+      (opencode-shell-sessions directory profile))))
+
+;;;###autoload
+(defun opencode-shell-reload ()
+  "Reload OpenCode Shell sources and regenerate profile commands."
+  (interactive)
+  (let* ((main (or load-file-name (locate-library "opencode-shell")))
+         (directory (and main (file-name-directory main)))
+         (render (and directory (expand-file-name "opencode-shell-render.el" directory)))
+         (source (and directory (expand-file-name "opencode-shell.el" directory))))
+    (unless (and render source (file-exists-p render) (file-exists-p source))
+      (user-error "Cannot locate OpenCode Shell source files"))
+    (load render nil nil t)
+    (load source nil nil t)
+    (opencode-shell-register-profile-commands)
+    (message "Reloaded OpenCode Shell")))
+
+(opencode-shell-register-profile-commands)
 
 (with-eval-after-load 'evil
   (opencode-shell--setup-evil)
