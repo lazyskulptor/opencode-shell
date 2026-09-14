@@ -1615,7 +1615,7 @@ Each retained session keeps its server-reported directory unchanged."
   (opencode-shell--permission-reply "once"))
 
 (defun opencode-shell--permission-allow-always ()
-  "Always allow the inline permission after confirmation."
+  "Always allow the inline permission."
   (interactive)
   (opencode-shell--permission-reply "always"))
 

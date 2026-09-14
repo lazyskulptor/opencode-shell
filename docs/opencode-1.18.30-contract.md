@@ -16,21 +16,21 @@
 | `GET` | `/agent` | List agents |
 | `GET` | `/permission` | List pending permissions |
 | `POST` | `/permission/:id/reply` | Answer a permission request |
+| `GET` | `/question` | List pending questions |
+| `POST` | `/question/:id/reply` | Answer a question |
+| `POST` | `/question/:id/reject` | Reject a question |
 
 Permission list snapshots may overlap reply callbacks. The client therefore keys
 pending and resolved state by permission `id`, treats duplicate snapshots and
 callbacks idempotently, and does not declare an active response ready while a
-permission is pending or its reply is in flight.
-The list is the server's current pending snapshot. The UI presents only its first
-current-session request, replaces that card with the explicit reply result, and
-then advances to the next request. `once` resolves one request; server-side
-`always` may resolve other matching same-session requests, while `reject` may
-remove all remaining requests in that session. Later snapshots remove those
-siblings from the local queue without synthetic result lines. Emacs sends
-`always` directly and leaves persistent matching to OpenCode.
-| `GET` | `/question` | List pending questions |
-| `POST` | `/question/:id/reply` | Answer a question |
-| `POST` | `/question/:id/reject` | Reject a question |
+permission is pending or its reply is in flight. The list is the server's current
+pending snapshot. The UI presents only its first current-session request,
+replaces that card with the explicit reply result, and then advances to the next
+request. `once` resolves one request; server-side `always` may resolve other
+matching same-session requests, while `reject` may remove all remaining requests
+in that session. Later snapshots remove those siblings from the local queue
+without synthetic result lines. Emacs sends `always` directly and leaves
+persistent matching to OpenCode.
 
 Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
