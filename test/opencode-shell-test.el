@@ -559,7 +559,18 @@
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "r1") (type . "reasoning") (text . "thinking")))))))
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'thinking))
-    (should (equal opencode-shell--request-status "thinking"))))
+    (should (equal opencode-shell--request-status "thinking"))
+    (should (string-match-p "Thinking" (buffer-string)))))
+
+(ert-deftest opencode-shell-partial-text-keeps-visible-receiving-status ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+    (should (string-match-p "Receiving" (buffer-string)))
+    (should-not (string-match-p "ASSISTANT>" (buffer-string)))))
 
 (ert-deftest opencode-shell-history-poll-advances-buffer-local-heartbeat ()
   (let ((first (generate-new-buffer " *heartbeat-1*"))

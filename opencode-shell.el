@@ -1044,9 +1044,10 @@ Each retained session keeps its server-reported directory unchanged."
             (or (opencode-shell--turn-user turn) "") "\n\n")
     (let ((user-end (point))
           (response-begin (point)))
-      (if-let ((answer (opencode-shell--turn-assistant turn)))
+      (if (eq (opencode-shell--turn-status turn) 'complete)
+          (let ((answer (opencode-shell--turn-assistant turn)))
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
-                  answer "\n\n")
+                  (or answer "") "\n\n"))
         (insert (propertize
      (pcase (opencode-shell--turn-status turn)
        ('sending (opencode-shell--status-display "Sending"))
