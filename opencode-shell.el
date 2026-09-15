@@ -1092,7 +1092,49 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell--resolved-permission (id)
   "Return the resolved permission record for ID."
   (seq-find (lambda (record) (equal id (opencode-shell--get record 'id)))
-            opencode-shell--resolved-permissions))
+             opencode-shell--resolved-permissions))
+
+(defun opencode-shell--permission-result-text (record)
+  "Return the compact resolved permission line for RECORD."
+  (format "PERMISSION %s: %s\n"
+          (upcase (opencode-shell--get record 'reply))
+          (opencode-shell--get record 'description)))
+
+(defun opencode-shell--insert-permission-results (anchor)
+  "Insert resolved permission records belonging after turn ANCHOR."
+  (dolist (record (opencode-shell--deduplicate-permissions
+                   opencode-shell--resolved-permissions))
+    (when (equal anchor (opencode-shell--get record 'after-turn-id))
+      (insert (propertize (opencode-shell--permission-result-text record)
+                          'font-lock-face 'shadow
+                          'read-only t 'rear-nonsticky '(read-only face))))))
+
+(defun opencode-shell--insert-unanchored-permission-results ()
+  "Insert resolved records whose anchor is absent from current turns."
+  (let ((turn-ids (mapcar #'opencode-shell--turn-id opencode-shell--turns)))
+    (dolist (record (opencode-shell--deduplicate-permissions
+                     opencode-shell--resolved-permissions))
+      (let ((anchor (opencode-shell--get record 'after-turn-id)))
+        (when (and anchor (not (member anchor turn-ids)))
+          (insert (propertize (opencode-shell--permission-result-text record)
+                              'font-lock-face 'shadow
+                              'read-only t 'rear-nonsticky '(read-only face))))))))
+
+(defun opencode-shell--commit-permission-result (record)
+  "Replace the active permission card with a fixed transcript RECORD."
+  (let ((inhibit-read-only t)
+        (composer-gap (- opencode-shell--composer-start
+                         opencode-shell--permission-end)))
+    (save-excursion
+      (goto-char opencode-shell--permission-begin)
+      (delete-region opencode-shell--permission-begin opencode-shell--permission-end)
+      (insert (propertize (opencode-shell--permission-result-text record)
+                          'font-lock-face 'shadow
+                          'read-only t 'rear-nonsticky '(read-only face)))
+      (set-marker opencode-shell--transcript-end (point))
+      (set-marker opencode-shell--permission-begin (point))
+      (set-marker opencode-shell--permission-end (point))
+      (set-marker opencode-shell--composer-start (+ (point) composer-gap)))))
 
 (defun opencode-shell--permission-at-point ()
   "Return the permission object at point, or the first pending request."
@@ -1117,14 +1159,6 @@ Each retained session keeps its server-reported directory unchanged."
       (when (looking-back "Prompt> " (line-beginning-position))
         (delete-region (- (point) (length "Prompt> ")) (point)))
       (set-marker opencode-shell--permission-begin (point))
-      (dolist (resolved (opencode-shell--deduplicate-permissions
-                         opencode-shell--resolved-permissions))
-        (insert (propertize
-                 (format "PERMISSION %s: %s\n"
-                         (upcase (opencode-shell--get resolved 'reply))
-                         (opencode-shell--get resolved 'description))
-                 'font-lock-face 'shadow
-                 'read-only t 'rear-nonsticky '(read-only face))))
       (dolist (item (seq-take (opencode-shell--deduplicate-permissions
                                opencode-shell--permissions) 1))
         (let ((begin (point)))
@@ -1311,7 +1345,12 @@ request settles."
         (delete-region opencode-shell--transcript-end opencode-shell--composer-start)
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
-        (dolist (turn opencode-shell--turns) (opencode-shell--insert-turn-blocks turn))
+        (opencode-shell--insert-permission-results nil)
+        (opencode-shell--insert-unanchored-permission-results)
+        (dolist (turn opencode-shell--turns)
+          (opencode-shell--insert-turn-blocks turn)
+          (opencode-shell--insert-permission-results
+           (opencode-shell--turn-id turn)))
         (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
@@ -1609,11 +1648,14 @@ request settles."
     (opencode-shell--request
      "POST" (format "/permission/%s/reply" id)
      (lambda (_)
-       (unless (opencode-shell--resolved-permission id)
-         (setq opencode-shell--resolved-permissions
-               (append opencode-shell--resolved-permissions
-                       (list `((id . ,id) (reply . ,reply)
-                               (description . ,(opencode-shell--permission-description item)))))))
+        (unless (opencode-shell--resolved-permission id)
+          (let ((record `((id . ,id) (reply . ,reply)
+                          (description . ,(opencode-shell--permission-description item))
+                          (after-turn-id . ,(when-let ((turn (car (last opencode-shell--turns))))
+                                              (opencode-shell--turn-id turn))))))
+            (setq opencode-shell--resolved-permissions
+                  (append opencode-shell--resolved-permissions (list record)))
+            (opencode-shell--commit-permission-result record)))
        (when (equal opencode-shell--permission-sending id)
          (setq opencode-shell--permission-sending nil))
         (setq opencode-shell--permissions

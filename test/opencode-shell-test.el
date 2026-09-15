@@ -343,6 +343,20 @@
                        '("POST" "/permission/p1/reply" ((reply . "always")))))
         (funcall callback nil)
         (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+        (let ((result-position (save-excursion
+                                 (goto-char (point-min))
+                                 (search-forward "PERMISSION ALWAYS")
+                                 (line-beginning-position))))
+          (opencode-shell--receive-permissions opencode-shell--permissions)
+          (should (= result-position
+                     (save-excursion
+                       (goto-char (point-min))
+                       (search-forward "PERMISSION ALWAYS")
+                       (line-beginning-position)))))
+        (setq opencode-shell--rendered-turns
+              (list (opencode-shell--make-turn :id "not-a-prefix")))
+        (opencode-shell--render-turns)
+        (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
         (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
         (should (string-match-p "second" (buffer-string)))
         (opencode-shell--receive-permissions nil)
@@ -387,6 +401,50 @@
         (should (= (length opencode-shell--resolved-permissions) 1))
          (should (string-match-p "PERMISSION ONCE:.*bash.*git status" (buffer-string)))
          (should (equal (opencode-shell--composer-text) "draft"))))))
+
+(ert-deftest opencode-shell-resolved-permission-survives-full-turn-rerender-at-anchor ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "run it"
+                                            :assistant "" :status 'waiting)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns)
+      (opencode-shell--receive-permissions
+       '(((id . "p1") (sessionID . "s") (permission . "bash")
+          (patterns . ("git diff --check")))))
+      (let (callback)
+        (cl-letf (((symbol-function 'opencode-shell--request)
+                   (lambda (_method path success &rest _)
+                     (when (equal path "/permission/p1/reply")
+                       (setq callback success)))))
+          (goto-char opencode-shell--permission-begin)
+          (opencode-shell--permission-allow-always)
+          (funcall callback nil)))
+      (should (equal "turn-1"
+                     (opencode-shell--get (car opencode-shell--resolved-permissions)
+                                          'after-turn-id)))
+      (setq opencode-shell--rendered-turns
+            (list (opencode-shell--make-turn :id "not-a-prefix")))
+      (opencode-shell--render-turns)
+      (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+      (should (< (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "Waiting for response")
+                   (point))
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "PERMISSION ALWAYS")
+                   (point))))
+      (goto-char opencode-shell--composer-start)
+      (insert "draft")
+      (goto-char (+ opencode-shell--composer-start 2))
+      (setq opencode-shell--turns nil
+            opencode-shell--rendered-turns (list turn))
+      (opencode-shell--render-turns)
+      (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+      (should (equal "draft" (opencode-shell--composer-text)))
+      (should (= 2 (- (point) opencode-shell--composer-start))))))
 
 (ert-deftest opencode-shell-reply-success-refreshes-permissions-even-when-blocked ()
   (with-temp-buffer
