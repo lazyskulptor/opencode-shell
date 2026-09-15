@@ -2129,6 +2129,10 @@ request settles."
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
     (kbd "C-c C-m") #'opencode-shell--select-agent)
+  (evil-define-key* 'insert opencode-shell-mode-map
+    (kbd "?") #'self-insert-command
+    (kbd "RET") #'newline
+    (kbd "<return>") #'newline)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
     (kbd "RET") #'opencode-shell--open-at-point
     (kbd "g r") #'opencode-shell--refresh

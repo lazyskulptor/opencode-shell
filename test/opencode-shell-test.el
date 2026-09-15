@@ -848,7 +848,17 @@
               ((symbol-function 'evil-define-key*)
                (lambda (&rest args) (push (cons 'key args) calls))))
       (opencode-shell--setup-evil)
-      (should (= (length calls) 5))
+      (should (= (length calls) 6))
+      (let ((insert-call
+             (seq-find
+              (lambda (call)
+                (and (eq (car call) 'key)
+                     (eq (cadr call) 'insert)
+                     (eq (nth 2 call) opencode-shell-mode-map)))
+              calls)))
+        (should insert-call)
+        (should (memq #'self-insert-command insert-call))
+        (should (= 2 (cl-count #'newline insert-call))))
       (let ((sessions-call
              (seq-find
               (lambda (call)
