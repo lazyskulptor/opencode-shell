@@ -925,6 +925,41 @@
                  "```text\n| header | value |\n| --- | --- |\n| code | only |\n```\n"))
     (should (equal (opencode-shell-render-tables raw 30) raw))))
 
+(ert-deftest opencode-shell-completed-response-adapts-table-without-changing-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((raw "| 책임 | 위치 |\n|---|---|\n| OpenSearch 자격증명 | K8s Secret, 실제 값은 외부 주입 |")
+           (turn (opencode-shell--make-turn
+                  :id "table" :assistant raw :status 'complete)))
+      (setq opencode-shell--table-render-width 36)
+      (let ((display (opencode-shell--response-display turn)))
+        (dolist (line (split-string display "\n" t))
+          (unless (string= line "ASSISTANT>")
+            (should (<= (string-width line) 36))))
+        (should (string-match-p "외부" display))
+        (should (equal (opencode-shell--turn-assistant turn) raw))))))
+
+(ert-deftest opencode-shell-table-resize-preserves-composer-and-point ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((raw "| 책임 | 위치 |\n|---|---|\n| OpenSearch 자격증명 | K8s Secret, 실제 값은 외부 주입 |")
+           (turn (opencode-shell--make-turn
+                  :id "table" :assistant raw :status 'complete)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--table-render-width 72)
+      (goto-char (point-max))
+      (insert "작성 중")
+      (let ((offset (- (point) opencode-shell--composer-start)))
+        (cl-letf (((symbol-function 'opencode-shell--transcript-window)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'window-body-width) (lambda (&rest _) 36))
+                  ((symbol-function 'get-buffer-window-list) (lambda (&rest _) nil)))
+          (opencode-shell--refresh-table-layout))
+        (should (= opencode-shell--table-render-width 36))
+        (should (equal (opencode-shell--composer-text) "작성 중"))
+        (should (= (- (point) opencode-shell--composer-start) offset))
+        (should (equal (opencode-shell--turn-assistant turn) raw))))))
+
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-y"))
               #'opencode-shell--permission-allow-once))

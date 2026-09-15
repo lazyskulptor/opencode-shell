@@ -84,6 +84,13 @@ Assistant completion comes from the matching message's `finish` and
 payloads. A completed tool or idle session status does not complete the whole
 assistant turn; running tools keep the response active.
 
+Completed assistant pipe tables are formatted to the selected transcript
+window width. Long cells wrap without dropping content, and resizing the
+window recalculates the table. This intentionally recognizes only conventional
+header/separator/body tables outside fenced code blocks; malformed tables and
+all other Markdown remain unchanged. The server Markdown stored in each turn
+is kept verbatim and is used again for every layout pass.
+
 API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
 session exists and in a session-specific log buffer afterwards. Open the relevant
 buffer with `M-x opencode-shell-log`. Non-poll requests log their start; all
@@ -151,7 +158,7 @@ public configuration.
 
 ## Limitations
 
-This beta polls instead of streaming SSE. It intentionally defers rich Markdown/tool rendering, folding, retention pruning, partial assistant streaming, pagination, and file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.
+This beta polls instead of streaming SSE. It intentionally defers general rich Markdown/tool rendering, folding, retention pruning, partial assistant streaming, pagination, and file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.
 
 ## Acceptance check
 

@@ -446,6 +446,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--question-sending nil)
 (defvar-local opencode-shell--question-refresh-pending nil)
 (defvar-local opencode-shell--last-lifecycle-signature nil)
+(defvar-local opencode-shell--table-render-width nil)
+(defvar-local opencode-shell--table-rerendering nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
 
@@ -983,11 +985,15 @@ Each retained session keeps its server-reported directory unchanged."
           opencode-shell--permission-status-end (copy-marker (point) nil)))
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
+  (add-hook 'window-configuration-change-hook
+            #'opencode-shell--refresh-table-layout nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
   )
 
 (defun opencode-shell--cleanup ()
   "Cancel this buffer's timer and invalidate outstanding callbacks."
+  (remove-hook 'window-configuration-change-hook
+               #'opencode-shell--refresh-table-layout t)
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
   (setq opencode-shell--poll-timer nil)
   (setq opencode-shell--in-flight nil
@@ -1044,6 +1050,7 @@ Each retained session keeps its server-reported directory unchanged."
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
     (pop-to-buffer buffer)
+    (opencode-shell--refresh-table-layout)
     (goto-char (point-max))
     (when (fboundp 'evil-insert-state)
       (evil-insert-state))))
@@ -1563,7 +1570,7 @@ request settles."
     (let ((user-end (point))
           (response-begin (point)))
       (if (eq (opencode-shell--turn-status turn) 'complete)
-          (let ((answer (opencode-shell--turn-assistant turn)))
+          (let ((answer (opencode-shell--assistant-display-text turn)))
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
                   (or answer "") "\n\n"))
         (insert (propertize
@@ -1604,7 +1611,7 @@ request settles."
   "Return the propertized response display for TURN."
   (if (eq (opencode-shell--turn-status turn) 'complete)
       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
-              (or (opencode-shell--turn-assistant turn) "") "\n\n")
+               (opencode-shell--assistant-display-text turn) "\n\n")
     (propertize
      (pcase (opencode-shell--turn-status turn)
        ('sending (opencode-shell--status-display "Sending"))
@@ -1632,6 +1639,40 @@ request settles."
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current history-poll heartbeat."
   (format "%s %s\n\n" label (make-string (1+ (% opencode-shell--poll-heartbeat 3)) ?·)))
+
+(defun opencode-shell--transcript-window ()
+  "Return the preferred live window displaying the current transcript."
+  (if (eq (window-buffer (selected-window)) (current-buffer))
+      (selected-window)
+    (get-buffer-window (current-buffer) t)))
+
+(defun opencode-shell--assistant-display-text (turn)
+  "Return TURN's assistant text adapted to the current presentation width."
+  (let ((raw (or (opencode-shell--turn-assistant turn) "")))
+    (if opencode-shell--table-render-width
+        (opencode-shell-render-tables raw opencode-shell--table-render-width)
+      raw)))
+
+(defun opencode-shell--refresh-table-layout ()
+  "Rerender completed tables when the transcript window width changes."
+  (unless opencode-shell--table-rerendering
+    (when-let* ((window (opencode-shell--transcript-window))
+                (width (window-body-width window)))
+      (unless (equal width opencode-shell--table-render-width)
+        (let* ((opencode-shell--table-rerendering t)
+               (windows (get-buffer-window-list (current-buffer) nil t))
+               (starts (mapcar (lambda (item)
+                                 (cons item (copy-marker (window-start item))))
+                               windows)))
+          (unwind-protect
+              (progn
+                (setq opencode-shell--table-render-width width)
+                (when opencode-shell--turns
+                  (opencode-shell--render-turns)))
+            (dolist (entry starts)
+              (when (window-live-p (car entry))
+                (set-window-start (car entry) (cdr entry) t))
+              (set-marker (cdr entry) nil))))))))
 
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
