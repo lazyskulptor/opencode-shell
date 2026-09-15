@@ -662,7 +662,7 @@
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s"
           opencode-shell--generation 1
-          opencode-shell--capabilities-loaded t)
+          opencode-shell--capabilities-loaded nil)
     (let (paths)
       (cl-letf (((symbol-function 'opencode-shell--request)
                  (lambda (_method path _callback &rest _)
@@ -1427,6 +1427,8 @@
                   'mode-line-highlight))
       (should (string-match-p "Copy session ID"
                               (get-text-property session-pos 'help-echo header)))
+      (should-not (get-text-property (+ session-pos (length "session:ses_123"))
+                                     'keymap header))
       (should-not (get-text-property 1 'keymap header)))
     (should (equal (opencode-shell--mode-line-status) " [idle]"))))
 

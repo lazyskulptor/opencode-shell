@@ -851,13 +851,14 @@ Each retained session keeps its server-reported directory unchanged."
                        (or (car (rassoc opencode-shell--selected-model
                                        opencode-shell--models))
                            "server default")))
-         (right-text (format "session:%s " (or opencode-shell--session-id "pending")))
+         (right-text (format "session:%s" (or opencode-shell--session-id "pending")))
          (right (if opencode-shell--session-id
-                    (propertize right-text
-                                'keymap opencode-shell-header-session-map
-                                'mouse-face 'mode-line-highlight
-                                'help-echo "mouse-1: Copy session ID")
-                  right-text))
+                    (concat (propertize right-text
+                                        'keymap opencode-shell-header-session-map
+                                        'mouse-face 'mode-line-highlight
+                                        'help-echo "mouse-1: Copy session ID")
+                            " ")
+                  (concat right-text " ")))
          (space (max 1 (- (window-total-width) (string-width left)
                           (string-width right)))))
     (concat left (make-string space ?\s) right)))
@@ -1750,7 +1751,7 @@ request settles."
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions
    nil #'opencode-shell--consume-permission-refresh-pending)
-  (when (and (or full (not opencode-shell--capabilities-loaded))
+  (when (and full
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
       (setq opencode-shell--capabilities-loading t)
