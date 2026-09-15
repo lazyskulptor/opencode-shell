@@ -2243,9 +2243,18 @@ auto-started."
                       (with-current-buffer buffer
                         (derived-mode-p 'opencode-shell-mode)))
                    (buffer-list)))
-         (names (mapcar #'buffer-name buffers)))
-    (unless names (user-error "No OpenCode buffers"))
-    (pop-to-buffer (get-buffer (completing-read "OpenCode shell: " names nil t)))))
+         (candidates
+          (mapcar (lambda (buffer)
+                    (cons (with-current-buffer buffer
+                            (format "%s  —  %s"
+                                    (or opencode-shell--session-title "Untitled")
+                                    (buffer-name buffer)))
+                          buffer))
+                  buffers)))
+    (unless candidates (user-error "No OpenCode buffers"))
+    (pop-to-buffer
+     (cdr (assoc (completing-read "OpenCode shell: " candidates nil t)
+                 candidates)))))
 
 (defun opencode-shell--session-candidate (session profile)
   "Return a styled completion candidate for SESSION under PROFILE."

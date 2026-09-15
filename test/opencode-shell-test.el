@@ -1415,6 +1415,24 @@
                         'opencode-shell-recent-session-face))))
       (kill-buffer active))))
 
+(ert-deftest opencode-shell-switch-buffer-shows-title-and-buffer-name ()
+  (let ((shell (generate-new-buffer "*Opencode project shell*")) prompt selected)
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--session-title "Generated title"))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_ candidates &rest _)
+                       (setq prompt (caar candidates))
+                       prompt))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _) (setq selected buffer))))
+            (opencode-shell-switch-buffer))
+          (should (string-match-p "Generated title.*Opencode project shell" prompt))
+          (should (eq selected shell)))
+      (kill-buffer shell))))
+
 (ert-deftest opencode-shell-sessions-installs-buffer-local-evil-bindings ()
   (let (bindings)
     (cl-letf (((symbol-function 'evil-local-set-key)
