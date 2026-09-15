@@ -68,10 +68,12 @@ and status requests. A transcript buffer has a multiline composer after
 submits it. Submitted prompts and polled responses above the composer are
 read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear with the generated session title in the transcript header
-and affect subsequent prompt payloads. The title updates when a later session
-snapshot reports OpenCode's generated title.
+and affect subsequent prompt payloads. The title updates on session open and an
+explicit `g` resync when the session snapshot reports OpenCode's generated title.
 Each prompt carries a stable message ID. Periodic history polling is the sole
 transcript data path and reconciles responses without deleting known history.
+Each recurring poll is limited to message history, session status, and pending
+permissions; session metadata and model/agent capabilities are full-resync data.
 The transcript shows stable sending, waiting, receiving, recovering, aborting,
 or error state and never replaces an already completed response with stale data.
 Pending status cycles `·`, `··`, `···` once per message-history poll. Reasoning-only

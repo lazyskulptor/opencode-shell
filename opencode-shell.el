@@ -981,7 +981,7 @@ Each retained session keeps its server-reported directory unchanged."
             (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
                          (lambda (target)
                            (when (buffer-live-p target)
-                             (with-current-buffer target (opencode-shell--resync))))
+                              (with-current-buffer target (opencode-shell--resync nil))))
                           buffer))
       (opencode-shell--log-lifecycle "poll-start" t))))
 
@@ -1702,9 +1702,8 @@ request settles."
          (completing-read-multiple prompt options nil require-match)
        (list (completing-read prompt options nil require-match))))))
 
-(defun opencode-shell--resync (&optional capabilities)
-  "Fully resync transcript, status, models, agents, and pending state."
-  (interactive (list t))
+(defun opencode-shell--refresh-session-metadata ()
+  "Refresh title metadata for the current session."
   (opencode-shell--guarded-request
    'session "GET" "/session"
    (lambda (sessions)
@@ -1716,7 +1715,12 @@ request settles."
        (setq opencode-shell--session-title
              (or (opencode-shell--get session 'title) "Untitled"))
        (force-mode-line-update)))
-   nil nil)
+   nil nil))
+
+(defun opencode-shell--resync (&optional full)
+  "Resync polling state, and when FULL also metadata and capabilities."
+  (interactive (list t))
+  (when full (opencode-shell--refresh-session-metadata))
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
       (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
@@ -1734,7 +1738,7 @@ request settles."
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions
    nil #'opencode-shell--consume-permission-refresh-pending)
-  (when (and (or capabilities (not opencode-shell--capabilities-loaded))
+  (when (and (or full (not opencode-shell--capabilities-loaded))
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
       (setq opencode-shell--capabilities-loading t)

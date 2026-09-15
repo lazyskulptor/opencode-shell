@@ -632,12 +632,12 @@
       (cl-letf (((symbol-function 'opencode-shell--request)
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
-        (opencode-shell--resync)
+        (opencode-shell--resync t)
         (should (= (length requests) 6))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
-        (opencode-shell--resync)
+        (opencode-shell--resync t)
         (should (= (length requests) 6))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
@@ -655,7 +655,24 @@
           (setq opencode-shell--in-flight nil))
         (opencode-shell--resync)
         (should (equal (mapcar #'car requests)
-                        '("/permission" "/session/status" "/session/s/message" "/session")))))))
+                         '("/permission" "/session/status" "/session/s/message")))))))
+
+(ert-deftest opencode-shell-periodic-resync-excludes-session-metadata ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--generation 1
+          opencode-shell--capabilities-loaded t)
+    (let (paths)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path _callback &rest _)
+                   (push path paths))))
+        (opencode-shell--resync nil)
+        (should (equal (sort paths #'string<)
+                       '("/permission" "/session/s/message" "/session/status")))
+        (should-not (member "/session" paths))
+        (should-not (member "/agent" paths))
+        (should-not (member "/provider" paths))))))
 
 (ert-deftest opencode-shell-capabilities-retry-after-transient-failure ()
   (with-temp-buffer
@@ -665,14 +682,14 @@
       (cl-letf (((symbol-function 'opencode-shell--request)
                  (lambda (_method path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
-        (opencode-shell--resync)
+        (opencode-shell--resync t)
         (funcall (nth 2 (assoc "/provider" requests)))
         (should opencode-shell--capabilities-loading)
         (funcall (cadr (assoc "/agent" requests)) nil)
         (should-not opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         (setq requests nil)
-        (opencode-shell--resync)
+        (opencode-shell--resync t)
         ;; The still-pending message poll remains guarded; only the failed
         ;; capability batch is retried.
         (should (= (length requests) 2))
