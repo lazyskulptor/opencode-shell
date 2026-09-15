@@ -1355,8 +1355,8 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
 
 (defun opencode-shell--receive-questions (items)
   "Store the authoritative current-session question snapshot ITEMS."
-  (setq opencode-shell--question-refresh-pending nil
-        opencode-shell--questions-pending
+  (opencode-shell--consume-question-refresh-pending)
+  (setq opencode-shell--questions-pending
         (opencode-shell--deduplicate-questions
          (opencode-shell--session-questions items)))
   (when (opencode-shell--human-interaction-blocked-p)
@@ -1366,6 +1366,20 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
   (opencode-shell--render-turns)
   (opencode-shell--render-permissions)
   (opencode-shell--log-lifecycle "questions"))
+
+(defun opencode-shell--refresh-questions ()
+  "Fetch `/question', deferring once when that request is in flight."
+  (if (alist-get 'questions opencode-shell--in-flight)
+      (setq opencode-shell--question-refresh-pending t)
+    (opencode-shell--guarded-request
+     'questions "GET" "/question" #'opencode-shell--receive-questions
+     nil #'opencode-shell--consume-question-refresh-pending)))
+
+(defun opencode-shell--consume-question-refresh-pending ()
+  "Reissue a deferred `/question' fetch."
+  (when opencode-shell--question-refresh-pending
+    (setq opencode-shell--question-refresh-pending nil)
+    (opencode-shell--refresh-questions)))
 
 (defun opencode-shell--resolved-permission (id)
   "Return the resolved permission record for ID."
@@ -1819,8 +1833,7 @@ request settles."
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions
    nil #'opencode-shell--consume-permission-refresh-pending)
-  (opencode-shell--guarded-request
-   'questions "GET" "/question" #'opencode-shell--receive-questions)
+  (opencode-shell--refresh-questions)
   (when (and full
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
@@ -2042,6 +2055,8 @@ request settles."
 
 (defun opencode-shell--question-reply (item confirm)
   "Answer ITEM, prompting for rejection first when CONFIRM is non-nil."
+  (when opencode-shell--question-sending
+    (user-error "Question reply already in progress"))
   (if (and confirm (not (yes-or-no-p "Answer this question? (No rejects) ")))
       (opencode-shell--question-reject item)
     (let* ((id (opencode-shell--question-id item))
@@ -2056,8 +2071,10 @@ request settles."
          (setq opencode-shell--question-sending nil
                opencode-shell--questions-pending
                (seq-remove (lambda (entry)
-                             (equal id (opencode-shell--question-id entry)))
+                            (equal id (opencode-shell--question-id entry)))
                            opencode-shell--questions-pending))
+         (opencode-shell--render-permissions)
+         (opencode-shell--refresh-questions)
          (opencode-shell--resync nil)
          (message "Question reply sent"))
        `((answers . ,answers)) nil
@@ -2069,6 +2086,8 @@ request settles."
 (defun opencode-shell--question-reject (&optional item)
   "Reject pending question ITEM or the current inline question."
   (interactive)
+  (when opencode-shell--question-sending
+    (user-error "Question reply already in progress"))
   (setq item (or item (get-text-property (point) 'opencode-shell-question)
                  (car opencode-shell--questions-pending)
                  (user-error "No pending question")))
@@ -2080,8 +2099,10 @@ request settles."
        (setq opencode-shell--question-sending nil
              opencode-shell--questions-pending
              (seq-remove (lambda (entry)
-                           (equal id (opencode-shell--question-id entry)))
-                         opencode-shell--questions-pending))
+                         (equal id (opencode-shell--question-id entry)))
+                        opencode-shell--questions-pending))
+       (opencode-shell--render-permissions)
+       (opencode-shell--refresh-questions)
        (opencode-shell--resync nil)
        (message "Question rejected"))
      '() nil
