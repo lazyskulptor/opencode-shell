@@ -58,8 +58,8 @@ owned process; use the explicit restart command to replace it.
 
 ## Commands
 
-Each session browser is fixed to one server-native directory, shown in its
-header and reflected in its buffer identity. Use `/` for a text filter, `g` to
+Each session browser is fixed to one server-native directory and encoded in its
+buffer identity. Use `/` for a text filter, `g` to
 refresh, `c` to create in that fixed directory, `RET` to open, and `d` for
 confirmed delete. `RET` uses the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
@@ -67,7 +67,9 @@ and status requests. A transcript buffer has a multiline composer after
 `Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET`
 submits it. Submitted prompts and polled responses above the composer are
 read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
-both selections appear in the header and affect subsequent prompt payloads.
+both selections appear with the generated session title in the transcript header
+and affect subsequent prompt payloads. The title updates when a later session
+snapshot reports OpenCode's generated title.
 Each prompt carries a stable message ID. Periodic history polling is the sole
 transcript data path and reconciles responses without deleting known history.
 The transcript shows stable sending, waiting, receiving, recovering, aborting,
@@ -92,6 +94,13 @@ agent completion shows only server-advertised visible primary agents.
 `g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
+
+Use `?` in either the browser or transcript for its context-specific Transient
+menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
+selects only live transcript buffers, and `C-c o f` selects a canonical
+newest-first server session. The session selector marks live transcripts as
+active and recent inactive sessions with distinct faces, then opens or reuses the
+selection like `find-file`.
 
 Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
 `C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`

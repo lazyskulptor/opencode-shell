@@ -38,6 +38,8 @@ refetch is deferred until that request settles, whether it succeeds or fails.
 Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
 `start`, and `search`. Other requests may include `directory` as appropriate.
+The normalized session collection also supplies generated titles for transcript
+headers and the canonical newest-first session selector.
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 

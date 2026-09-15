@@ -625,12 +625,12 @@
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
         (opencode-shell--resync)
-        (should (= (length requests) 5))
+        (should (= (length requests) 6))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
         (opencode-shell--resync)
-        (should (= (length requests) 5))
+        (should (= (length requests) 6))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
         (funcall (cadr (assoc "/agent" requests)) nil)
@@ -647,7 +647,7 @@
           (setq opencode-shell--in-flight nil))
         (opencode-shell--resync)
         (should (equal (mapcar #'car requests)
-                       '("/permission" "/session/status" "/session/s/message")))))))
+                        '("/permission" "/session/status" "/session/s/message" "/session")))))))
 
 (ert-deftest opencode-shell-capabilities-retry-after-transient-failure ()
   (with-temp-buffer
@@ -715,6 +715,22 @@
             (should (equal cancelled (list (cadr timers)))))
         (when (buffer-live-p opened) (kill-buffer opened))))))
 
+(ert-deftest opencode-shell-open-focuses-composer-in-selected-window ()
+  (let (opened point insert-state)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _) (setq opened buffer) (set-buffer buffer)))
+              ((symbol-function 'opencode-shell--resync) #'ignore)
+              ((symbol-function 'opencode-shell--start-polling) #'ignore)
+              ((symbol-function 'evil-insert-state)
+               (lambda () (setq insert-state t))))
+      (unwind-protect
+          (progn
+            (opencode-shell-open-session "focus-test" default-directory)
+            (setq point (point))
+            (should (= point (with-current-buffer opened (point-max))))
+            (should insert-state))
+        (when (buffer-live-p opened) (kill-buffer opened))))))
+
 (ert-deftest opencode-shell-completion-stops-polling ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -734,7 +750,24 @@
               ((symbol-function 'evil-define-key*)
                (lambda (&rest args) (push (cons 'key args) calls))))
       (opencode-shell--setup-evil)
-      (should (= (length calls) 4)))))
+      (should (= (length calls) 5))
+      (let ((sessions-call
+             (seq-find
+              (lambda (call)
+                (and (eq (car call) 'key)
+                     (eq (nth 3 call) opencode-shell-sessions-mode-map)))
+              calls)))
+        (let ((bindings (nthcdr 4 sessions-call)))
+          (while bindings
+            (should (eq (cadr bindings)
+                        (pcase (key-description (car bindings))
+                          ("RET" #'opencode-shell--open-at-point)
+                          ("g r" #'opencode-shell--refresh)
+                          ("c" #'opencode-shell--create-session)
+                          ("/" #'opencode-shell--filter)
+                          ("d" #'opencode-shell--delete-session)
+                          ("?" #'opencode-shell-sessions-help))))
+            (setq bindings (cddr bindings))))))))
 
 (ert-deftest opencode-shell-uses-editable-base-with-native-character-input ()
   (with-temp-buffer
@@ -1298,14 +1331,110 @@
                (lambda (prompt &rest _) (if (string-prefix-p "Model" prompt) "p/m" "build"))))
       (opencode-shell--select-model)
       (opencode-shell--select-agent))
-    (should-not header-line-format)
-    (should (string-match-p "p/m.*build" (opencode-shell--mode-line-status)))
+    (should header-line-format)
+    (should (string-match-p "build.*p/m" (opencode-shell--header)))
+    (should-not (string-match-p "model\|agent\|OpenCode"
+                                (opencode-shell--mode-line-status)))
     (setq opencode-shell--turns
           (list (opencode-shell--make-turn :id "local" :user "q" :status 'waiting)))
     (opencode-shell--render-turns)
     (goto-char (point-min)) (search-forward "Waiting")
     (should (eq (get-text-property (match-beginning 0) 'face)
                  'opencode-shell-waiting-face))))
+
+(ert-deftest opencode-shell-sessions-help-overrides-evil-search-key ()
+  (should (eq (lookup-key opencode-shell-sessions-mode-map (kbd "?"))
+              #'opencode-shell-sessions-help))
+  (require 'transient)
+  (should (commandp 'opencode-shell-sessions-menu)))
+
+(ert-deftest opencode-shell-transcript-help-and-header-metadata ()
+  (should (eq (lookup-key opencode-shell-mode-map (kbd "?"))
+              #'opencode-shell-help))
+  (should (commandp 'opencode-shell-menu))
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-title "Generated title"
+          opencode-shell--selected-agent "build"
+          opencode-shell--selected-model '((providerID . "p") (modelID . "m"))
+          opencode-shell--models '(("p/m" . ((providerID . "p") (modelID . "m")))))
+    (should (string-match-p "Generated title.*build.*p/m" (opencode-shell--header)))
+    (should (equal (opencode-shell--mode-line-status) " [idle]"))))
+
+(ert-deftest opencode-shell-defaults-require-available-build-model ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--agents
+          '(("build" . ((name . "build") (model . "p/m"))))
+          opencode-shell--models nil)
+    (opencode-shell--initialize-server-defaults)
+    (should-not opencode-shell--selected-agent)
+    (should-not opencode-shell--selected-model)))
+
+(ert-deftest opencode-shell-same-leaf-browsers-do-not-collide ()
+  (let ((profile opencode-shell-test--local-profile) first second)
+    (cl-letf (((symbol-function 'opencode-shell--refresh) #'ignore)
+              ((symbol-function 'pop-to-buffer) #'ignore))
+      (unwind-protect
+          (progn
+            (opencode-shell--sessions "/one/project/" profile)
+            (setq first (opencode-shell--sessions-buffer profile "/one/project/"))
+            (opencode-shell--sessions "/two/project/" profile)
+            (setq second (opencode-shell--sessions-buffer profile "/two/project/"))
+            (should (buffer-live-p first))
+            (should (buffer-live-p second))
+            (should-not (eq first second))
+            (should (string-match-p "<2>" (buffer-name second))))
+        (when (buffer-live-p first) (kill-buffer first))
+        (when (buffer-live-p second) (kill-buffer second))))))
+
+(ert-deftest opencode-shell-session-candidates-distinguish-active-and-recent ()
+  (let* ((profile opencode-shell-test--local-profile)
+         (active (generate-new-buffer " *active-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer active
+            (opencode-shell-mode)
+            (setq opencode-shell--profile profile
+                  opencode-shell--directory "/work/"
+                  opencode-shell--session-id "s1"))
+          (let ((open (opencode-shell--session-candidate
+                       '((id . "s1") (title . "Open") (directory . "/work/")) profile))
+                (recent (opencode-shell--session-candidate
+                         '((id . "s2") (title . "Recent") (directory . "/work/")) profile)))
+            (should (eq (get-text-property 0 'face (car open))
+                        'opencode-shell-active-session-face))
+            (should (eq (get-text-property 0 'face (car recent))
+                        'opencode-shell-recent-session-face))))
+      (kill-buffer active))))
+
+(ert-deftest opencode-shell-sessions-installs-buffer-local-evil-bindings ()
+  (let (bindings)
+    (cl-letf (((symbol-function 'evil-local-set-key)
+               (lambda (state key command)
+                 (push (list state key command) bindings))))
+      (with-temp-buffer
+        (opencode-shell-sessions-mode))
+      (dolist (expected `((normal ,(kbd "RET") opencode-shell--open-at-point)
+                          (normal ,(kbd "g r") opencode-shell--refresh)
+                          (normal ,(kbd "c") opencode-shell--create-session)
+                          (normal ,(kbd "/") opencode-shell--filter)
+                          (normal ,(kbd "d") opencode-shell--delete-session)
+                          (normal ,(kbd "?") opencode-shell-sessions-help)))
+        (should (member expected bindings))))))
+
+(ert-deftest opencode-shell-reload-refreshes-existing-buffer-local-map ()
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (use-local-map (copy-keymap opencode-shell-sessions-mode-map))
+    (define-key (current-local-map) (kbd "?") #'ignore)
+    (cl-letf (((symbol-function 'load) #'ignore)
+              ((symbol-function 'opencode-shell--register-profile-commands) #'ignore)
+              ((symbol-function 'locate-library)
+               (lambda (_) (expand-file-name "opencode-shell.el" default-directory))))
+      (opencode-shell-reload)
+      (should (eq (lookup-key (current-local-map) (kbd "?"))
+                  #'opencode-shell-sessions-help)))))
 
 (ert-deftest opencode-shell-directory-derived-buffer-names-and-reuse ()
   (should (equal (opencode-shell--directory-leaf "/work/project/") "project"))

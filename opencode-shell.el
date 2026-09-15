@@ -663,7 +663,32 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "c") #'opencode-shell--create-session)
     (define-key map (kbd "/") #'opencode-shell--filter)
     (define-key map (kbd "d") #'opencode-shell--delete-session)
+    (define-key map (kbd "?") #'opencode-shell-sessions-help)
     map))
+
+(defun opencode-shell-sessions-help ()
+  "Display the session browser transient menu."
+  (interactive)
+  (require 'transient)
+  (transient-setup 'opencode-shell-sessions-menu))
+
+(declare-function transient-setup "transient")
+(defvar opencode-shell-sessions-menu nil)
+
+(require 'transient)
+(transient-define-prefix opencode-shell-sessions-menu ()
+    "OpenCode session actions."
+    [["Session"
+      ("RET" "Open" opencode-shell--open-at-point)
+      ("c" "Create here" opencode-shell--create-session)
+      ("d" "Delete" opencode-shell--delete-session)]
+     ["List"
+      ("g" "Refresh" opencode-shell--refresh)
+      ("/" "Filter" opencode-shell--filter)]
+     ["Global"
+      ("s" "Start (select profile)" opencode-shell-start)
+      ("l" "Sessions (select profile)" opencode-shell)
+       ("b" "Switch buffer" opencode-shell-switch-buffer)]])
 
 (define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
   "Browse canonical OpenCode sessions."
@@ -675,6 +700,21 @@ Each retained session keeps its server-reported directory unchanged."
   (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
   (tabulated-list-init-header))
 
+(defun opencode-shell--setup-sessions-evil-buffer ()
+  "Install session browser bindings in the current Evil buffer."
+  (when (fboundp 'evil-local-set-key)
+    (evil-local-set-key 'normal (kbd "g") nil)
+    (dolist (binding `((,(kbd "RET") . opencode-shell--open-at-point)
+                       (,(kbd "g r") . opencode-shell--refresh)
+                       (,(kbd "c") . opencode-shell--create-session)
+                       (,(kbd "/") . opencode-shell--filter)
+                       (,(kbd "d") . opencode-shell--delete-session)
+                       (,(kbd "?") . opencode-shell-sessions-help)))
+      (evil-local-set-key 'normal (car binding) (cdr binding)))))
+
+(add-hook 'opencode-shell-sessions-mode-hook
+          #'opencode-shell--setup-sessions-evil-buffer)
+
 (defun opencode-shell--sessions (directory &optional profile)
   "Open PROFILE's session browser scoped to server-native DIRECTORY."
   (setq profile (or (opencode-shell--resolve-profile profile)
@@ -685,7 +725,7 @@ Each retained session keeps its server-reported directory unchanged."
     (user-error "OpenCode session directory must be absolute"))
   (setq directory (file-name-as-directory directory))
   (let ((buffer (or (opencode-shell--sessions-buffer profile directory)
-                    (get-buffer-create
+                    (generate-new-buffer
                      (format "*Opencode %s sessions*"
                              (opencode-shell--directory-leaf directory))))))
     (with-current-buffer buffer
@@ -797,10 +837,50 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--mode-line-status ()
   "Return compact transcript status for the mode line."
-  (format " OpenCode[%s model:%s agent:%s]"
-          opencode-shell--request-status
-          (or (car (rassoc opencode-shell--selected-model opencode-shell--models)) "server default")
-          (or opencode-shell--selected-agent "server default")))
+  (format " [%s]" opencode-shell--request-status))
+
+(defun opencode-shell--header ()
+  "Return live transcript title, agent, and model metadata."
+  (format " %s  agent:%s  model:%s"
+          (or opencode-shell--session-title "Untitled")
+          (or opencode-shell--selected-agent "server default")
+          (or (car (rassoc opencode-shell--selected-model opencode-shell--models))
+              "server default")))
+
+(defun opencode-shell--initialize-server-defaults ()
+  "Initialize unset selections from OpenCode's build agent."
+  (when-let* ((build (cdr (assoc "build" opencode-shell--agents)))
+              (configured (opencode-shell--model-value
+                           (opencode-shell--get build 'model)))
+              (available (seq-find
+                          (lambda (entry) (equal (cdr entry) configured))
+                          opencode-shell--models)))
+    (unless opencode-shell--selected-agent
+      (setq opencode-shell--selected-agent "build"))
+    (unless opencode-shell--selected-model
+      (setq opencode-shell--selected-model (cdr available)))))
+
+(defun opencode-shell-help ()
+  "Display the transcript Transient menu."
+  (interactive)
+  (transient-setup 'opencode-shell-menu))
+
+(transient-define-prefix opencode-shell-menu ()
+  "OpenCode transcript actions."
+  [["Session"
+    ("RET" "Submit" opencode-shell--submit)
+    ("g" "Resync" opencode-shell--resync)
+    ("a" "Abort" opencode-shell--abort)]
+   ["Options"
+    ("m" "Model" opencode-shell--select-model)
+    ("A" "Agent" opencode-shell--select-agent)
+    ("p" "Permission" opencode-shell--permissions)
+    ("q" "Question" opencode-shell--questions)]
+   ["Global"
+    ("b" "Shell buffers" opencode-shell-switch-buffer)
+    ("f" "Find session" opencode-shell-find-session)
+    ("l" "Session browser" opencode-shell)
+    ("s" "Start session" opencode-shell-start)]])
 
 (defvar opencode-shell-mode-map
   (let ((map (make-sparse-keymap)))
@@ -815,6 +895,7 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "C-c C-l") #'opencode-shell--permission-allow-always)
     (define-key map (kbd "C-c C-n") #'opencode-shell--permission-reject)
     (define-key map (kbd "C-c C-q") #'opencode-shell--questions)
+    (define-key map (kbd "?") #'opencode-shell-help)
     (define-key map (kbd "C-c C-h") #'describe-mode)
     map))
 
@@ -844,7 +925,7 @@ Each retained session keeps its server-reported directory unchanged."
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
-  (setq-local header-line-format nil)
+  (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
@@ -920,9 +1001,13 @@ Each retained session keeps its server-reported directory unchanged."
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
+      (setq-local opencode-shell--session-title nil)
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
-    (pop-to-buffer buffer)))
+    (pop-to-buffer buffer)
+    (goto-char (point-max))
+    (when (fboundp 'evil-insert-state)
+      (evil-insert-state))))
 
 (defun opencode-shell--part-text (part)
   "Return display text for message PART."
@@ -1609,6 +1694,18 @@ request settles."
 (defun opencode-shell--resync (&optional capabilities)
   "Fully resync transcript, status, models, agents, and pending state."
   (interactive (list t))
+  (opencode-shell--guarded-request
+   'session "GET" "/session"
+   (lambda (sessions)
+     (when-let ((session (seq-find
+                          (lambda (item)
+                            (equal opencode-shell--session-id
+                                   (opencode-shell--get item 'id)))
+                          sessions)))
+       (setq opencode-shell--session-title
+             (or (opencode-shell--get session 'title) "Untitled"))
+       (force-mode-line-update)))
+   nil nil)
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
       (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
@@ -1633,9 +1730,11 @@ request settles."
       (cl-labels ((settle (failure)
                     (setq failed (or failed failure)
                           remaining (1- remaining))
-                    (when (zerop remaining)
-                      (setq opencode-shell--capabilities-loading nil
-                            opencode-shell--capabilities-loaded (not failed)))))
+                     (when (zerop remaining)
+                       (setq opencode-shell--capabilities-loading nil
+                             opencode-shell--capabilities-loaded (not failed))
+                       (unless failed (opencode-shell--initialize-server-defaults))
+                       (force-mode-line-update))))
         (opencode-shell--guarded-request
          'providers "GET" "/provider"
          (lambda (response)
@@ -1860,14 +1959,20 @@ request settles."
   (declare-function evil-define-key* "evil-core")
   (evil-set-initial-state 'opencode-shell-mode 'normal)
   (evil-set-initial-state 'opencode-shell-sessions-mode 'normal)
+  (evil-define-key* 'normal opencode-shell-sessions-mode-map (kbd "g") nil)
   (evil-define-key* 'normal opencode-shell-mode-map
     (kbd "g r") #'opencode-shell--resync
+    (kbd "?") #'opencode-shell-help
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
     (kbd "C-c C-m") #'opencode-shell--select-agent)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
     (kbd "RET") #'opencode-shell--open-at-point
-    (kbd "g r") #'opencode-shell--refresh))
+    (kbd "g r") #'opencode-shell--refresh
+    (kbd "c") #'opencode-shell--create-session
+    (kbd "/") #'opencode-shell--filter
+    (kbd "d") #'opencode-shell--delete-session
+    (kbd "?") #'opencode-shell-sessions-help))
 
 (defun opencode-shell--evil-move-to-composer ()
   "Move point to the composer when entering Evil insert state."
@@ -2133,17 +2238,56 @@ auto-started."
 
 ;;;###autoload
 (defun opencode-shell-switch-buffer ()
-  "Select and display a live OpenCode transcript or sessions buffer."
+  "Select and display a live OpenCode transcript buffer."
   (interactive)
   (let* ((buffers (seq-filter
                    (lambda (buffer)
-                     (with-current-buffer buffer
-                       (or (derived-mode-p 'opencode-shell-mode)
-                           (derived-mode-p 'opencode-shell-sessions-mode))))
+                      (with-current-buffer buffer
+                        (derived-mode-p 'opencode-shell-mode)))
                    (buffer-list)))
          (names (mapcar #'buffer-name buffers)))
     (unless names (user-error "No OpenCode buffers"))
-    (pop-to-buffer (get-buffer (completing-read "OpenCode buffer: " names nil t)))))
+    (pop-to-buffer (get-buffer (completing-read "OpenCode shell: " names nil t)))))
+
+(defun opencode-shell--session-candidate (session profile)
+  "Return a styled completion candidate for SESSION under PROFILE."
+  (let* ((id (opencode-shell--get session 'id))
+         (directory (opencode-shell--get session 'directory))
+         (active (and directory (opencode-shell--transcript-buffer profile directory id)))
+         (label (format "%s  %s  %s" (if active "●" "○")
+                        (or (opencode-shell--get session 'title) "Untitled") id)))
+    (cons (propertize label 'face (if active 'opencode-shell-active-session-face
+                                   'opencode-shell-recent-session-face))
+          session)))
+
+;;;###autoload
+(defun opencode-shell-find-session (&optional profile)
+  "Select a canonical PROFILE session and open or reuse its transcript."
+  (interactive (list (opencode-shell--read-profile)))
+  (let* ((profile (opencode-shell--resolve-or-read-profile profile))
+         (directory (opencode-shell--current-server-directory profile))
+         (buffer (generate-new-buffer " *opencode-find-session*")))
+    (with-current-buffer buffer
+      (setq-local opencode-shell--profile profile
+                  opencode-shell--base-url (or (plist-get profile :base-url)
+                                                opencode-shell-base-url)
+                  opencode-shell--directory directory)
+      (opencode-shell--request
+       "GET" "/session"
+       (lambda (response)
+         (let* ((sessions (opencode-shell--normalize-sessions response))
+                (candidates (mapcar (lambda (session)
+                                      (opencode-shell--session-candidate session profile))
+                                    sessions)))
+           (kill-buffer buffer)
+           (unless candidates (user-error "No OpenCode sessions"))
+           (let* ((choice (completing-read "OpenCode session: " candidates nil t))
+                  (session (cdr (assoc choice candidates)))
+                  (id (opencode-shell--get session 'id))
+                  (session-directory (opencode-shell--get session 'directory)))
+             (unless session-directory (user-error "Session %s has no directory" id))
+             (opencode-shell-open-session id session-directory profile))))
+       nil `((directory . ,directory) (limit . 1000))))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)
@@ -2168,7 +2312,7 @@ auto-started."
 
 ;;;###autoload
 (defun opencode-shell-reload ()
-  "Reload OpenCode Shell sources and regenerate profile commands."
+  "Reload OpenCode Shell sources and refresh existing package buffers."
   (interactive)
   (let* ((main (or load-file-name (locate-library "opencode-shell")))
          (directory (and main (file-name-directory main)))
@@ -2179,6 +2323,22 @@ auto-started."
     (load render nil nil t)
     (load source nil nil t)
     (opencode-shell--register-profile-commands)
+    (when (fboundp 'opencode-shell--setup-evil)
+      (when (featurep 'evil) (opencode-shell--setup-evil)))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (cond
+         ((derived-mode-p 'opencode-shell-sessions-mode)
+          (use-local-map opencode-shell-sessions-mode-map)
+          (opencode-shell--setup-sessions-evil-buffer)
+          (setq-local header-line-format nil))
+         ((derived-mode-p 'opencode-shell-mode)
+          (use-local-map opencode-shell-mode-map)
+          (setq-local header-line-format '(:eval (opencode-shell--header))
+                      mode-line-process '(:eval (opencode-shell--mode-line-status)))
+          (when (markerp opencode-shell--composer-start)
+            (goto-char (point-max)))))))
+    (force-mode-line-update t)
     (message "Reloaded OpenCode Shell")))
 
 (opencode-shell--register-profile-commands)
