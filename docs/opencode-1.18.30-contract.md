@@ -57,3 +57,6 @@ For an assistant envelope attached to the active user message, `info.finish` plu
 part nor `/session/status` idle completes the turn by itself, and any running or
 pending tool part blocks readiness. `Prompt>` is restored and polling stops only
 after that message evidence is present and pending permission work is settled.
+These invariants are exercised by the metadata-only
+`test/fixtures/completion-polling-regression.el` sequence; it intentionally
+contains no conversation, reasoning, tool payload, path, or credential data.

@@ -9,6 +9,7 @@
 (require 'ert)
 (require 'opencode-shell)
 (require 'opencode-shell-acceptance-test)
+(require 'completion-polling-regression)
 
 (defvar opencode-shell-test--local-profile)
 (defvar opencode-shell-test--remote-profile)
@@ -925,6 +926,39 @@
              (parts . (((id . "p1") (type . "text") (text . "answer"))
                        ((id . "p2") (type . "step-finish")))))))
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
+
+(ert-deftest opencode-shell-sanitized-polling-fixture-completes-authoritatively ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-1"
+          opencode-shell--submit-in-flight "user-1"
+          opencode-shell--composer-visible nil
+          opencode-shell--permissions '(((id . "permission-1")
+                                         (sessionID . "session-1"))))
+    (let ((timer (run-at-time 60 nil #'ignore)))
+      (unwind-protect
+          (progn
+            (setq opencode-shell--poll-timer timer)
+            (opencode-shell--render-messages
+             (car opencode-shell-test--completion-polling-snapshots) 1)
+            (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                        'receiving))
+            (should (timerp opencode-shell--poll-timer))
+            (opencode-shell--render-messages
+             (cadr opencode-shell-test--completion-polling-snapshots) 2)
+            (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                        'complete))
+            (should opencode-shell--submit-in-flight)
+            (should-not opencode-shell--composer-visible)
+            (should (timerp opencode-shell--poll-timer))
+            (setq opencode-shell--permissions nil)
+            (opencode-shell--render-messages
+             (cadr opencode-shell-test--completion-polling-snapshots) 3)
+            (should-not opencode-shell--submit-in-flight)
+            (should opencode-shell--composer-visible)
+            (should-not opencode-shell--poll-timer)
+            (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))
+        (when (timerp timer) (cancel-timer timer))))))
 
 (ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
   (with-temp-buffer
