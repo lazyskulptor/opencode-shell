@@ -922,7 +922,6 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "C-c C-l") #'opencode-shell--permission-allow-always)
     (define-key map (kbd "C-c C-n") #'opencode-shell--permission-reject)
     (define-key map (kbd "C-c C-q") #'opencode-shell--questions)
-    (define-key map (kbd "?") #'opencode-shell-help)
     (define-key map (kbd "C-c C-h") #'describe-mode)
     map))
 
@@ -2099,6 +2098,8 @@ request settles."
   (evil-set-initial-state 'opencode-shell-sessions-mode 'normal)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map (kbd "g") nil)
   (evil-define-key* 'normal opencode-shell-mode-map
+    (kbd "RET") #'opencode-shell--submit
+    (kbd "<return>") #'opencode-shell--submit
     (kbd "g r") #'opencode-shell--resync
     (kbd "?") #'opencode-shell-help
     (kbd "C-c C-c") #'opencode-shell--submit

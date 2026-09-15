@@ -103,6 +103,8 @@ selects only live transcript buffers, and `C-c o f` selects a canonical
 newest-first server session. The session selector marks live transcripts as
 active and recent inactive sessions with distinct faces, then opens or reuses the
 selection like `find-file`.
+In transcript Evil normal state, `?` opens this help and `RET` submits the
+composer. Insert state keeps `?` as text input and `RET` as a newline.
 
 Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
 `C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`

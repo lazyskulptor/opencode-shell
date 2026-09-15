@@ -865,6 +865,8 @@
     (should-not (derived-mode-p 'special-mode))
     (should-not (lookup-key opencode-shell-mode-map (kbd "i")))
     (should-not (lookup-key opencode-shell-mode-map (kbd "한")))
+    (should-not (lookup-key opencode-shell-mode-map (kbd "?")))
+    (should-not (lookup-key opencode-shell-mode-map (kbd "RET")))
     (should-not (fboundp 'opencode-shell-self-insert))
     (should-not (fboundp 'opencode-shell-newline))))
 
@@ -1471,8 +1473,7 @@
   (should (commandp 'opencode-shell-sessions-menu)))
 
 (ert-deftest opencode-shell-transcript-help-and-header-metadata ()
-  (should (eq (lookup-key opencode-shell-mode-map (kbd "?"))
-              #'opencode-shell-help))
+  (should-not (lookup-key opencode-shell-mode-map (kbd "?")))
   (should (commandp 'opencode-shell-menu))
   (with-temp-buffer
     (opencode-shell-mode)
