@@ -326,6 +326,28 @@
         (opencode-shell--log-lifecycle "manual" t)
         (should (= (length lines) 3))))))
 
+(ert-deftest opencode-shell-message-lifecycle-log-carries-sequence ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (events)
+      (cl-letf (((symbol-function 'opencode-shell--log-lifecycle)
+                 (lambda (event &optional _force) (push event events))))
+        (opencode-shell--render-messages nil 7)
+        (should (member "messages:7" events))
+        (should (member "poll-stop" events))))))
+
+(ert-deftest opencode-shell-permission-lifecycle-log-follows-snapshot ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let (events)
+      (cl-letf (((symbol-function 'opencode-shell--log-lifecycle)
+                 (lambda (event &optional _force) (push event events)))
+                ((symbol-function 'opencode-shell--start-polling) #'ignore))
+        (opencode-shell--receive-permissions
+         '(((id . "p1") (sessionID . "s") (permission . "bash"))))
+        (should (equal (car events) "permissions"))))))
+
 (ert-deftest opencode-shell-permission-pending-label-shows-patterns ()
   (let (candidates)
     (cl-letf (((symbol-function 'opencode-shell--request)

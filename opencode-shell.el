@@ -847,7 +847,8 @@ Each retained session keeps its server-reported directory unchanged."
   "Stop periodic polling in the current session buffer."
   (when (timerp opencode-shell--poll-timer)
     (cancel-timer opencode-shell--poll-timer))
-  (setq opencode-shell--poll-timer nil))
+  (setq opencode-shell--poll-timer nil)
+  (opencode-shell--log-lifecycle "poll-stop" t))
 
 (defun opencode-shell--start-polling ()
   "Start periodic polling in the current session buffer if needed."
@@ -858,7 +859,8 @@ Each retained session keeps its server-reported directory unchanged."
                          (lambda (target)
                            (when (buffer-live-p target)
                              (with-current-buffer target (opencode-shell--resync))))
-                         buffer)))))
+                          buffer))
+      (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload
 (defun opencode-shell-open-session (id &optional directory profile)
@@ -1301,7 +1303,8 @@ request settles."
     (setq opencode-shell--composer-visible nil
           opencode-shell--idle-completion-count 0)
     (opencode-shell--start-polling))
-  (opencode-shell--render-permissions))
+  (opencode-shell--render-permissions)
+  (opencode-shell--log-lifecycle "permissions"))
 
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
@@ -1497,6 +1500,8 @@ request settles."
           (setq opencode-shell--submit-in-flight nil
                 opencode-shell--composer-visible t))))
     (opencode-shell--render-turns)
+    (opencode-shell--log-lifecycle
+     (if sequence (format "messages:%d" sequence) "messages"))
     (when (and (not (opencode-shell--permission-blocked-p))
                (null opencode-shell--submit-in-flight)
                (equal opencode-shell--request-status "idle"))
@@ -1566,9 +1571,10 @@ request settles."
        (lambda (messages) (opencode-shell--render-messages messages sequence)))))
   (opencode-shell--guarded-request
    'status "GET" "/session/status"
-   (lambda (statuses)
-     (setq opencode-shell--session-status statuses)
-     (opencode-shell--complete-idle-turn)))
+    (lambda (statuses)
+      (setq opencode-shell--session-status statuses)
+      (opencode-shell--complete-idle-turn)
+      (opencode-shell--log-lifecycle "status")))
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions
    nil #'opencode-shell--consume-permission-refresh-pending)
@@ -1646,12 +1652,14 @@ request settles."
       (opencode-shell--replace-composer "")
       (opencode-shell--render-turns)
       (opencode-shell--start-polling)
+      (opencode-shell--log-lifecycle "submit" t)
       (force-mode-line-update)
        (opencode-shell--request
         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
         (lambda (_)
          (setf (opencode-shell--turn-status turn) 'waiting)
          (opencode-shell--render-turns)
+         (opencode-shell--log-lifecycle "submit-ack")
          (opencode-shell--resync))
         (cons `(messageID . ,(opencode-shell--turn-id turn))
               (opencode-shell--prompt-body text)) nil
@@ -1659,6 +1667,7 @@ request settles."
          (setf (opencode-shell--turn-status turn) 'recovering)
          (setq opencode-shell--request-status "recovering")
          (opencode-shell--render-turns)
+         (opencode-shell--log-lifecycle "submit-error" t)
          (opencode-shell--resync)
          (force-mode-line-update))))))
 
@@ -1730,6 +1739,7 @@ request settles."
     (when opencode-shell--permission-sending
       (user-error "Permission reply already in progress"))
     (setq opencode-shell--permission-sending id)
+    (opencode-shell--log-lifecycle "permission-reply" t)
     (opencode-shell--request
      "POST" (format "/permission/%s/reply" id)
      (lambda (_)
@@ -1750,14 +1760,16 @@ request settles."
         (opencode-shell--refresh-permissions)
         (unless (opencode-shell--permission-blocked-p)
           (opencode-shell--resync))
-        (opencode-shell--render-permissions)
-        (message "Permission %s" reply))
+         (opencode-shell--render-permissions)
+         (opencode-shell--log-lifecycle "permission-reply-ok")
+         (message "Permission %s" reply))
      `((reply . ,reply)) nil
      (lambda ()
-       (when (equal opencode-shell--permission-sending id)
-         (setq opencode-shell--permission-sending nil))
-       (opencode-shell--refresh-permissions)
-       (message "Permission reply failed; refreshing pending permissions")))))
+        (when (equal opencode-shell--permission-sending id)
+          (setq opencode-shell--permission-sending nil))
+        (opencode-shell--refresh-permissions)
+        (opencode-shell--log-lifecycle "permission-reply-error" t)
+        (message "Permission reply failed; refreshing pending permissions")))))
 
 (defun opencode-shell--permission-allow-once ()
   "Allow the inline permission once."

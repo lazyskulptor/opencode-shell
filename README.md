@@ -112,6 +112,14 @@ insert commands are left intact and entering insert state focuses the composer.
 An ambiguous `prompt_async` failure keeps the attempted turn visible and polls
 history for its stable ID instead of automatically submitting it again.
 
+For polling diagnostics, leave `opencode-shell-log-requests` enabled and run
+`M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted
+when state changes and name the local blockers, completion metadata, tool-state
+counts, pending permission count, and submit reconciliation state. Routine
+unchanged polls are coalesced. Logs intentionally exclude message/reasoning text,
+tool input/output, permission descriptions and patterns, request bodies, query
+parameters, directories, authorization values, and server error bodies.
+
 ## Security
 
 Use TLS and server/network access controls for remote servers. The legacy
