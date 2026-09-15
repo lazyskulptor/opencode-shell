@@ -2074,7 +2074,6 @@ request settles."
                             (equal id (opencode-shell--question-id entry)))
                            opencode-shell--questions-pending))
          (opencode-shell--render-permissions)
-         (opencode-shell--refresh-questions)
          (opencode-shell--resync nil)
          (message "Question reply sent"))
        `((answers . ,answers)) nil
@@ -2102,7 +2101,6 @@ request settles."
                          (equal id (opencode-shell--question-id entry)))
                         opencode-shell--questions-pending))
        (opencode-shell--render-permissions)
-       (opencode-shell--refresh-questions)
        (opencode-shell--resync nil)
        (message "Question rejected"))
      '() nil
