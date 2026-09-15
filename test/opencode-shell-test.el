@@ -1365,8 +1365,17 @@
           opencode-shell--selected-agent "build"
           opencode-shell--selected-model '((providerID . "p") (modelID . "m"))
           opencode-shell--models '(("p/m" . ((providerID . "p") (modelID . "m")))))
-    (should (string-match-p "Generated title.*build.*p/m" (opencode-shell--header)))
+    (setq opencode-shell--session-id "ses_123")
+    (should (string-match-p "Generated title.*build.*p/m.*session:ses_123"
+                            (opencode-shell--header)))
     (should (equal (opencode-shell--mode-line-status) " [idle]"))))
+
+(ert-deftest opencode-shell-copy-session-id-copies-exact-id ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "ses_exact")
+    (opencode-shell-copy-session-id)
+    (should (equal (current-kill 0) "ses_exact"))))
 
 (ert-deftest opencode-shell-defaults-require-available-build-model ()
   (with-temp-buffer

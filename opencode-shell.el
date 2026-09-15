@@ -839,11 +839,23 @@ Each retained session keeps its server-reported directory unchanged."
 
 (defun opencode-shell--header ()
   "Return live transcript title, agent, and model metadata."
-  (format " %s  agent:%s  model:%s"
-          (or opencode-shell--session-title "Untitled")
-          (or opencode-shell--selected-agent "server default")
-          (or (car (rassoc opencode-shell--selected-model opencode-shell--models))
-              "server default")))
+  (let* ((left (format " %s  agent:%s  model:%s"
+                       (or opencode-shell--session-title "Untitled")
+                       (or opencode-shell--selected-agent "server default")
+                       (or (car (rassoc opencode-shell--selected-model
+                                       opencode-shell--models))
+                           "server default")))
+         (right (format "session:%s " (or opencode-shell--session-id "pending")))
+         (space (max 1 (- (window-total-width) (string-width left)
+                          (string-width right)))))
+    (concat left (make-string space ?\s) right)))
+
+(defun opencode-shell-copy-session-id ()
+  "Copy the current OpenCode session ID to the kill ring."
+  (interactive)
+  (unless opencode-shell--session-id (user-error "No OpenCode session ID"))
+  (kill-new opencode-shell--session-id)
+  (message "Copied OpenCode session ID"))
 
 (defun opencode-shell--initialize-server-defaults ()
   "Initialize unset selections from OpenCode's build agent."
@@ -868,7 +880,8 @@ Each retained session keeps its server-reported directory unchanged."
   [["Session"
     ("RET" "Submit" opencode-shell--submit)
     ("g" "Resync" opencode-shell--resync)
-    ("a" "Abort" opencode-shell--abort)]
+    ("a" "Abort" opencode-shell--abort)
+    ("y" "Copy session ID" opencode-shell-copy-session-id)]
    ["Options"
     ("m" "Model" opencode-shell--select-model)
     ("A" "Agent" opencode-shell--select-agent)
