@@ -925,6 +925,14 @@
                  "```text\n| header | value |\n| --- | --- |\n| code | only |\n```\n"))
     (should (equal (opencode-shell-render-tables raw 30) raw))))
 
+(ert-deftest opencode-shell-markdown-table-layout-keeps-empty-and-composed-cells ()
+  (let* ((raw "| | Value |\n|---|---|\n| é | |\n")
+         (rendered (opencode-shell-render-tables raw 20)))
+    (should-not (equal rendered raw))
+    (should (string-match-p "é" rendered))
+    (dolist (line (split-string rendered "\n" t))
+      (should (<= (string-width line) 20)))))
+
 (ert-deftest opencode-shell-completed-response-adapts-table-without-changing-turn ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -949,16 +957,34 @@
             opencode-shell--table-render-width 72)
       (goto-char (point-max))
       (insert "작성 중")
-      (let ((offset (- (point) opencode-shell--composer-start)))
+      (let ((offset (- (point) opencode-shell--composer-start))
+            restored-start)
         (cl-letf (((symbol-function 'opencode-shell--transcript-window)
                    (lambda () (selected-window)))
                   ((symbol-function 'window-body-width) (lambda (&rest _) 36))
-                  ((symbol-function 'get-buffer-window-list) (lambda (&rest _) nil)))
+                  ((symbol-function 'get-buffer-window-list)
+                   (lambda (&rest _) (list (selected-window))))
+                  ((symbol-function 'window-start) (lambda (&rest _) (point-min)))
+                  ((symbol-function 'set-window-start)
+                   (lambda (_window position &rest _)
+                     (setq restored-start (marker-position position)))))
           (opencode-shell--refresh-table-layout))
         (should (= opencode-shell--table-render-width 36))
+        (should (= restored-start (point-min)))
         (should (equal (opencode-shell--composer-text) "작성 중"))
         (should (= (- (point) opencode-shell--composer-start) offset))
-        (should (equal (opencode-shell--turn-assistant turn) raw))))))
+        (should (equal (opencode-shell--turn-assistant turn) raw))
+        (goto-char (point-min))
+        (should (text-property-search-forward 'read-only t t))))))
+
+(ert-deftest opencode-shell-table-resize-hook-has-buffer-lifecycle ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (should (memq #'opencode-shell--refresh-table-layout
+                  window-configuration-change-hook))
+    (opencode-shell--cleanup)
+    (should-not (memq #'opencode-shell--refresh-table-layout
+                      window-configuration-change-hook))))
 
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-y"))
