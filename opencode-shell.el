@@ -413,6 +413,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--permission-sending nil)
 (defvar-local opencode-shell--resolved-permissions nil)
 (defvar-local opencode-shell--permission-refresh-pending nil)
+(defvar-local opencode-shell--last-lifecycle-signature nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
 
@@ -970,7 +971,91 @@ Each retained session keeps its server-reported directory unchanged."
          (or (seq-some #'opencode-shell--terminal-part-p parts)
              (and (opencode-shell--get info 'finish)
                   (opencode-shell--get (opencode-shell--get info 'time)
-                                       'completed))))))
+                                        'completed))))))
+
+(defun opencode-shell--lifecycle-id (value)
+  "Return VALUE as bounded operational metadata."
+  (if value (truncate-string-to-width (format "%s" value) 80 nil nil t) "-"))
+
+(defun opencode-shell--part-state-label (part)
+  "Return a payload-free type and status label for PART."
+  (let* ((type (format "%s" (or (opencode-shell--get part 'type) "unknown")))
+         (state (opencode-shell--get part 'state))
+         (status (or (opencode-shell--get state 'status)
+                     (opencode-shell--get part 'status))))
+    (if (member type '("tool" "tool_use" "tool-result"))
+        (format "%s:%s" type (or status "unknown"))
+      type)))
+
+(defun opencode-shell--count-labels (labels)
+  "Return sorted occurrence counts for payload-free LABELS."
+  (let (counts)
+    (dolist (label labels)
+      (setf (alist-get label counts nil nil #'equal)
+            (1+ (or (alist-get label counts nil nil #'equal) 0))))
+    (mapconcat (lambda (entry) (format "%s=%d" (car entry) (cdr entry)))
+               (sort counts (lambda (a b) (string< (car a) (car b)))) ",")))
+
+(defun opencode-shell--lifecycle-summary ()
+  "Return a deterministic privacy-safe polling state summary."
+  (let* ((turns opencode-shell--turns)
+         (assistants (apply #'append
+                            (mapcar #'opencode-shell--turn-assistant-messages turns)))
+         (last-envelope (cdr (car (last assistants))))
+         (last-info (opencode-shell--get last-envelope 'info))
+         (parts (apply #'append
+                       (mapcar (lambda (turn) (or (opencode-shell--turn-parts turn) nil))
+                               turns)))
+         (nonterminal (seq-filter
+                       (lambda (turn) (not (eq (opencode-shell--turn-status turn) 'complete)))
+                       turns))
+         (submit-turn (and opencode-shell--submit-in-flight
+                           (opencode-shell--turn-by-id opencode-shell--submit-in-flight turns)))
+         (blocked-permission (opencode-shell--permission-blocked-p))
+         (blockers (delq nil
+                         (list (and blocked-permission "permission")
+                               (and opencode-shell--submit-in-flight "submit")
+                               (and nonterminal "nonterminal")
+                               (and (not (equal opencode-shell--request-status "idle"))
+                                    "request-status"))))
+         (finish (opencode-shell--get last-info 'finish))
+         (completed (opencode-shell--get (opencode-shell--get last-info 'time)
+                                          'completed)))
+    (format (concat "turns=%d assistants=%d nonterminal=%s last-assistant=%s "
+                    "finish=%s completed=%s parts=%s session-status=%s "
+                    "permissions=%d reply-in-flight=%s submit=%s submit-match=%s "
+                    "request-status=%s blockers=%s")
+            (length turns) (length assistants)
+            (if nonterminal
+                (mapconcat (lambda (turn)
+                             (format "%s:%s"
+                                     (opencode-shell--lifecycle-id
+                                      (opencode-shell--turn-id turn))
+                                     (opencode-shell--turn-status turn)))
+                           nonterminal ",")
+              "none")
+            (opencode-shell--lifecycle-id (opencode-shell--get last-info 'id))
+            (if finish (opencode-shell--lifecycle-id finish) "absent")
+            (if completed "present" "absent")
+            (or (opencode-shell--count-labels
+                 (mapcar #'opencode-shell--part-state-label parts)) "none")
+            (opencode-shell--status opencode-shell--session-id)
+            (length opencode-shell--permissions)
+            (if opencode-shell--permission-sending "yes" "no")
+            (opencode-shell--lifecycle-id opencode-shell--submit-in-flight)
+            (if submit-turn "yes" "no")
+            opencode-shell--request-status
+            (if blockers (mapconcat #'identity blockers ",") "none"))))
+
+(defun opencode-shell--log-lifecycle (&optional event force)
+  "Log privacy-safe lifecycle state after EVENT when it changed.
+When FORCE is non-nil, emit the state even when its signature is unchanged."
+  (when opencode-shell-log-requests
+    (let ((summary (opencode-shell--lifecycle-summary)))
+      (when (or force (not (equal summary opencode-shell--last-lifecycle-signature)))
+        (setq opencode-shell--last-lifecycle-signature summary)
+        (opencode-shell--log "Lifecycle%s %s"
+                             (if event (format "[%s]" event) "") summary)))))
 
 (defun opencode-shell--response-phase (turn)
   "Return the nonterminal response phase for TURN's authoritative parts."

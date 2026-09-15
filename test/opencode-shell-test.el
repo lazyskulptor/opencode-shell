@@ -275,7 +275,56 @@
      (equal (let ((opencode-shell--profile '(:name "one")))
               (opencode-shell--log-buffer-name))
             (let ((opencode-shell--profile '(:name "two")))
-              (opencode-shell--log-buffer-name))))))
+               (opencode-shell--log-buffer-name))))))
+
+(ert-deftest opencode-shell-lifecycle-summary-is-private-and-deterministic ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((secret "NEVER-LOG-PROMPT-TOOL-PERMISSION-DIRECTORY-SECRET")
+           (turn (opencode-shell--make-turn
+                  :id "local-1" :user secret :status 'receiving
+                  :parts `(((id . "tool-1") (type . "tool") (tool . ,secret)
+                            (state . ((status . "running") (input . ,secret)))))
+                  :assistant-messages
+                  `(("assistant-1" .
+                     ((info . ((id . "assistant-1") (role . "assistant")
+                               (finish . "stop") (time . ((completed . 2)))))
+                      (parts . (((id . "tool-1") (type . "tool")
+                                 (tool . ,secret)
+                                 (state . ((status . "running")))))))))))
+           (opencode-shell--turns (list turn))
+           (opencode-shell--session-id "session-1")
+           (opencode-shell--session-status
+            '(("session-1" . (("type" . "idle")))))
+           (opencode-shell--permissions `(((id . "permission-1") (description . ,secret))))
+           (opencode-shell--permission-sending t)
+           (opencode-shell--submit-in-flight "local-1")
+           (opencode-shell--request-status "receiving")
+           (summary (opencode-shell--lifecycle-summary)))
+      (should (string-match-p "nonterminal=local-1:receiving" summary))
+      (should (string-match-p "last-assistant=assistant-1" summary))
+      (should (string-match-p "finish=stop completed=present" summary))
+      (should (string-match-p "tool:running=1" summary))
+      (should (string-match-p "session-status=idle" summary))
+      (should (string-match-p "permissions=1 reply-in-flight=yes" summary))
+      (should (string-match-p "submit-match=yes" summary))
+      (should-not (string-match-p secret summary)))))
+
+(ert-deftest opencode-shell-lifecycle-log-coalesces-unchanged-state ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((opencode-shell-log-requests t) lines)
+      (cl-letf (((symbol-function 'opencode-shell--log)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) lines))))
+        (opencode-shell--log-lifecycle "messages")
+        (opencode-shell--log-lifecycle "status")
+        (should (= (length lines) 1))
+        (setq opencode-shell--request-status "waiting")
+        (opencode-shell--log-lifecycle "messages")
+        (should (= (length lines) 2))
+        (opencode-shell--log-lifecycle "manual" t)
+        (should (= (length lines) 3))))))
 
 (ert-deftest opencode-shell-permission-pending-label-shows-patterns ()
   (let (candidates)
