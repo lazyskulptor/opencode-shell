@@ -907,6 +907,24 @@
       (should (equal (buffer-substring-no-properties (point-min) (point-max)) raw))
       (should (get-text-property (string-match "message" raw) 'face)))))
 
+(ert-deftest opencode-shell-markdown-table-layout-fits-unicode-content ()
+  (let* ((raw "앞\n| 책임 | 위치 |\n|---|---|\n| JSON 로그 생성 | `translator-api` |\n| OpenSearch 자격증명 | K8s Secret, 실제 값은 외부 주입 |\n뒤")
+         (wide (opencode-shell-render-tables raw 72))
+         (narrow (opencode-shell-render-tables raw 36)))
+    (should (string-prefix-p "앞\n| 책임" wide))
+    (should (string-suffix-p "\n뒤" wide))
+    (dolist (line (split-string narrow "\n" t))
+      (should (<= (string-width line) 36)))
+    (should (string-match-p "실제 값" narrow))
+    (should (string-match-p "외부" narrow))
+    (should (string-match-p "주입" narrow))))
+
+(ert-deftest opencode-shell-markdown-table-layout-leaves-other-input-exact ()
+  (dolist (raw '("문장 | 그대로\n다음 문장\n"
+                 "| header | value |\n| -- | --- |\n| incomplete | row |\n"
+                 "```text\n| header | value |\n| --- | --- |\n| code | only |\n```\n"))
+    (should (equal (opencode-shell-render-tables raw 30) raw))))
+
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-y"))
               #'opencode-shell--permission-allow-once))
