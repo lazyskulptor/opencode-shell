@@ -934,6 +934,14 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "r") #'opencode-shell--permission-reject)
     map))
 
+(defvar opencode-shell-question-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'opencode-shell--questions)
+    (define-key map (kbd "a") #'opencode-shell--questions)
+    (define-key map (kbd "r") #'opencode-shell--question-reject)
+    map)
+  "Keymap for an inline pending question.")
+
 (defun opencode-shell--in-composer-p ()
   "Return non-nil when point is in the writable composer."
   (and (markerp opencode-shell--composer-start)
@@ -1441,8 +1449,25 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
           (add-text-properties
            begin (point)
            `(read-only t rear-nonsticky (read-only keymap)
-              keymap ,opencode-shell-permission-map
-              opencode-shell-permission ,item))))
+               keymap ,opencode-shell-permission-map
+               opencode-shell-permission ,item))))
+      (when (and (null opencode-shell--permissions)
+                 opencode-shell--questions-pending)
+        (let* ((item (car opencode-shell--questions-pending))
+               (question (car (or (opencode-shell--get item 'questions)
+                                  (list item))))
+               (begin (point)))
+          (insert (propertize "┌─ QUESTION ───────────────────────────────\n"
+                              'font-lock-face 'opencode-shell-permission-face)
+                  "│ " (or (opencode-shell--get question 'question)
+                            (opencode-shell--get question 'header) "Answer required") "\n"
+                  "│ Waiting for answer · RET/a answer  r reject\n"
+                  "└───────────────────────────────────────────\n")
+          (add-text-properties
+           begin (point)
+           `(read-only t rear-nonsticky (read-only keymap)
+             keymap ,opencode-shell-question-map
+             opencode-shell-question ,item))))
       (set-marker opencode-shell--permission-status-begin (point))
       (when-let ((status (opencode-shell--permission-status-display)))
         (insert status))
@@ -2010,22 +2035,61 @@ request settles."
 (defun opencode-shell--questions ()
   "Explicitly answer or reject a pending question."
   (interactive)
-  (opencode-shell--choose-pending
-   "question"
-   (lambda (item)
-     (let ((id (opencode-shell--get item 'id)))
-       (if (yes-or-no-p "Answer this question? (No rejects) ")
-            (let ((answers
-                   (vconcat
-                    (mapcar
-                     #'opencode-shell--question-answer
-                     (or (opencode-shell--get item 'questions) (list item))))))
-              (opencode-shell--request
-               "POST" (format "/question/%s/reply" id)
-               (lambda (_) (message "Question reply sent")) `((answers . ,answers))))
-         (opencode-shell--request
-          "POST" (format "/question/%s/reject" id)
-          (lambda (_) (message "Question rejected")) '()))))))
+  (if-let ((item (or (get-text-property (point) 'opencode-shell-question)
+                     (car opencode-shell--questions-pending))))
+      (opencode-shell--question-reply item nil)
+    (opencode-shell--choose-pending
+     "question" (lambda (item) (opencode-shell--question-reply item t)))))
+
+(defun opencode-shell--question-reply (item confirm)
+  "Answer ITEM, prompting for rejection first when CONFIRM is non-nil."
+  (if (and confirm (not (yes-or-no-p "Answer this question? (No rejects) ")))
+      (opencode-shell--question-reject item)
+    (let* ((id (opencode-shell--question-id item))
+           (answers (vconcat
+                     (mapcar #'opencode-shell--question-answer
+                             (or (opencode-shell--get item 'questions)
+                                 (list item))))))
+      (setq opencode-shell--question-sending id)
+      (opencode-shell--request
+       "POST" (format "/question/%s/reply" id)
+       (lambda (_)
+         (setq opencode-shell--question-sending nil
+               opencode-shell--questions-pending
+               (seq-remove (lambda (entry)
+                             (equal id (opencode-shell--question-id entry)))
+                           opencode-shell--questions-pending))
+         (opencode-shell--resync nil)
+         (message "Question reply sent"))
+       `((answers . ,answers)) nil
+       (lambda ()
+         (setq opencode-shell--question-sending nil)
+         (opencode-shell--resync nil)
+         (message "Question reply failed"))))))
+
+(defun opencode-shell--question-reject (&optional item)
+  "Reject pending question ITEM or the current inline question."
+  (interactive)
+  (setq item (or item (get-text-property (point) 'opencode-shell-question)
+                 (car opencode-shell--questions-pending)
+                 (user-error "No pending question")))
+  (let ((id (opencode-shell--question-id item)))
+    (setq opencode-shell--question-sending id)
+    (opencode-shell--request
+     "POST" (format "/question/%s/reject" id)
+     (lambda (_)
+       (setq opencode-shell--question-sending nil
+             opencode-shell--questions-pending
+             (seq-remove (lambda (entry)
+                           (equal id (opencode-shell--question-id entry)))
+                         opencode-shell--questions-pending))
+       (opencode-shell--resync nil)
+       (message "Question rejected"))
+     '() nil
+     (lambda ()
+       (setq opencode-shell--question-sending nil)
+       (opencode-shell--resync nil)
+       (message "Question rejection failed")))))
 
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."

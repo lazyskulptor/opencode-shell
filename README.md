@@ -114,6 +114,10 @@ queued. A reply replaces the current card with its result and advances to the ne
 pending card. Persistent `always` matching is delegated to OpenCode without an
 additional Emacs confirmation. During an active response, `Prompt>` stays hidden and polling continues
 until both the assistant response and every permission request are settled.
+Pending questions use the same single inline interaction area after permissions.
+The card shows `Waiting for answer`; use `RET` or `a` to answer and `r` to reject.
+Questions block prompt readiness until their authoritative snapshot clears, and
+each action immediately resyncs question and tool state.
 
 The session buffer uses normal text editing rather than `special-mode`. Only the
 bottom composer is writable; each submitted user prompt and its response are

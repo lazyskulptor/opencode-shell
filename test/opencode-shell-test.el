@@ -214,6 +214,45 @@
       (opencode-shell--questions)
       (should (equal (cadar requests) "/question/q/reject")))))
 
+(ert-deftest opencode-shell-renders-one-question-after-permissions ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-questions
+     '(((id . "q1") (sessionID . "s") (question . "Choose"))
+       ((id . "q2") (sessionID . "s") (question . "Later"))))
+    (should (= 1 (how-many "┌─ QUESTION" (point-min) (point-max))))
+    (should (string-match-p "Waiting for answer" (buffer-string)))
+    (should-not (string-match-p "Later" (buffer-string)))
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (sessionID . "s") (permission . "read"))))
+    (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
+    (should-not (string-match-p "┌─ QUESTION" (buffer-string)))
+    (opencode-shell--receive-permissions nil)
+    (should (= 1 (how-many "┌─ QUESTION" (point-min) (point-max))))))
+
+(ert-deftest opencode-shell-inline-question-reply-resyncs-immediately ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--questions-pending
+          '(((id . "q1") (sessionID . "s") (question . "Choose")
+             (options . (((label . "A")))))))
+    (let (requests resyncs)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "A"))
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&optional full) (push full resyncs)))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (method path callback &optional body &rest _)
+                   (push (list method path body) requests)
+                   (funcall callback nil))))
+        (opencode-shell--questions)
+        (should (equal (car requests)
+                       '("POST" "/question/q1/reply" ((answers . [["A"]])))))
+        (should (equal resyncs '(nil)))
+        (should-not opencode-shell--question-sending)
+        (should-not opencode-shell--questions-pending)))))
+
 (ert-deftest opencode-shell-permission-replies-and-presentation ()
   (let ((item '((id . "p1") (permission . "bash")
                 (patterns . ("git status" "git diff"))

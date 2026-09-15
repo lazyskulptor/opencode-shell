@@ -39,6 +39,9 @@ Question list responses are likewise authoritative current pending snapshots.
 Pending questions and question replies in flight block prompt readiness just like
 permissions; timer polling includes `/question` so user input requests cannot be
 hidden behind a perpetually running question tool.
+The shared inline interaction area gives permissions priority and otherwise shows
+one current-session question. Reply/reject success triggers an immediate polling
+resync so the associated tool and assistant history can leave their running state.
 
 Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
