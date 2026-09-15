@@ -633,12 +633,12 @@
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
         (opencode-shell--resync t)
-        (should (= (length requests) 6))
+        (should (= (length requests) 7))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
         (opencode-shell--resync t)
-        (should (= (length requests) 6))
+        (should (= (length requests) 7))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
         (funcall (cadr (assoc "/agent" requests)) nil)
@@ -655,7 +655,8 @@
           (setq opencode-shell--in-flight nil))
         (opencode-shell--resync)
         (should (equal (mapcar #'car requests)
-                         '("/permission" "/session/status" "/session/s/message")))))))
+                         '("/question" "/permission" "/session/status"
+                           "/session/s/message")))))))
 
 (ert-deftest opencode-shell-periodic-resync-excludes-session-metadata ()
   (with-temp-buffer
@@ -669,10 +670,34 @@
                    (push path paths))))
         (opencode-shell--resync nil)
         (should (equal (sort paths #'string<)
-                       '("/permission" "/session/s/message" "/session/status")))
+                       '("/permission" "/question" "/session/s/message"
+                         "/session/status")))
         (should-not (member "/session" paths))
         (should-not (member "/agent" paths))
         (should-not (member "/provider" paths))))))
+
+(ert-deftest opencode-shell-question-snapshot-is-session-scoped-and-blocking ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--composer-visible nil)
+    (opencode-shell--receive-questions
+     '(((id . "q1") (sessionID . "other"))
+       ((id . "q2") (sessionId . "s"))
+       ((id . "q2") (sessionID . "s"))))
+    (setq opencode-shell--submit-in-flight "user-1")
+    (opencode-shell--render-messages
+     (cadr opencode-shell-test--completion-polling-snapshots) 1)
+    (should (equal (mapcar #'opencode-shell--question-id
+                           opencode-shell--questions-pending)
+                   '("q2")))
+    (should opencode-shell--submit-in-flight)
+    (should-not opencode-shell--composer-visible)
+    (opencode-shell--receive-questions nil)
+    (opencode-shell--render-messages
+     (cadr opencode-shell-test--completion-polling-snapshots) 2)
+    (should-not opencode-shell--submit-in-flight)
+    (should opencode-shell--composer-visible)))
 
 (ert-deftest opencode-shell-capabilities-retry-after-transient-failure ()
   (with-temp-buffer

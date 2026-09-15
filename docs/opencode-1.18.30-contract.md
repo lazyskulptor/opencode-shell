@@ -35,6 +35,11 @@ rather than waiting for the next poll tick, so implicitly settled siblings
 correct on screen sooner; if a `/permission` request is already in flight, the
 refetch is deferred until that request settles, whether it succeeds or fails.
 
+Question list responses are likewise authoritative current pending snapshots.
+Pending questions and question replies in flight block prompt readiness just like
+permissions; timer polling includes `/question` so user input requests cannot be
+hidden behind a perpetually running question tool.
+
 Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
 `start`, and `search`. Other requests may include `directory` as appropriate.

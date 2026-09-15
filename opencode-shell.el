@@ -442,6 +442,9 @@ and lifecycle keys."
 (defvar-local opencode-shell--permission-sending nil)
 (defvar-local opencode-shell--resolved-permissions nil)
 (defvar-local opencode-shell--permission-refresh-pending nil)
+(defvar-local opencode-shell--questions-pending nil)
+(defvar-local opencode-shell--question-sending nil)
+(defvar-local opencode-shell--question-refresh-pending nil)
 (defvar-local opencode-shell--last-lifecycle-signature nil)
 (defvar opencode-shell--generation-counter 0)
 (defvar-local opencode-shell--filter "")
@@ -1289,9 +1292,13 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
   "Return non-nil when the prompt composer should be displayed."
   opencode-shell--composer-visible)
 
-(defun opencode-shell--permission-blocked-p ()
-  "Return non-nil while permission interaction blocks new input."
-  (or opencode-shell--permissions opencode-shell--permission-sending))
+(defun opencode-shell--human-interaction-blocked-p ()
+  "Return non-nil while a human interaction blocks new input."
+  (or opencode-shell--permissions opencode-shell--permission-sending
+      opencode-shell--questions-pending opencode-shell--question-sending))
+
+(defalias 'opencode-shell--permission-blocked-p
+  #'opencode-shell--human-interaction-blocked-p)
 
 (defun opencode-shell--session-permissions (items)
   "Return permission ITEMS belonging to the current session."
@@ -1314,7 +1321,44 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
       (when-let ((id (opencode-shell--permission-id item)))
         (unless (member id seen)
           (push id seen)
+           (push item result))))))
+
+(defun opencode-shell--session-questions (items)
+  "Return question ITEMS belonging to the current session."
+  (seq-filter
+   (lambda (item)
+     (equal (or (opencode-shell--get item 'sessionID)
+                (opencode-shell--get item 'sessionId))
+            opencode-shell--session-id))
+   items))
+
+(defun opencode-shell--question-id (item)
+  "Return ITEM's usable question ID, or nil."
+  (let ((id (opencode-shell--get item 'id)))
+    (and id (not (string-empty-p (format "%s" id))) (format "%s" id))))
+
+(defun opencode-shell--deduplicate-questions (items)
+  "Return ID-bearing question ITEMS once each in first-seen order."
+  (let (seen result)
+    (dolist (item items (nreverse result))
+      (when-let ((id (opencode-shell--question-id item)))
+        (unless (member id seen)
+          (push id seen)
           (push item result))))))
+
+(defun opencode-shell--receive-questions (items)
+  "Store the authoritative current-session question snapshot ITEMS."
+  (setq opencode-shell--question-refresh-pending nil
+        opencode-shell--questions-pending
+        (opencode-shell--deduplicate-questions
+         (opencode-shell--session-questions items)))
+  (when (opencode-shell--human-interaction-blocked-p)
+    (setq opencode-shell--composer-visible nil
+          opencode-shell--idle-completion-count 0)
+    (opencode-shell--start-polling))
+  (opencode-shell--render-turns)
+  (opencode-shell--render-permissions)
+  (opencode-shell--log-lifecycle "questions"))
 
 (defun opencode-shell--resolved-permission (id)
   "Return the resolved permission record for ID."
@@ -1751,6 +1795,8 @@ request settles."
   (opencode-shell--guarded-request
    'permissions "GET" "/permission" #'opencode-shell--receive-permissions
    nil #'opencode-shell--consume-permission-refresh-pending)
+  (opencode-shell--guarded-request
+   'questions "GET" "/question" #'opencode-shell--receive-questions)
   (when (and full
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)
