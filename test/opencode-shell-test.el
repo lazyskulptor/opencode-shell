@@ -1458,17 +1458,27 @@
         (should (member expected bindings))))))
 
 (ert-deftest opencode-shell-reload-refreshes-existing-buffer-local-map ()
-  (with-temp-buffer
-    (opencode-shell-sessions-mode)
-    (use-local-map (copy-keymap opencode-shell-sessions-mode-map))
-    (define-key (current-local-map) (kbd "?") #'ignore)
-    (cl-letf (((symbol-function 'load) #'ignore)
+  (let (loaded)
+    (with-temp-buffer
+      (opencode-shell-sessions-mode)
+      (use-local-map (copy-keymap opencode-shell-sessions-mode-map))
+      (define-key (current-local-map) (kbd "?") #'ignore)
+      (cl-letf (((symbol-function 'load)
+                 (lambda (file &rest _) (push file loaded)))
               ((symbol-function 'opencode-shell--register-profile-commands) #'ignore)
               ((symbol-function 'locate-library)
-               (lambda (_) (expand-file-name "opencode-shell.el" default-directory))))
-      (opencode-shell-reload)
-      (should (eq (lookup-key (current-local-map) (kbd "?"))
-                  #'opencode-shell-sessions-help)))))
+               (lambda (library)
+                 (expand-file-name
+                  (if (equal library "opencode-shell-setting")
+                      "opencode-shell-setting.el"
+                    "opencode-shell.el")
+                  default-directory))))
+        (opencode-shell-reload)
+        (should (seq-some (lambda (file)
+                            (string-suffix-p "opencode-shell-setting.el" file))
+                          loaded))
+        (should (eq (lookup-key (current-local-map) (kbd "?"))
+                    #'opencode-shell-sessions-help))))))
 
 (ert-deftest opencode-shell-directory-derived-buffer-names-and-reuse ()
   (should (equal (opencode-shell--directory-leaf "/work/project/") "project"))

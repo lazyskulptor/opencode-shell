@@ -2342,6 +2342,8 @@ auto-started."
       (user-error "Cannot locate OpenCode Shell source files"))
     (load render nil nil t)
     (load source nil nil t)
+    (when-let ((setting (locate-library "opencode-shell-setting")))
+      (load setting nil nil t))
     (opencode-shell--register-profile-commands)
     (when (fboundp 'opencode-shell--setup-evil)
       (when (featurep 'evil) (opencode-shell--setup-evil)))
