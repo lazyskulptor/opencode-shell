@@ -26,6 +26,15 @@
       (should (equal (alist-get 'model body) opencode-shell--selected-model))
       (should (equal (alist-get 'text (aref (alist-get 'parts body) 0)) "안녕")))))
 
+(ert-deftest opencode-shell-local-requests-bypass-url-proxy ()
+  (let ((url-proxy-services '(("http" . "proxy.example:3128"))) seen)
+    (with-temp-buffer
+      (setq-local opencode-shell--profile opencode-shell-test--local-profile)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (&rest _) (setq seen url-proxy-services))))
+        (opencode-shell--request "GET" "/question" #'ignore)))
+    (should-not seen)))
+
 (ert-deftest opencode-shell-session-normalization-and-filter ()
   (let* ((old '((id . "old") (title . "Alpha") (time (updated . 1000))))
          (new '((id . "new") (title . "Beta") (directory . "/work")

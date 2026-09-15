@@ -513,7 +513,12 @@ and lifecycle keys."
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
 BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
 called after a transport, status, or decoding failure."
-  (let* ((url-request-method method)
+  (let* ((url-proxy-services
+          (if (opencode-shell--profile-remote-p
+               (or opencode-shell--profile (opencode-shell--default-profile)))
+              url-proxy-services
+            nil))
+         (url-request-method method)
          (url-request-extra-headers
           (append '(("Accept" . "application/json"))
                   (and body '(("Content-Type" . "application/json")))
