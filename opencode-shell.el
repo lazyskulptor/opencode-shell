@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (transient "0.3.7"))
 ;; Keywords: tools, processes
 ;;; Commentary:
 
@@ -687,8 +687,9 @@ Each retained session keeps its server-reported directory unchanged."
       ("/" "Filter" opencode-shell--filter)]
      ["Global"
       ("s" "Start (select profile)" opencode-shell-start)
-      ("l" "Sessions (select profile)" opencode-shell)
-       ("b" "Switch buffer" opencode-shell-switch-buffer)]])
+       ("l" "Sessions (select profile)" opencode-shell)
+       ("b" "Shell buffers" opencode-shell-switch-buffer)
+       ("f" "Find session" opencode-shell-find-session)]])
 
 (define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
   "Browse canonical OpenCode sessions."
