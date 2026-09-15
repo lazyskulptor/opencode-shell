@@ -320,6 +320,36 @@ and lifecycle keys."
   "Return a stable buffer scope for PROFILE and server-native DIRECTORY."
   (format "%s:%s" (opencode-shell--profile-key profile) (or directory "")))
 
+(defun opencode-shell--directory-leaf (directory)
+  "Return a concise display leaf for DIRECTORY."
+  (let* ((path (or directory default-directory "/"))
+         (trimmed (string-remove-suffix "/" (file-name-as-directory path)))
+         (leaf (file-name-nondirectory trimmed)))
+    (if (string-empty-p leaf) "root" leaf)))
+
+(defun opencode-shell--sessions-buffer (profile directory)
+  "Return the live browser for PROFILE and DIRECTORY, when present."
+  (seq-find
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (and (derived-mode-p 'opencode-shell-sessions-mode)
+            (equal (opencode-shell--profile-key opencode-shell--profile)
+                   (opencode-shell--profile-key profile))
+            (equal opencode-shell--directory directory))))
+   (buffer-list)))
+
+(defun opencode-shell--transcript-buffer (profile directory session-id)
+  "Return the live transcript matching PROFILE, DIRECTORY, and SESSION-ID."
+  (seq-find
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (and (derived-mode-p 'opencode-shell-mode)
+            (equal opencode-shell--session-id session-id)
+            (equal (opencode-shell--profile-key opencode-shell--profile)
+                   (opencode-shell--profile-key profile))
+            (equal opencode-shell--directory directory))))
+   (buffer-list)))
+
 (defun opencode-shell--auth-source-resolve (profile)
   "Resolve PROFILE credentials through auth-source without retaining them."
   (require 'auth-source)
@@ -410,6 +440,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
+(defvar-local opencode-shell--permission-status-begin nil)
+(defvar-local opencode-shell--permission-status-end nil)
 (defvar-local opencode-shell--permission-sending nil)
 (defvar-local opencode-shell--resolved-permissions nil)
 (defvar-local opencode-shell--permission-refresh-pending nil)
@@ -638,10 +670,7 @@ Each retained session keeps its server-reported directory unchanged."
   (setq tabulated-list-format
         [("Title" 28 t) ("ID" 10 t) ("Agent" 12 t)
          ("Model" 18 t) ("Status" 10 t) ("Updated" 16 t)])
-  (setq-local header-line-format
-              '(:eval (format " OpenCode %s  %s"
-                              (opencode-shell--profile-name opencode-shell--profile)
-                              (or opencode-shell--directory "-"))))
+  (setq-local header-line-format nil)
   (setq tabulated-list-padding 2 tabulated-list-sort-key '("Updated" . t))
   (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
   (tabulated-list-init-header))
@@ -655,9 +684,10 @@ Each retained session keeps its server-reported directory unchanged."
   (unless (and (stringp directory) (file-name-absolute-p directory))
     (user-error "OpenCode session directory must be absolute"))
   (setq directory (file-name-as-directory directory))
-  (let ((buffer (get-buffer-create
-                 (format "*OpenCode Shell Sessions:%s:%s*"
-                         (opencode-shell--profile-key profile) directory))))
+  (let ((buffer (or (opencode-shell--sessions-buffer profile directory)
+                    (get-buffer-create
+                     (format "*Opencode %s sessions*"
+                             (opencode-shell--directory-leaf directory))))))
     (with-current-buffer buffer
       (opencode-shell-sessions-mode)
       (setq-local opencode-shell--profile profile)
@@ -765,14 +795,12 @@ Each retained session keeps its server-reported directory unchanged."
   "Preserve CHOICE only when it still occurs in CHOICES."
   (and choice (seq-find (lambda (item) (equal (cdr item) choice)) choices) choice))
 
-(defun opencode-shell--header ()
-  "Return the current transcript header line."
-  (format " OpenCode  %s  %s  model:%s  agent:%s  %s"
-          (or opencode-shell--session-id "-")
-          (or opencode-shell--directory "-")
+(defun opencode-shell--mode-line-status ()
+  "Return compact transcript status for the mode line."
+  (format " OpenCode[%s model:%s agent:%s]"
+          opencode-shell--request-status
           (or (car (rassoc opencode-shell--selected-model opencode-shell--models)) "server default")
-          (or opencode-shell--selected-agent "server default")
-          opencode-shell--request-status))
+          (or opencode-shell--selected-agent "server default")))
 
 (defvar opencode-shell-mode-map
   (let ((map (make-sparse-keymap)))
@@ -816,7 +844,8 @@ Each retained session keeps its server-reported directory unchanged."
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
-  (setq-local header-line-format '(:eval (opencode-shell--header)))
+  (setq-local header-line-format nil)
+  (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
               opencode-shell--permissions nil
@@ -829,7 +858,9 @@ Each retained session keeps its server-reported directory unchanged."
     (setq opencode-shell--composer-start (copy-marker (point) nil)
           opencode-shell--transcript-end (copy-marker (point) nil)
           opencode-shell--permission-begin (copy-marker (point) nil)
-          opencode-shell--permission-end (copy-marker (point) nil)))
+          opencode-shell--permission-end (copy-marker (point) nil)
+          opencode-shell--permission-status-begin (copy-marker (point) nil)
+          opencode-shell--permission-status-end (copy-marker (point) nil)))
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
@@ -874,11 +905,11 @@ Each retained session keeps its server-reported directory unchanged."
            (opencode-shell--server-directory
             (or directory (plist-get profile :directory) opencode-shell-directory)
             profile))
-          (buffer (get-buffer-create
-                   (if explicit-profile
-                       (format "*OpenCode Shell %s:%s*"
-                               (opencode-shell--buffer-scope profile resolved-directory) id)
-                     (format "*OpenCode Shell %s*" id)))))
+          (buffer (or (opencode-shell--transcript-buffer
+                       profile resolved-directory id)
+                      (generate-new-buffer
+                       (format "*Opencode %s shell*"
+                               (opencode-shell--directory-leaf resolved-directory))))))
     (with-current-buffer buffer
       (when (derived-mode-p 'opencode-shell-mode) (opencode-shell--cleanup))
       (opencode-shell-mode)
@@ -1257,8 +1288,12 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
           (add-text-properties
            begin (point)
            `(read-only t rear-nonsticky (read-only keymap)
-             keymap ,opencode-shell-permission-map
-             opencode-shell-permission ,item))))
+              keymap ,opencode-shell-permission-map
+              opencode-shell-permission ,item))))
+      (set-marker opencode-shell--permission-status-begin (point))
+      (when-let ((status (opencode-shell--permission-status-display)))
+        (insert status))
+      (set-marker opencode-shell--permission-status-end (point))
       (set-marker opencode-shell--permission-end (point))
       (when (opencode-shell--composer-visible-p)
         (insert (propertize "Prompt> " 'read-only t
@@ -1303,6 +1338,7 @@ request settles."
     (setq opencode-shell--composer-visible nil
           opencode-shell--idle-completion-count 0)
     (opencode-shell--start-polling))
+  (opencode-shell--render-turns)
   (opencode-shell--render-permissions)
   (opencode-shell--log-lifecycle "permissions"))
 
@@ -1382,8 +1418,20 @@ request settles."
        ('aborting (opencode-shell--status-display "Aborting"))
        ('error "Request failed\n\n")
        (_ (opencode-shell--status-display "Waiting for response")))
-     'face (if (eq (opencode-shell--turn-status turn) 'error)
-                'opencode-shell-error-face 'opencode-shell-waiting-face))))
+      'face (if (eq (opencode-shell--turn-status turn) 'error)
+                 'opencode-shell-error-face 'opencode-shell-waiting-face))))
+
+(defun opencode-shell--permission-status-turn ()
+  "Return the latest nonterminal turn while permission blocks input."
+  (and (opencode-shell--permission-blocked-p)
+       (seq-find (lambda (turn)
+                   (not (eq (opencode-shell--turn-status turn) 'complete)))
+                 (reverse opencode-shell--turns))))
+
+(defun opencode-shell--permission-status-display ()
+  "Return transient status displayed below the permission card."
+  (when-let ((turn (opencode-shell--permission-status-turn)))
+    (opencode-shell--response-display turn)))
 
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current history-poll heartbeat."
@@ -2075,6 +2123,27 @@ auto-started."
   (interactive (list (opencode-shell--read-profile)))
   (opencode-shell--open-sessions
    (opencode-shell--resolve-or-read-profile profile)))
+
+;;;###autoload
+(defun opencode-shell-start (&optional profile)
+  "Select an OpenCode PROFILE and start a session in the current directory."
+  (interactive (list (opencode-shell--read-profile)))
+  (opencode-shell--start-session
+   (opencode-shell--resolve-or-read-profile profile)))
+
+;;;###autoload
+(defun opencode-shell-switch-buffer ()
+  "Select and display a live OpenCode transcript or sessions buffer."
+  (interactive)
+  (let* ((buffers (seq-filter
+                   (lambda (buffer)
+                     (with-current-buffer buffer
+                       (or (derived-mode-p 'opencode-shell-mode)
+                           (derived-mode-p 'opencode-shell-sessions-mode))))
+                   (buffer-list)))
+         (names (mapcar #'buffer-name buffers)))
+    (unless names (user-error "No OpenCode buffers"))
+    (pop-to-buffer (get-buffer (completing-read "OpenCode buffer: " names nil t)))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)

@@ -699,8 +699,9 @@
       (should-not called))))
 
 (ert-deftest opencode-shell-reopen-keeps-one-timer ()
-  (let (timers cancelled)
-    (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+  (let (timers cancelled opened)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _) (setq opened buffer)))
               ((symbol-function 'opencode-shell--resync) #'ignore)
               ((symbol-function 'run-at-time)
                (lambda (&rest _) (let ((timer (list 'timer))) (push timer timers) timer)))
@@ -712,7 +713,7 @@
             (opencode-shell-open-session "timer-test")
             (should (= (length timers) 2))
             (should (equal cancelled (list (cadr timers)))))
-        (kill-buffer "*OpenCode Shell timer-test*")))))
+        (when (buffer-live-p opened) (kill-buffer opened))))))
 
 (ert-deftest opencode-shell-completion-stops-polling ()
   (with-temp-buffer
@@ -1069,6 +1070,26 @@
     (should-not opencode-shell--composer-visible)
     (should (= opencode-shell--idle-completion-count 0))))
 
+(ert-deftest opencode-shell-permission-precedes-relocated-response-spinner ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+    (opencode-shell--receive-permissions
+     '(((id . "permission") (sessionID . "s") (permission . "read"))))
+    (let ((permission (save-excursion (goto-char (point-min)) (search-forward "PERMISSION")))
+          (spinner (save-excursion (goto-char (point-min)) (search-forward "Receiving"))))
+      (should (< permission spinner))
+      (should (= 1 (how-many "Receiving" (point-min) (point-max))))
+      (should (<= opencode-shell--permission-status-begin spinner))
+      (should (<= spinner opencode-shell--permission-status-end)))
+    (opencode-shell--receive-permissions nil)
+    (should (= 1 (how-many "Receiving" (point-min) (point-max))))
+    (should-not (search-forward "PERMISSION" nil t))))
+
 (ert-deftest opencode-shell-authoritative-completion-waits-for-permission-settlement ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -1263,7 +1284,7 @@
         (should (equal (alist-get 'messageID body)
                        (opencode-shell--turn-id (car opencode-shell--turns))))))))
 
-(ert-deftest opencode-shell-waiting-face-model-agent-keys-and-header ()
+(ert-deftest opencode-shell-waiting-face-model-agent-keys-and-mode-line ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c")) #'opencode-shell--submit))
   (should (eq (lookup-key opencode-shell-mode-map (kbd "s-<return>")) #'opencode-shell--submit))
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-v")) #'opencode-shell--select-model))
@@ -1277,13 +1298,38 @@
                (lambda (prompt &rest _) (if (string-prefix-p "Model" prompt) "p/m" "build"))))
       (opencode-shell--select-model)
       (opencode-shell--select-agent))
-    (should (string-match-p "p/m.*build" (opencode-shell--header)))
+    (should-not header-line-format)
+    (should (string-match-p "p/m.*build" (opencode-shell--mode-line-status)))
     (setq opencode-shell--turns
           (list (opencode-shell--make-turn :id "local" :user "q" :status 'waiting)))
     (opencode-shell--render-turns)
     (goto-char (point-min)) (search-forward "Waiting")
     (should (eq (get-text-property (match-beginning 0) 'face)
-                'opencode-shell-waiting-face))))
+                 'opencode-shell-waiting-face))))
+
+(ert-deftest opencode-shell-directory-derived-buffer-names-and-reuse ()
+  (should (equal (opencode-shell--directory-leaf "/work/project/") "project"))
+  (let* ((profile opencode-shell-test--local-profile)
+         (directory "/work/project/")
+         (browser (generate-new-buffer " *oc-browser*"))
+         (transcript (generate-new-buffer " *oc-transcript*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer browser
+            (opencode-shell-sessions-mode)
+            (setq-local opencode-shell--profile profile
+                        opencode-shell--directory directory))
+          (with-current-buffer transcript
+            (opencode-shell-mode)
+            (setq-local opencode-shell--profile profile
+                        opencode-shell--directory directory
+                        opencode-shell--session-id "s1"))
+          (should (eq browser (opencode-shell--sessions-buffer profile directory)))
+          (should (eq transcript
+                      (opencode-shell--transcript-buffer profile directory "s1")))
+          (should-not (opencode-shell--transcript-buffer profile directory "s2")))
+      (kill-buffer browser)
+      (kill-buffer transcript))))
 
 (ert-deftest opencode-shell-conversation-state-is-independent-between-buffers ()
   (let ((a (generate-new-buffer " *oc-turn-a*"))
