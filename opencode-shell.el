@@ -837,6 +837,12 @@ Each retained session keeps its server-reported directory unchanged."
   "Return compact transcript status for the mode line."
   (format " [%s]" opencode-shell--request-status))
 
+(defvar opencode-shell-header-session-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'opencode-shell-copy-session-id)
+    map)
+  "Mouse map for the session ID in transcript headers.")
+
 (defun opencode-shell--header ()
   "Return live transcript title, agent, and model metadata."
   (let* ((left (format " %s  agent:%s  model:%s"
@@ -845,7 +851,13 @@ Each retained session keeps its server-reported directory unchanged."
                        (or (car (rassoc opencode-shell--selected-model
                                        opencode-shell--models))
                            "server default")))
-         (right (format "session:%s " (or opencode-shell--session-id "pending")))
+         (right-text (format "session:%s " (or opencode-shell--session-id "pending")))
+         (right (if opencode-shell--session-id
+                    (propertize right-text
+                                'keymap opencode-shell-header-session-map
+                                'mouse-face 'mode-line-highlight
+                                'help-echo "mouse-1: Copy session ID")
+                  right-text))
          (space (max 1 (- (window-total-width) (string-width left)
                           (string-width right)))))
     (concat left (make-string space ?\s) right)))

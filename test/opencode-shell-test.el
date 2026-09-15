@@ -1417,9 +1417,29 @@
           opencode-shell--selected-model '((providerID . "p") (modelID . "m"))
           opencode-shell--models '(("p/m" . ((providerID . "p") (modelID . "m")))))
     (setq opencode-shell--session-id "ses_123")
-    (should (string-match-p "Generated title.*build.*p/m.*session:ses_123"
-                            (opencode-shell--header)))
+    (let* ((header (opencode-shell--header))
+           (session-pos (string-match "session:ses_123" header)))
+      (should (string-match-p "Generated title.*build.*p/m.*session:ses_123" header))
+      (should (eq (lookup-key (get-text-property session-pos 'keymap header)
+                              [header-line mouse-1])
+                  #'opencode-shell-copy-session-id))
+      (should (eq (get-text-property session-pos 'mouse-face header)
+                  'mode-line-highlight))
+      (should (string-match-p "Copy session ID"
+                              (get-text-property session-pos 'help-echo header)))
+      (should-not (get-text-property 1 'keymap header)))
     (should (equal (opencode-shell--mode-line-status) " [idle]"))))
+
+(ert-deftest opencode-shell-pending-header-session-is-not-clickable ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-title nil
+          opencode-shell--session-id nil)
+    (let* ((header (opencode-shell--header))
+           (session-pos (string-match "session:pending" header)))
+      (should session-pos)
+      (should-not (get-text-property session-pos 'keymap header))
+      (should-not (get-text-property session-pos 'mouse-face header)))))
 
 (ert-deftest opencode-shell-copy-session-id-copies-exact-id ()
   (with-temp-buffer
