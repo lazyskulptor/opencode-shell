@@ -382,10 +382,7 @@ and lifecycle keys."
 (defun opencode-shell--log-buffer-name ()
   "Return the log buffer name for the current session or global requests."
   (if opencode-shell--session-id
-      (format "%s<%s:%s>" opencode-shell-log-buffer-name
-              (opencode-shell--profile-name
-               (or opencode-shell--profile (opencode-shell--default-profile)))
-              opencode-shell--session-id)
+      (format "%s-log" (buffer-name))
     opencode-shell-log-buffer-name))
 
 (defun opencode-shell--log (format-string &rest args)

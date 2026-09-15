@@ -257,25 +257,32 @@
       (kill-buffer opencode-shell-log-buffer-name))))
 
 (ert-deftest opencode-shell-api-log-is-separated-by-session ()
-  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
-        (opencode-shell-log-requests t)
-        (opencode-shell--session-id "session-1"))
-    (unwind-protect
-        (progn
-          (opencode-shell--log "session request")
-          (should (get-buffer " *opencode-shell-test-log*<default:session-1>"))
-          (should-not (get-buffer opencode-shell-log-buffer-name)))
-      (when-let ((buffer (get-buffer " *opencode-shell-test-log*<default:session-1>")))
-        (kill-buffer buffer)))))
+  (with-temp-buffer
+    (rename-buffer "*Opencode project shell*" t)
+    (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
+          (opencode-shell-log-requests t)
+          (opencode-shell--session-id "session-1"))
+      (unwind-protect
+          (progn
+            (opencode-shell--log "session request")
+            (should (get-buffer "*Opencode project shell*-log"))
+            (should-not (get-buffer opencode-shell-log-buffer-name)))
+        (when-let ((buffer (get-buffer "*Opencode project shell*-log")))
+          (kill-buffer buffer))))))
 
 (ert-deftest opencode-shell-api-log-separates-identical-session-ids-by-profile ()
-  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
-        (opencode-shell--session-id "same"))
-    (should-not
-     (equal (let ((opencode-shell--profile '(:name "one")))
-              (opencode-shell--log-buffer-name))
-            (let ((opencode-shell--profile '(:name "two")))
-               (opencode-shell--log-buffer-name))))))
+  (let ((one (generate-new-buffer "*Opencode project shell*"))
+        (two (generate-new-buffer "*Opencode project shell*")))
+    (unwind-protect
+        (should-not
+         (equal (with-current-buffer one
+                  (setq opencode-shell--session-id "same")
+                  (opencode-shell--log-buffer-name))
+                (with-current-buffer two
+                  (setq opencode-shell--session-id "same")
+                  (opencode-shell--log-buffer-name))))
+      (kill-buffer one)
+      (kill-buffer two))))
 
 (ert-deftest opencode-shell-lifecycle-summary-is-private-and-deterministic ()
   (with-temp-buffer
