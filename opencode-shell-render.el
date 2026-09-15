@@ -62,10 +62,7 @@
                  do (aset widths column
                           (max (aref widths column) (string-width cell)))))
       (while (> (apply #'+ (append widths nil)) available)
-        (let ((widest 0))
-          (dotimes (column columns)
-            (when (> (aref widths column) (aref widths widest))
-              (setq widest column)))
+        (let ((widest (seq-position widths (seq-max widths))))
           (aset widths widest (1- (aref widths widest)))))
       widths)))
 
@@ -118,14 +115,14 @@
                    (dotimes (line-number height)
                      (push
                       (concat "| "
-                              (cl-loop for chunks in wrapped
-                                       for column from 0
-                                       collect
-                                       (opencode-shell-render--pad-cell
-                                        (or (nth line-number chunks) "")
-                                        (aref widths column))
-                                       into cells
-                                       finally return (mapconcat #'identity cells " | "))
+                              (mapconcat
+                               #'identity
+                               (cl-loop for chunks in wrapped
+                                        for column from 0
+                                        collect (opencode-shell-render--pad-cell
+                                                 (or (nth line-number chunks) "")
+                                                 (aref widths column)))
+                               " | ")
                               " |")
                       lines)))))
       (mapconcat #'identity (nreverse lines) "\n"))))
@@ -141,11 +138,9 @@ Text outside recognized tables, including fenced code blocks, is unchanged."
         (cond
          ((string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line)
           (setq in-fence (not in-fence))
-          (push line result)
-          (setq lines (cdr lines)))
+          (push (pop lines) result))
          ((or in-fence (< (length lines) 3))
-          (push line result)
-          (setq lines (cdr lines)))
+          (push (pop lines) result))
          (t
           (let* ((header (opencode-shell-render--table-cells line))
                  (separator (opencode-shell-render--table-cells (cadr lines))))
@@ -162,19 +157,16 @@ Text outside recognized tables, including fenced code blocks, is unchanged."
                                          (opencode-shell-render--table-cells (car lines)))))
                            (when (and row (= (length row) (length header)))
                              (push row body)
-                             (push (car lines) raw-table)
-                             (setq lines (cdr lines))
+                             (push (pop lines) raw-table)
                              t)))
                   (setq table (append table (nreverse body)))
                   (let ((rendered (opencode-shell-render--layout-table
                                    table width)))
-                    (if rendered
-                        (dolist (rendered-line (split-string rendered "\n" nil))
-                          (push rendered-line result))
-                      (dolist (raw-line (nreverse raw-table))
-                        (push raw-line result)))))
-              (push line result)
-              (setq lines (cdr lines))))))))
+                    (dolist (output-line (if rendered
+                                             (split-string rendered "\n" nil)
+                                           (nreverse raw-table)))
+                      (push output-line result))))
+              (push (pop lines) result)))))))
     (mapconcat #'identity (nreverse result) "\n")))
 
 (defun opencode-shell-render-markdown-region (beg end)

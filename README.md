@@ -84,12 +84,9 @@ Assistant completion comes from the matching message's `finish` and
 payloads. A completed tool or idle session status does not complete the whole
 assistant turn; running tools keep the response active.
 
-Completed assistant pipe tables are formatted to the selected transcript
-window width. Long cells wrap without dropping content, and resizing the
-window recalculates the table. This intentionally recognizes only conventional
-header/separator/body tables outside fenced code blocks; malformed tables and
-all other Markdown remain unchanged. The server Markdown stored in each turn
-is kept verbatim and is used again for every layout pass.
+Completed assistant pipe tables fit the selected transcript window by wrapping
+long cells. Resizing recalculates conventional tables outside fenced code; all
+other Markdown stays unchanged, and each turn retains the verbatim source.
 
 API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
 session exists and in a session-specific log buffer afterwards. Open the relevant
