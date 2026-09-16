@@ -70,9 +70,9 @@
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (first (generate-new-buffer " *accept-runtime-1*"))
         (second (generate-new-buffer " *accept-runtime-2*"))
-        (runtime (list :subscribers (make-hash-table :test #'eq)
-                       :sse-input "" :connected t :ticks 0
-                       :poll-interval 2))
+         (runtime (list :subscribers (make-hash-table :test #'eq)
+                        :attempt 'accept-attempt :ticks 0
+                        :poll-interval 2))
         (first-wakes 0) (second-wakes 0))
     (unwind-protect
         (cl-letf (((symbol-function 'run-with-idle-timer)
@@ -90,14 +90,14 @@
           (puthash second (lambda () (cl-incf second-wakes))
                    (plist-get runtime :subscribers))
           (puthash 'accept runtime opencode-shell-async--runtimes)
-          (dolist (frame opencode-shell-test--sse-wake-burst)
-            (opencode-shell-async--parse-sse runtime frame))
+           (dolist (_frame opencode-shell-test--sse-wake-burst)
+             (opencode-shell-async--transport-event
+              'accept 'accept-attempt '(:data "wake")))
           (opencode-shell-async-drain first)
           (opencode-shell-async-drain second)
           (should (= first-wakes 1))
           (should (= second-wakes 1))
-          (setf (plist-get runtime :connected) nil)
-          (opencode-shell-async--poll-runtime 'accept)
+           (opencode-shell-async--poll-runtime 'accept)
           (opencode-shell-async-drain first)
           (opencode-shell-async-drain second)
           (should (= first-wakes 2))

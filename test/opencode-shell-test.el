@@ -2413,7 +2413,7 @@
   (let ((first (generate-new-buffer " *sse-first*"))
         (second (generate-new-buffer " *sse-second*"))
         (runtime (list :subscribers (make-hash-table :test #'eq)
-                       :sse-input "")))
+                       :attempt 'current :backoff 8 :failures 2)))
     (unwind-protect
         (progn
           (puthash first #'ignore (plist-get runtime :subscribers))
@@ -2421,27 +2421,32 @@
           (dolist (buffer (list first second))
             (with-current-buffer buffer
               (setq-local opencode-shell--generation 1)))
+          (puthash 'server runtime opencode-shell-async--runtimes)
           (cl-letf (((symbol-function 'run-with-idle-timer)
                      (lambda (&rest _) 'timer))
                     ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
                     ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
-            (opencode-shell-async--parse-sse
-             runtime "data: {\"type\":\"session.updated\"}\n\n")
-            (opencode-shell-async--parse-sse
-             runtime "data: {\"type\":\"session.updated\"}\n\n")
+            (opencode-shell-async--transport-event 'server 'current '(:data "one"))
+            (opencode-shell-async--transport-event 'server 'current '(:data "two"))
             (dolist (buffer (list first second))
               (with-current-buffer buffer
                 (should (= (length opencode-shell-async--queue) 1))))))
       (kill-buffer first)
-      (kill-buffer second))))
+      (kill-buffer second)
+      (remhash 'server opencode-shell-async--runtimes))))
 
 (ert-deftest opencode-shell-runtime-shares-one-stream-cadence-and-cleans-up ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (first (generate-new-buffer " *runtime-first*"))
         (second (generate-new-buffer " *runtime-second*"))
-        timers cancelled)
+         timers cancelled (starts 0) (stops 0))
     (unwind-protect
-        (cl-letf (((symbol-function 'opencode-shell-async--connect) #'ignore)
+        (cl-letf (((symbol-function 'opencode-shell-sse-start)
+                   (lambda (&rest _)
+                     (cl-incf starts)
+                     (opencode-shell-sse--make-connection :state 'connecting)))
+                  ((symbol-function 'opencode-shell-sse-stop)
+                   (lambda (connection) (when connection (cl-incf stops))))
                   ((symbol-function 'run-at-time)
                    (lambda (&rest args)
                      (let ((timer (cons 'timer args)))
@@ -2456,14 +2461,16 @@
           (opencode-shell-async-subscribe-runtime
            'server second "http://localhost:4199/event" nil t 2 #'ignore)
           (let ((runtime (opencode-shell-async-runtime-get 'server)))
-            (should runtime)
-            (should (= (hash-table-count (plist-get runtime :subscribers)) 2))
-            (should (= (length timers) 1)))
+             (should runtime)
+             (should (= (hash-table-count (plist-get runtime :subscribers)) 2))
+             (should (= (length timers) 1))
+             (should (= starts 1)))
           (opencode-shell-async-unsubscribe-runtime 'server first)
           (should (opencode-shell-async-runtime-get 'server))
           (opencode-shell-async-unsubscribe-runtime 'server second)
           (should-not (opencode-shell-async-runtime-get 'server))
-          (should (= (length cancelled) 1)))
+           (should (= (length cancelled) 1))
+           (should (= stops 1)))
       (kill-buffer first)
       (kill-buffer second))))
 
@@ -2486,134 +2493,20 @@
           (should (= (plist-get runtime :backoff) 4)))
       (remhash key opencode-shell-async--runtimes))))
 
-(ert-deftest opencode-shell-sse-validates-content-type-and-chunk-framing ()
-  (let* ((key 'stream)
-         (token 'connection)
-         (process 'stream-process)
-         (runtime (list :subscribers (make-hash-table :test #'eq)
-                         :process process :input "" :sse-input ""
-                         :connect-token token
-                         :headers-done nil :connected nil :backoff 2))
-         (deletes 0) (wakes 0))
-    (puthash (current-buffer) (lambda () (cl-incf wakes))
-             (plist-get runtime :subscribers))
-    (puthash key runtime opencode-shell-async--runtimes)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'delete-process) (lambda (_) (cl-incf deletes)))
-              ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
-              ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
-              ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
-      (opencode-shell-async--stream-filter
-       key token process
-       "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
-      (let* ((payload "data: {}\n\n")
-             (chunk (format "%x;source=test\r\n%s\r\n" (length payload) payload)))
-        (opencode-shell-async--stream-filter key token process chunk))
-      (opencode-shell-async-drain (current-buffer))
-      (should (plist-get runtime :connected))
-      (should (= wakes 1))
-      (should (zerop deletes))
-      (setf (plist-get runtime :headers-done) nil
-            (plist-get runtime :connected) nil
-            (plist-get runtime :input) ""
-            (plist-get runtime :backoff) 8)
-      (opencode-shell-async--stream-filter
-       key token process
-       "HTTP/1.1 200 OK\r\nX-Reason: content-type: text/event-stream\r\nContent-Type: application/json\r\n\r\n{}")
-      (should (= deletes 1))
-      (should (= (plist-get runtime :backoff) 8))
-      (setf (plist-get runtime :headers-done) t
-            (plist-get runtime :chunked) t
-            (plist-get runtime :input) "ZZ\r\n")
-      (opencode-shell-async--parse-chunks runtime)
-      (should (= deletes 2)))
-    (remhash key opencode-shell-async--runtimes)))
-
-(ert-deftest opencode-shell-sse-ignores-stale-process-output ()
-  (let* ((key 'stale-stream)
-         (runtime (list :subscribers (make-hash-table :test #'eq)
-                        :connect-token 'new-token :process 'new-process
-                        :input "" :sse-input "" :headers-done t
-                        :chunked nil :connected t)))
-    (puthash key runtime opencode-shell-async--runtimes)
-    (unwind-protect
-        (progn
-          (opencode-shell-async--stream-filter
-           key 'old-token 'old-process "data: {\"type\":\"old\"}\n\n")
-          (should (string-empty-p (plist-get runtime :input)))
-          (should (string-empty-p (plist-get runtime :sse-input))))
-      (remhash key opencode-shell-async--runtimes))))
-
-(ert-deftest opencode-shell-sse-immediate-connect-failure-reconnects ()
-  (let* ((key 'immediate-failure)
-         (subscribers (make-hash-table :test #'eq))
-         (runtime (list :subscribers subscribers :url "http://localhost:4199/event"
-                        :headers nil :sse-enabled t :backoff 1
-                        :reconnect-timer nil :header-timer nil :process nil
-                        :connected nil :connecting nil :connect-token nil
-                        :input "" :sse-input "")))
-    (puthash (current-buffer) #'ignore subscribers)
-    (puthash key runtime opencode-shell-async--runtimes)
-    (unwind-protect
-        (cl-letf (((symbol-function 'make-network-process)
-                   (lambda (&rest args)
-                     (funcall (plist-get args :sentinel) 'dead "failed")
-                     'dead))
-                  ((symbol-function 'process-live-p) (lambda (_) nil))
-                  ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
-                  ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
-                  ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
-          (opencode-shell-async--connect key)
-          (should-not (plist-get runtime :process))
-          (should (eq (plist-get runtime :reconnect-timer) 'timer)))
-      (remhash key opencode-shell-async--runtimes))))
-
-(ert-deftest opencode-shell-sse-immediate-filter-preserves-partial-headers ()
-  (let* ((key 'immediate-filter)
-         (subscribers (make-hash-table :test #'eq))
-         (runtime (list :subscribers subscribers :url "http://localhost:4199/event"
-                        :headers nil :sse-enabled t :sse-disabled nil :backoff 1
-                        :reconnect-timer nil :header-timer nil :process nil
-                        :connected nil :connecting nil :connect-token nil
-                        :headers-done nil :input "" :sse-input "")))
-    (puthash (current-buffer) #'ignore subscribers)
-    (puthash key runtime opencode-shell-async--runtimes)
-    (unwind-protect
-        (cl-letf (((symbol-function 'make-network-process)
-                   (lambda (&rest args)
-                     (funcall (plist-get args :filter) 'stream
-                              "HTTP/1.1 200 OK\r\nContent-Type: text/")
-                     'stream))
-                  ((symbol-function 'process-live-p)
-                   (lambda (process) (eq process 'stream)))
-                  ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
-                  ((symbol-function 'process-send-string) #'ignore)
-                  ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
-                  ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
-                  ((symbol-function 'timerp) (lambda (value) (eq value 'timer)))
-                  ((symbol-function 'cancel-timer) #'ignore))
-          (opencode-shell-async--connect key)
-          (should (string-match-p "Content-Type: text/"
-                                  (plist-get runtime :input)))
-          (opencode-shell-async--stream-filter
-           key (plist-get runtime :connect-token) 'stream
-           "event-stream\r\n\r\ndata: {}\n\n")
-          (should (plist-get runtime :connected))
-          (should (plist-get runtime :headers-done))
-          (should-not (plist-get runtime :header-timer)))
-      (remhash key opencode-shell-async--runtimes))))
-
 (ert-deftest opencode-shell-sse-rejects-unsafe-and-conflicting-config ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (buffer (current-buffer)) made)
-    (cl-letf (((symbol-function 'make-network-process)
-               (lambda (&rest _) (setq made t)))
+    (cl-letf (((symbol-function 'opencode-shell-sse-start)
+               (lambda (_url _headers _event error &rest _)
+                 (setq made t)
+                 (funcall error '(:type config :reason unsafe))
+                 (opencode-shell-sse--make-connection :state 'closed)))
               ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
               ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
       (opencode-shell-async-subscribe-runtime
        'unsafe buffer "http://localhost:4199/event"
        '(("Authorization" . "bad\r\nInjected: yes")) t 2 #'ignore)
-      (should-not made)
+      (should made)
       (should (plist-get (opencode-shell-async-runtime-get 'unsafe) :sse-enabled))
       (should (plist-get (opencode-shell-async-runtime-get 'unsafe) :sse-disabled))
       (should
@@ -2645,43 +2538,30 @@
         (should (eq value 'latest))
         (should-not opencode-shell-async--queue)))))
 
-(ert-deftest opencode-shell-sse-bounds-incomplete-input ()
-  (let ((runtime (list :input
-                       (concat (format "%x\r\n"
-                                       (1+ opencode-shell-async--max-chunk-bytes)) "x")
-                       :sse-input "" :process 'stream))
-        (deletes 0))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'delete-process) (lambda (_) (cl-incf deletes))))
-      (opencode-shell-async--parse-chunks runtime)
-      (should (= deletes 1))
-      (setq deletes 0)
-      (setf (plist-get runtime :sse-input)
-            (make-string (1+ opencode-shell-async--max-sse-frame-bytes) ?x))
-      (opencode-shell-async--parse-sse runtime "")
-      (should (= deletes 1))
-      (setq deletes 0)
-      (setf (plist-get runtime :sse-input) "")
-      (opencode-shell-async--parse-sse
-       runtime
-       (concat "data: "
-               (make-string opencode-shell-async--max-sse-frame-bytes ?x)
-               "\n\n"))
-      (should (= deletes 1)))))
-
-(ert-deftest opencode-shell-sse-header-timeout-closes-current-connection ()
-  (let* ((key 'header-timeout)
-         (runtime (list :connect-token 'token :headers-done nil
-                        :header-timer 'timer :process 'stream))
-         closed)
+(ert-deftest opencode-shell-sse-runtime-opens-circuit-after-bounded-failures ()
+  (let* ((key 'circuit)
+         (runtime (list :subscribers (make-hash-table :test #'eq)
+                        :attempt 'attempt :failures 4 :backoff 1
+                        :reconnect-timer nil :sse-disabled nil)))
+    (puthash (current-buffer) #'ignore (plist-get runtime :subscribers))
     (puthash key runtime opencode-shell-async--runtimes)
     (unwind-protect
-        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                  ((symbol-function 'delete-process) (lambda (_) (setq closed t))))
-          (opencode-shell-async--header-timeout key 'token)
-          (should closed)
-          (should-not (plist-get runtime :header-timer)))
+        (progn
+          (opencode-shell-async--transport-error
+           key 'attempt '(:type transport :reason closed))
+          (should (plist-get runtime :sse-disabled))
+          (should-not (plist-get runtime :reconnect-timer)))
       (remhash key opencode-shell-async--runtimes))))
+
+(ert-deftest opencode-shell-async-rejects-nonpositive-runtime-intervals ()
+  (dolist (interval '(0 -1))
+    (should-error
+     (opencode-shell-async-subscribe-runtime
+      'invalid (current-buffer) "http://localhost/event" nil nil
+      interval #'ignore))
+    (should-error
+     (opencode-shell-async-subscribe-animation
+      (current-buffer) interval #'ignore))))
 
 (ert-deftest opencode-shell-shared-animation-recomputes-fastest-cadence ()
   (let ((opencode-shell-async--animation-subscribers

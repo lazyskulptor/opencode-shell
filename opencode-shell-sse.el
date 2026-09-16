@@ -68,12 +68,17 @@ Return nil on success or a protocol error plist."
                  "\\`HTTP/[0-9]+\\.[0-9]+ 2[0-9][0-9]\\(?: [^\r\n]*\\)?\\'"
                  status)))
       (opencode-shell-sse--error parser 'http-status))
-     ((not (seq-some
-            (lambda (value)
-              (string-equal
-               (downcase (string-trim (car (split-string value ";"))))
-               "text/event-stream"))
-            content-types))
+     ((seq-some
+       (lambda (line)
+         (not (string-match-p
+               "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+:[ \t]*[^\r\n]*\\'" line)))
+       fields)
+      (opencode-shell-sse--error parser 'header-field))
+     ((not (and (= (length content-types) 1)
+                (string-equal
+                 (downcase
+                  (string-trim (car (split-string (car content-types) ";"))))
+                 "text/event-stream")))
       (opencode-shell-sse--error parser 'content-type))
      (t
       (setf (opencode-shell-sse-parser-phase parser) 'body
@@ -101,12 +106,12 @@ Return nil on success or a protocol error plist."
     (dolist (line (split-string frame "\r?\n"))
       (cond
        ((or (string-empty-p line) (string-prefix-p ":" line)))
-       ((string-match-p "\\`data\\(?:\\|:\\)" line)
+       ((string-match-p "\\`data\\(?:\\'\\|:\\)" line)
         (setq saw-data t)
         (push (opencode-shell-sse--field-value line) data))
-       ((string-match-p "\\`event\\(?:\\|:\\)" line)
+       ((string-match-p "\\`event\\(?:\\'\\|:\\)" line)
         (setq event (opencode-shell-sse--field-value line)))
-       ((string-match-p "\\`id\\(?:\\|:\\)" line)
+       ((string-match-p "\\`id\\(?:\\'\\|:\\)" line)
         (setq id (opencode-shell-sse--field-value line)))))
     (when saw-data
       (list :data (decode-coding-string
@@ -181,7 +186,10 @@ Return nil on success or a protocol error plist."
           ((string-prefix-p "\r\n" input)
            (setq input (substring input 2))
            (setf (opencode-shell-sse-parser-phase parser) 'done)
-           (setq progress nil))
+           (if (string-empty-p input)
+               (setq progress nil)
+             (setq error
+                   (opencode-shell-sse--error parser 'input-after-terminal))))
           ((string-match "\r\n\r\n" input)
            (let ((trailers (substring input 0 (match-beginning 0)))
                  (next-input (substring input (match-end 0))))
@@ -195,7 +203,10 @@ Return nil on success or a protocol error plist."
                  (setq error (opencode-shell-sse--error parser 'trailers))
                (setq input next-input)
                (setf (opencode-shell-sse-parser-phase parser) 'done)
-               (setq progress nil))))
+               (if (string-empty-p input)
+                   (setq progress nil)
+                 (setq error
+                       (opencode-shell-sse--error parser 'input-after-terminal))))))
           ((> (length input) 8192)
            (setq error (opencode-shell-sse--error parser 'trailers-too-large)))))))
     (unless error
@@ -313,6 +324,8 @@ not mutated; the returned parser is the next state."
 (defun opencode-shell-sse--sentinel (connection token process _event)
   "Handle PROCESS termination for CONNECTION when TOKEN is current."
   (when (and (eq token (opencode-shell-sse-connection-token connection))
+             (memq (opencode-shell-sse-connection-state connection)
+                   '(connecting streaming))
              (or (null (opencode-shell-sse-connection-process connection))
                  (eq process (opencode-shell-sse-connection-process connection))))
     (when (null (opencode-shell-sse-connection-process connection))
