@@ -91,16 +91,33 @@
 (defun opencode-shell-async--parse-chunks (runtime)
   "Decode complete HTTP chunks buffered in RUNTIME."
   (let ((input (or (plist-get runtime :input) "")) done)
-    (while (and (not done) (string-match "\\`\\([[:xdigit:]]+\\)\r\n" input))
-      (let* ((size (string-to-number (match-string 1 input) 16))
-             (start (match-end 0))
-             (end (+ start size)))
-        (if (> (+ end 2) (length input))
-            (setq done t)
-          (unless (zerop size)
-            (opencode-shell-async--parse-sse runtime (substring input start end)))
-          (setq input (substring input (+ end 2)))
-          (when (zerop size) (setq done t)))))
+    (while (and (not done) (string-match "\r\n" input))
+      (let ((line (substring input 0 (match-beginning 0))))
+        (if (not (string-match "\\`\\([[:xdigit:]]+\\)\\(?:;[^\r\n]*\\)?\\'" line))
+            (progn
+              (setq input "" done t)
+              (when (process-live-p (plist-get runtime :process))
+                (delete-process (plist-get runtime :process))))
+          (let* ((size (string-to-number (match-string 1 line) 16))
+                 (start (+ (length line) 2))
+                 (end (+ start size)))
+            (cond
+             ((> (+ end 2) (length input)) (setq done t))
+             ((not (equal (substring input end (+ end 2)) "\r\n"))
+              (setq input "" done t)
+              (when (process-live-p (plist-get runtime :process))
+                (delete-process (plist-get runtime :process))))
+             ((zerop size)
+              (setq input "" done t)
+              (when (process-live-p (plist-get runtime :process))
+                (delete-process (plist-get runtime :process))))
+             (t
+              (opencode-shell-async--parse-sse runtime (substring input start end))
+              (setq input (substring input (+ end 2)))))))))
+    (when (and (> (length input) 8192) (not (string-match-p "\r\n" input)))
+      (setq input "")
+      (when (process-live-p (plist-get runtime :process))
+        (delete-process (plist-get runtime :process))))
     (setf (plist-get runtime :input) input)))
 
 (defun opencode-shell-async--stream-filter (key _process chunk)
@@ -117,7 +134,10 @@
                 (plist-get runtime :chunked)
                 (string-match-p "transfer-encoding:[ \t]*chunked" (downcase headers))
                 (plist-get runtime :connected)
-                (string-match-p "\\`HTTP/[0-9.]+ 2[0-9][0-9]" headers)
+                (and (string-match-p "\\`HTTP/[0-9.]+ 2[0-9][0-9]" headers)
+                     (string-match-p
+                      "content-type:[ \t]*text/event-stream\\(?:[;\r\n]\\|$\\)"
+                      (downcase headers)))
                 (plist-get runtime :backoff) 1)
           (opencode-shell-async--runtime-log
            runtime "transport=%s"

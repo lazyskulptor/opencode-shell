@@ -742,7 +742,9 @@
         (opencode-shell--permission-allow-always)
         (should (equal request
                        '("POST" "/permission/p1/reply" ((reply . "always")))))
-        (funcall callback nil)
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+          (funcall callback nil)
+          (opencode-shell-async-drain (current-buffer)))
         (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
         (let ((result-position (save-excursion
                                  (goto-char (point-min))
@@ -793,8 +795,10 @@
         (opencode-shell--permission-allow-once)
         (should (equal request '("POST" "/permission/p/reply" ((reply . "once")))))
         (should-error (opencode-shell--permission-reject) :type 'user-error)
-        (funcall callback nil)
-        (funcall callback nil)
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+          (funcall callback nil)
+          (funcall callback nil)
+          (opencode-shell-async-drain (current-buffer)))
         (should-not opencode-shell--permissions)
         (opencode-shell--receive-permissions
          '(((id . "p") (sessionID . "s") (permission . "bash")
@@ -822,12 +826,14 @@
                        (setq callback success)))))
           (goto-char opencode-shell--permission-begin)
           (opencode-shell--permission-allow-always)
-          (funcall callback nil)))
+          (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+            (funcall callback nil)
+            (opencode-shell-async-drain (current-buffer)))))
       (should (equal "turn-1"
                      (opencode-shell--get (car opencode-shell--resolved-permissions)
                                           'after-turn-id)))
-      ;; The normal live callback path must anchor immediately; it must not
-      ;; depend on a later stale-marker or forced full rerender.
+      ;; The normal live callback path anchors in its coalesced idle render; it
+      ;; must not depend on a later stale-marker or forced full rerender.
       (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
       (should (< (save-excursion
                    (goto-char (point-min))
@@ -1096,6 +1102,21 @@
         (setq-local url-http-response-status 200)
         (funcall retrieve-callback nil))
       (should-not called))))
+
+(ert-deftest opencode-shell-request-drops-response-from-prior-generation ()
+  (with-temp-buffer
+    (setq-local opencode-shell--generation 4)
+    (let (retrieve-callback called)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _) (setq retrieve-callback callback))))
+        (opencode-shell--request "GET" "/stale" (lambda (_) (setq called t)))
+        (cl-incf opencode-shell--generation)
+        (with-temp-buffer
+          (insert "HTTP/1.1 200 OK\r\n\r\n[]")
+          (setq-local url-http-response-status 200)
+          (funcall retrieve-callback nil))
+        (opencode-shell-async-drain (current-buffer))
+        (should-not called)))))
 
 (ert-deftest opencode-shell-reopen-keeps-one-timer ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
@@ -2003,8 +2024,10 @@
           opencode-shell--turns
           (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
     (opencode-shell--render-turns)
-    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
-      (opencode-shell--resync))
+    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore)
+              ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+      (opencode-shell--resync)
+      (opencode-shell-async-drain (current-buffer)))
     (should (= opencode-shell--animation-frame 0))
     (should (string-match-p
              (format "Waiting for response %s"
@@ -2038,6 +2061,20 @@
     (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
       (opencode-shell--resync)
       (should (= opencode-shell--poll-heartbeat 0)))))
+
+(ert-deftest opencode-shell-hidden-resync-does-not-touch-buffer-text ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--turns
+          (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+    (opencode-shell--render-turns)
+    (let ((before (buffer-string)))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore)
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+        (opencode-shell--resync)
+        (should (equal before (buffer-string)))
+        (should opencode-shell--render-dirty)))))
 
 (ert-deftest opencode-shell-missing-status-does-not-complete-running-tool ()
   (with-temp-buffer
@@ -2407,6 +2444,43 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest opencode-shell-sse-validates-content-type-and-chunk-framing ()
+  (let* ((key 'stream)
+         (process 'stream-process)
+         (runtime (list :subscribers (make-hash-table :test #'eq)
+                        :process process :input "" :sse-input ""
+                        :headers-done nil :connected nil :backoff 2))
+         (deletes 0) (wakes 0))
+    (puthash (current-buffer) (lambda () (cl-incf wakes))
+             (plist-get runtime :subscribers))
+    (puthash key runtime opencode-shell-async--runtimes)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'delete-process) (lambda (_) (cl-incf deletes)))
+              ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+              ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+      (opencode-shell-async--stream-filter
+       key process
+       "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+      (let* ((payload "data: {}\n\n")
+             (chunk (format "%x;source=test\r\n%s\r\n" (length payload) payload)))
+        (opencode-shell-async--stream-filter key process chunk))
+      (opencode-shell-async-drain (current-buffer))
+      (should (plist-get runtime :connected))
+      (should (= wakes 1))
+      (should (zerop deletes))
+      (setf (plist-get runtime :headers-done) nil
+            (plist-get runtime :connected) nil
+            (plist-get runtime :input) "")
+      (opencode-shell-async--stream-filter
+       key process "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")
+      (should (= deletes 1))
+      (setf (plist-get runtime :headers-done) t
+            (plist-get runtime :chunked) t
+            (plist-get runtime :input) "ZZ\r\n")
+      (opencode-shell-async--parse-chunks runtime)
+      (should (= deletes 2)))
+    (remhash key opencode-shell-async--runtimes)))
+
 (ert-deftest opencode-shell-submit-includes-stable-message-id ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2419,6 +2493,24 @@
         (opencode-shell--submit)
         (should (equal (alist-get 'messageID body)
                        (opencode-shell--turn-id (car opencode-shell--turns))))))))
+
+(ert-deftest opencode-shell-hidden-submit-callback-defers-buffer-render ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (insert "hello")
+    (let (success)
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (when (string-match-p "prompt_async" path)
+                     (setq success callback)))))
+        (opencode-shell--submit)
+        (let ((before (buffer-string)))
+          (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+            (funcall success nil)
+            (should (equal before (buffer-string)))
+            (should opencode-shell--render-dirty)))))))
 
 (ert-deftest opencode-shell-waiting-face-model-agent-keys-and-mode-line ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-c")) #'opencode-shell--submit))
@@ -2591,6 +2683,23 @@
                           loaded))
         (should (eq (lookup-key (current-local-map) (kbd "?"))
                     #'opencode-shell-sessions-help))))))
+
+(ert-deftest opencode-shell-reload-resubscribes-active-transcript-runtime ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--runtime-key 'active)
+    (let ((main (expand-file-name "opencode-shell.el" default-directory))
+          (starts 0))
+      (cl-letf (((symbol-function 'load) #'ignore)
+                ((symbol-function 'locate-library)
+                 (lambda (library) (and (equal library "opencode-shell") main)))
+                ((symbol-function 'opencode-shell-async-reset) #'ignore)
+                ((symbol-function 'opencode-shell--register-profile-commands) #'ignore)
+                ((symbol-function 'opencode-shell--start-polling)
+                 (lambda () (cl-incf starts))))
+        (opencode-shell-reload)
+        (should (= starts 1))
+        (should-not opencode-shell--runtime-key)))))
 
 (ert-deftest opencode-shell-directory-derived-buffer-names-and-reuse ()
   (should (equal (opencode-shell--directory-leaf "/work/project/") "project"))

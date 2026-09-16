@@ -479,6 +479,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
+(defvar-local opencode-shell--render-force nil)
 (defvar-local opencode-shell--generation 0)
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
@@ -638,6 +639,7 @@ called after a transport, status, or decoding failure."
                     (list header))))
          (url-request-data (and body (encode-coding-string (json-serialize body) 'utf-8)))
          (origin (current-buffer))
+         (request-generation opencode-shell--generation)
          (request-id (cl-incf opencode-shell--request-log-counter))
          (started (float-time))
          (poll-p (string-match-p "/session/[^/]+/message\\'" path)))
@@ -658,7 +660,7 @@ called after a transport, status, or decoding failure."
                        (when error-callback
                          (opencode-shell-async-enqueue
                           origin (list 'request-error request-id)
-                          opencode-shell--generation error-callback))))
+                           request-generation error-callback))))
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
@@ -671,7 +673,7 @@ called after a transport, status, or decoding failure."
                                (when error-callback
                                  (opencode-shell-async-enqueue
                                   origin (list 'request-error request-id)
-                                  opencode-shell--generation error-callback))))
+                                   request-generation error-callback))))
                         (let ((value (unless (= code 204)
                                        (opencode-shell--json-read-buffer))))
                           (when (buffer-live-p origin)
@@ -681,7 +683,7 @@ called after a transport, status, or decoding failure."
                                                      request-id code (- (float-time) started) method path))
                                (opencode-shell-async-enqueue
                                 origin (list 'request request-id)
-                                opencode-shell--generation callback value))))))
+                                 request-generation callback value))))))
                  (error
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
@@ -693,7 +695,7 @@ called after a transport, status, or decoding failure."
                        (when error-callback
                          (opencode-shell-async-enqueue
                           origin (list 'request-error request-id)
-                          opencode-shell--generation error-callback)))))))
+                          request-generation error-callback)))))))
            (kill-buffer response))))
      nil t t)))
 
@@ -2358,17 +2360,21 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
   "Render the latest reconciled state when the current buffer is visible."
   (when (and opencode-shell--render-dirty
              (get-buffer-window (current-buffer) t))
-    (let ((event opencode-shell--render-event))
+    (let ((event opencode-shell--render-event)
+          (force opencode-shell--render-force))
       (setq opencode-shell--render-dirty nil
-            opencode-shell--render-event nil)
-      (opencode-shell--render-turns)
+            opencode-shell--render-event nil
+            opencode-shell--render-force nil)
+      (opencode-shell--render-turns force)
       (opencode-shell--log-lifecycle event)
       (force-mode-line-update))))
 
-(defun opencode-shell--schedule-render (&optional event)
-  "Mark presentation dirty and coalesce visible rendering under EVENT."
+(defun opencode-shell--schedule-render (&optional event force)
+  "Mark presentation dirty and coalesce visible rendering under EVENT.
+When FORCE is non-nil, rebuild turn blocks during the next render."
   (setq opencode-shell--render-dirty t
-        opencode-shell--render-event (or event opencode-shell--render-event))
+        opencode-shell--render-event (or event opencode-shell--render-event)
+        opencode-shell--render-force (or force opencode-shell--render-force))
   (when (get-buffer-window (current-buffer) t)
     (opencode-shell-async-enqueue
      (current-buffer) 'render opencode-shell--generation
@@ -2380,7 +2386,8 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
   "Schedule one render when a dirty transcript becomes visible."
   (when (and opencode-shell--render-dirty
              (get-buffer-window (current-buffer) t))
-    (opencode-shell--schedule-render opencode-shell--render-event)))
+        (opencode-shell--schedule-render opencode-shell--render-event
+                                         opencode-shell--render-force)))
 
 (defun opencode-shell--render-messages (messages &optional sequence defer-render)
   "Reconcile chronological message envelopes from MESSAGES.
@@ -2501,10 +2508,9 @@ Render immediately unless DEFER-RENDER is non-nil."
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
       (setq opencode-shell--animation-frame 0)
-      (when opencode-shell--turns
-        (opencode-shell--render-status-animation))
       (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
-      (when opencode-shell--turns (opencode-shell--render-turns))
+      (when opencode-shell--turns
+        (opencode-shell--schedule-render "poll"))
       (opencode-shell--guarded-request
        'messages
        "GET" (format "/session/%s/message" opencode-shell--session-id)
@@ -2608,7 +2614,7 @@ Render immediately unless DEFER-RENDER is non-nil."
         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
         (lambda (_)
          (setf (opencode-shell--turn-status turn) 'waiting)
-         (opencode-shell--render-turns)
+         (opencode-shell--schedule-render "submit-ack")
          (opencode-shell--log-lifecycle "submit-ack")
          (opencode-shell--resync))
         (cons `(messageID . ,(opencode-shell--turn-id turn))
@@ -2616,7 +2622,7 @@ Render immediately unless DEFER-RENDER is non-nil."
         (lambda ()
          (setf (opencode-shell--turn-status turn) 'recovering)
          (setq opencode-shell--request-status "recovering")
-         (opencode-shell--render-turns)
+         (opencode-shell--schedule-render "submit-error")
          (opencode-shell--log-lifecycle "submit-error" t)
          (opencode-shell--resync)
          (force-mode-line-update))))))
@@ -2646,7 +2652,7 @@ Render immediately unless DEFER-RENDER is non-nil."
                                (unless (or opencode-shell--submit-in-flight
                                            (opencode-shell--permission-blocked-p))
                                  (setq opencode-shell--composer-visible t))
-                               (opencode-shell--render-turns)
+                                (opencode-shell--schedule-render "abort-ack")
                                (opencode-shell--log-lifecycle "abort-ack" t)
                                (opencode-shell--resync)) '())))
 
@@ -2716,16 +2722,15 @@ Render immediately unless DEFER-RENDER is non-nil."
                           (description . ,(opencode-shell--permission-description item))
                           (after-turn-id . ,(when-let ((turn (car (last opencode-shell--turns))))
                                               (opencode-shell--turn-id turn))))))
-            (setq opencode-shell--resolved-permissions
-                  (append opencode-shell--resolved-permissions (list record)))
-            (opencode-shell--commit-permission-result record)))
+             (setq opencode-shell--resolved-permissions
+                   (append opencode-shell--resolved-permissions (list record)))))
        (when (equal opencode-shell--permission-sending id)
          (setq opencode-shell--permission-sending nil))
         (setq opencode-shell--permissions
               (seq-remove (lambda (entry)
                             (equal id (opencode-shell--permission-id entry)))
                           opencode-shell--permissions))
-        (opencode-shell--render-turns t)
+        (opencode-shell--schedule-render "permission-reply-ok" t)
         (opencode-shell--refresh-permissions)
         (unless (opencode-shell--permission-blocked-p)
           (opencode-shell--resync))
@@ -3257,8 +3262,13 @@ ACTIVE means that their session browser is already live."
 (defun opencode-shell-reload ()
   "Reload OpenCode Shell sources and refresh existing package buffers."
   (interactive)
-  (opencode-shell-async-reset)
-  (let* ((main (or load-file-name (locate-library "opencode-shell")))
+  (let ((active-buffers
+         (seq-filter
+          (lambda (buffer)
+            (buffer-local-value 'opencode-shell--runtime-key buffer))
+          (buffer-list))))
+    (opencode-shell-async-reset)
+    (let* ((main (or load-file-name (locate-library "opencode-shell")))
          (directory (and main (file-name-directory main)))
          (render (and directory (expand-file-name "opencode-shell-render.el" directory)))
          (async (and directory (expand-file-name "opencode-shell-async.el" directory)))
@@ -3289,8 +3299,15 @@ ACTIVE means that their session browser is already live."
                       mode-line-process '(:eval (opencode-shell--mode-line-status)))
           (when (markerp opencode-shell--composer-start)
             (goto-char (point-max)))))))
-    (force-mode-line-update t)
-    (message "Reloaded OpenCode Shell")))
+      (dolist (buffer active-buffers)
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (setq opencode-shell--runtime-key nil
+                  opencode-shell--poll-timer nil
+                  opencode-shell--animation-timer nil)
+            (opencode-shell--start-polling))))
+      (force-mode-line-update t)
+      (message "Reloaded OpenCode Shell"))))
 
 (opencode-shell--register-profile-commands)
 
