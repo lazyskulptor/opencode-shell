@@ -50,5 +50,21 @@
       (should (= (point) (point-max)))
       (should (opencode-shell--in-composer-p)))))
 
+(ert-deftest opencode-shell-acceptance-queued-response-preserves-active-draft ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (visible)
+      (goto-char (point-max))
+      (insert "작성 중인 초안")
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) visible)))
+        (opencode-shell--render-messages
+         (opencode-shell-acceptance--messages 2) 1 t)
+        (should (equal (opencode-shell--composer-text) "작성 중인 초안"))
+        (setq visible t)
+        (opencode-shell--render-if-visible)
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal (opencode-shell--composer-text) "작성 중인 초안"))))))
+
 (provide 'opencode-shell-acceptance-test)
 ;;; opencode-shell-acceptance-test.el ends here

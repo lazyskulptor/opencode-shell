@@ -475,6 +475,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--poll-timer nil)
 (defvar-local opencode-shell--animation-timer nil)
 (defvar-local opencode-shell--animation-frame 0)
+(defvar-local opencode-shell--render-dirty nil)
+(defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--generation 0)
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
@@ -1357,6 +1359,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'window-configuration-change-hook
             #'opencode-shell--refresh-table-layout nil t)
+  (add-hook 'window-configuration-change-hook
+            #'opencode-shell--render-if-visible nil t)
   (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
   )
 
@@ -1365,9 +1369,14 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (opencode-shell-async-cancel)
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--refresh-table-layout t)
+  (remove-hook 'window-configuration-change-hook
+               #'opencode-shell--render-if-visible t)
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
-  (when (timerp opencode-shell--animation-timer)
+  (when (and (timerp opencode-shell--animation-timer)
+             (not (eq opencode-shell--animation-timer
+                      opencode-shell-async--animation-timer)))
     (cancel-timer opencode-shell--animation-timer))
+  (opencode-shell-async-unsubscribe-animation (current-buffer))
   (setq opencode-shell--poll-timer nil
         opencode-shell--animation-timer nil)
   (setq opencode-shell--in-flight nil
@@ -1382,8 +1391,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (opencode-shell-async-cancel)
   (when (timerp opencode-shell--poll-timer)
     (cancel-timer opencode-shell--poll-timer))
-  (when (timerp opencode-shell--animation-timer)
+  (when (and (timerp opencode-shell--animation-timer)
+             (not (eq opencode-shell--animation-timer
+                      opencode-shell-async--animation-timer)))
     (cancel-timer opencode-shell--animation-timer))
+  (opencode-shell-async-unsubscribe-animation (current-buffer))
   (setq opencode-shell--poll-timer nil
         opencode-shell--animation-timer nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
@@ -1401,13 +1413,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                               (with-current-buffer target (opencode-shell--resync nil))))
                           buffer)
             opencode-shell--animation-timer
-            (run-at-time opencode-shell-animation-interval
-                         opencode-shell-animation-interval
-                         (lambda (target)
-                           (when (buffer-live-p target)
-                             (with-current-buffer target
-                               (opencode-shell--animation-tick))))
-                         buffer))
+            (opencode-shell-async-subscribe-animation
+             buffer opencode-shell-animation-interval
+             #'opencode-shell--animation-tick))
       (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload
@@ -1808,8 +1816,9 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
           (push id seen)
           (push item result))))))
 
-(defun opencode-shell--receive-questions (items)
-  "Store the authoritative current-session question snapshot ITEMS."
+(defun opencode-shell--receive-questions (items &optional defer-render)
+  "Store the authoritative current-session question snapshot ITEMS.
+When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-question-refresh-pending)
   (setq opencode-shell--questions-pending
         (opencode-shell--deduplicate-questions
@@ -1818,16 +1827,19 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
     (setq opencode-shell--composer-visible nil
           opencode-shell--idle-completion-count 0)
     (opencode-shell--start-polling))
-  (opencode-shell--render-turns)
-  (opencode-shell--render-permissions)
-  (opencode-shell--log-lifecycle "questions"))
+  (if defer-render
+      (opencode-shell--schedule-render "questions")
+    (opencode-shell--render-turns)
+    (opencode-shell--render-permissions)
+    (opencode-shell--log-lifecycle "questions")))
 
 (defun opencode-shell--refresh-questions ()
   "Fetch `/question', deferring once when that request is in flight."
   (if (alist-get 'questions opencode-shell--in-flight)
       (setq opencode-shell--question-refresh-pending t)
     (opencode-shell--guarded-request
-     'questions "GET" "/question" #'opencode-shell--receive-questions
+     'questions "GET" "/question"
+     (lambda (items) (opencode-shell--receive-questions items t))
      nil #'opencode-shell--consume-question-refresh-pending)))
 
 (defun opencode-shell--consume-question-refresh-pending ()
@@ -1976,7 +1988,8 @@ request settles."
   (if (alist-get 'permissions opencode-shell--in-flight)
       (setq opencode-shell--permission-refresh-pending t)
     (opencode-shell--guarded-request
-     'permissions "GET" "/permission" #'opencode-shell--receive-permissions
+     'permissions "GET" "/permission"
+     (lambda (items) (opencode-shell--receive-permissions items t))
      nil #'opencode-shell--consume-permission-refresh-pending)))
 
 (defun opencode-shell--consume-permission-refresh-pending ()
@@ -1985,8 +1998,9 @@ request settles."
     (setq opencode-shell--permission-refresh-pending nil)
     (opencode-shell--refresh-permissions)))
 
-(defun opencode-shell--receive-permissions (items)
-  "Store session-scoped permission ITEMS and update their display."
+(defun opencode-shell--receive-permissions (items &optional defer-render)
+  "Store session-scoped permission ITEMS and update their display.
+When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-permission-refresh-pending)
   (setq opencode-shell--permissions
         (seq-remove
@@ -1999,9 +2013,11 @@ request settles."
     (setq opencode-shell--composer-visible nil
           opencode-shell--idle-completion-count 0)
     (opencode-shell--start-polling))
-  (opencode-shell--render-turns)
-  (opencode-shell--render-permissions)
-  (opencode-shell--log-lifecycle "permissions"))
+  (if defer-render
+      (opencode-shell--schedule-render "permissions")
+    (opencode-shell--render-turns)
+    (opencode-shell--render-permissions)
+    (opencode-shell--log-lifecycle "permissions")))
 
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
@@ -2293,8 +2309,35 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
       (goto-char (min old-point opencode-shell--transcript-end))))))
 
-(defun opencode-shell--render-messages (messages &optional sequence)
-  "Reconcile and render chronological message envelopes from MESSAGES."
+(defun opencode-shell--flush-render ()
+  "Render the latest reconciled state when the current buffer is visible."
+  (when (and opencode-shell--render-dirty
+             (get-buffer-window (current-buffer) t))
+    (let ((event opencode-shell--render-event))
+      (setq opencode-shell--render-dirty nil
+            opencode-shell--render-event nil)
+      (opencode-shell--render-turns)
+      (opencode-shell--log-lifecycle event)
+      (force-mode-line-update))))
+
+(defun opencode-shell--schedule-render (&optional event)
+  "Mark presentation dirty and coalesce visible rendering under EVENT."
+  (setq opencode-shell--render-dirty t
+        opencode-shell--render-event (or event opencode-shell--render-event))
+  (when (get-buffer-window (current-buffer) t)
+    (opencode-shell-async-enqueue
+     (current-buffer) 'render opencode-shell--generation
+     #'opencode-shell--flush-render)))
+
+(defun opencode-shell--render-if-visible ()
+  "Schedule one render when a dirty transcript becomes visible."
+  (when (and opencode-shell--render-dirty
+             (get-buffer-window (current-buffer) t))
+    (opencode-shell--schedule-render opencode-shell--render-event)))
+
+(defun opencode-shell--render-messages (messages &optional sequence defer-render)
+  "Reconcile chronological message envelopes from MESSAGES.
+Render immediately unless DEFER-RENDER is non-nil."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
     (when sequence (setq opencode-shell--message-applied-sequence sequence))
     (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
@@ -2319,14 +2362,25 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
         (unless (opencode-shell--permission-blocked-p)
           (setq opencode-shell--submit-in-flight nil
                 opencode-shell--composer-visible t))))
-    (opencode-shell--render-turns)
-    (opencode-shell--log-lifecycle
-     (if sequence (format "messages:%d" sequence) "messages"))
     (when (and (not (opencode-shell--permission-blocked-p))
                (null opencode-shell--submit-in-flight)
                (equal opencode-shell--request-status "idle"))
       (opencode-shell--stop-polling))
-    (force-mode-line-update)))
+    (let ((event (if sequence (format "messages:%d" sequence) "messages")))
+      (if defer-render
+          (opencode-shell--schedule-render event)
+        (setq opencode-shell--render-dirty t
+              opencode-shell--render-event event)
+        (if (get-buffer-window (current-buffer) t)
+            (opencode-shell--flush-render)
+          ;; Direct callers, including deterministic tests and initial buffer
+          ;; construction, require an immediate render even without a window.
+          (let ((opencode-shell--render-dirty t))
+            (opencode-shell--render-turns)
+            (opencode-shell--log-lifecycle event)
+            (force-mode-line-update)
+            (setq opencode-shell--render-dirty nil
+                  opencode-shell--render-event nil)))))))
 
 (defun opencode-shell--complete-idle-turn ()
   "Record that idle status alone is not assistant completion evidence."
@@ -2407,7 +2461,7 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
       (opencode-shell--guarded-request
        'messages
        "GET" (format "/session/%s/message" opencode-shell--session-id)
-       (lambda (messages) (opencode-shell--render-messages messages sequence)))))
+        (lambda (messages) (opencode-shell--render-messages messages sequence t)))))
   (opencode-shell--guarded-request
    'status "GET" "/session/status"
     (lambda (statuses)
@@ -2415,7 +2469,8 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
       (opencode-shell--complete-idle-turn)
       (opencode-shell--log-lifecycle "status")))
   (opencode-shell--guarded-request
-   'permissions "GET" "/permission" #'opencode-shell--receive-permissions
+   'permissions "GET" "/permission"
+   (lambda (items) (opencode-shell--receive-permissions items t))
    nil #'opencode-shell--consume-permission-refresh-pending)
   (opencode-shell--refresh-questions)
   (when (and full

@@ -16,6 +16,13 @@
 (defvar opencode-shell-async--runtimes (make-hash-table :test #'equal)
   "Shared runtime state keyed by server identity.")
 
+(defvar opencode-shell-async--animation-subscribers
+  (make-hash-table :test #'eq :weakness 'key)
+  "Visible-buffer animation callbacks keyed by transcript buffer.")
+
+(defvar opencode-shell-async--animation-timer nil
+  "Single timer serving all visible transcript animations.")
+
 (defvar-local opencode-shell-async--queue nil
   "Latest queued callback for each key in the current buffer.")
 
@@ -73,11 +80,41 @@ Only the latest pending value for KEY and GENERATION is retained."
     (setq opencode-shell-async--idle-timer nil
           opencode-shell-async--queue nil)))
 
+(defun opencode-shell-async--animation-tick ()
+  "Run animation callbacks only for live, visible subscribed buffers."
+  (maphash
+   (lambda (buffer callback)
+     (if (not (buffer-live-p buffer))
+         (remhash buffer opencode-shell-async--animation-subscribers)
+       (when (get-buffer-window buffer t)
+         (with-current-buffer buffer (funcall callback)))))
+   opencode-shell-async--animation-subscribers))
+
+(defun opencode-shell-async-subscribe-animation (buffer interval callback)
+  "Subscribe visible BUFFER to the shared animation CALLBACK at INTERVAL."
+  (puthash buffer callback opencode-shell-async--animation-subscribers)
+  (unless (timerp opencode-shell-async--animation-timer)
+    (setq opencode-shell-async--animation-timer
+          (run-at-time interval interval #'opencode-shell-async--animation-tick)))
+  opencode-shell-async--animation-timer)
+
+(defun opencode-shell-async-unsubscribe-animation (buffer)
+  "Remove BUFFER from shared animation delivery."
+  (remhash buffer opencode-shell-async--animation-subscribers)
+  (when (and (zerop (hash-table-count opencode-shell-async--animation-subscribers))
+             (timerp opencode-shell-async--animation-timer))
+    (cancel-timer opencode-shell-async--animation-timer)
+    (setq opencode-shell-async--animation-timer nil)))
+
 (defun opencode-shell-async-reset ()
   "Cancel queued work in package buffers and clear shared runtimes."
   (dolist (buffer (buffer-list))
     (when (buffer-local-value 'opencode-shell-async--queue buffer)
       (opencode-shell-async-cancel buffer)))
+  (clrhash opencode-shell-async--animation-subscribers)
+  (when (timerp opencode-shell-async--animation-timer)
+    (cancel-timer opencode-shell-async--animation-timer))
+  (setq opencode-shell-async--animation-timer nil)
   (clrhash opencode-shell-async--runtimes))
 
 (provide 'opencode-shell-async)

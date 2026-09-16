@@ -1109,8 +1109,10 @@
           (progn
              (opencode-shell-open-session "timer-test")
              (opencode-shell-open-session "timer-test")
-             (should (= (length timers) 4))
-             (should (= (length cancelled) 2)))
+             ;; Reopening replaces the buffer poll timer while retaining the
+             ;; single package-wide animation timer.
+             (should (= (length timers) 3))
+             (should (= (length cancelled) 1)))
         (when (buffer-live-p opened) (kill-buffer opened))))))
 
 (ert-deftest opencode-shell-animation-is-ui-only-resettable-and-deduplicated ()
@@ -1130,6 +1132,7 @@
                  (lambda (value) (eq (car-safe value) 'timer)))
                 ((symbol-function 'cancel-timer)
                  (lambda (timer) (push timer cancelled)))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) t))
                 ((symbol-function 'opencode-shell--resync)
                  (lambda (&rest _) (cl-incf network-calls))))
         (opencode-shell--start-polling)
@@ -1145,7 +1148,7 @@
                           (lambda (timer)
                             (= (cadr timer) opencode-shell-animation-interval))
                           timers)))
-          (funcall (nth 3 animation) (nth 4 animation)))
+          (funcall (nth 3 animation)))
         (should (= opencode-shell--animation-frame 1))
         (should-not network-calls)
         (should (string-match-p (regexp-quote (make-string 2 opencode-shell--spinner-character))
@@ -1941,6 +1944,25 @@
         (should (equal before (buffer-string)))
         (should (get-text-property begin 'opencode-shell-render-token))
         (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))))
+
+(ert-deftest opencode-shell-hidden-response-reconciles-before-visible-idle-render ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((messages (list (opencode-shell-test--message "u1" "user" "question")
+                           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+           (before (buffer-string))
+           visible)
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) visible)))
+        (opencode-shell--render-messages messages 1 t)
+        (should (= (length opencode-shell--turns) 1))
+        (should opencode-shell--render-dirty)
+        (should (equal before (buffer-string)))
+        (setq visible t)
+        (opencode-shell--render-if-visible)
+        (opencode-shell-async-drain (current-buffer))
+        (should-not opencode-shell--render-dirty)
+        (should (string-match-p "answer" (buffer-string)))))))
 
 (ert-deftest opencode-shell-history-poll-advances-buffer-local-heartbeat ()
   (let ((first (generate-new-buffer " *heartbeat-1*"))
