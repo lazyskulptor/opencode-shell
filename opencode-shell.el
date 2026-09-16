@@ -1095,7 +1095,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
               opencode-shell--rendered-turns nil
               opencode-shell--permissions nil
               opencode-shell--request-status "idle")
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t))
     (erase-buffer)
     (insert (propertize "Prompt> " 'read-only t
                         'opencode-shell-composer-label t
@@ -1105,7 +1106,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           opencode-shell--permission-begin (copy-marker (point) nil)
           opencode-shell--permission-end (copy-marker (point) nil)
           opencode-shell--permission-status-begin (copy-marker (point) nil)
-          opencode-shell--permission-status-end (copy-marker (point) nil)))
+           opencode-shell--permission-status-end (copy-marker (point) nil)))
+  ;; Mode-owned scaffolding must never become the first undoable transcript edit.
+  (setq buffer-undo-list nil)
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
   (add-hook 'window-configuration-change-hook

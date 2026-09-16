@@ -1869,6 +1869,22 @@
     (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
     (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
 
+(ert-deftest opencode-shell-mode-and-initial-transcript-have-no-undo-history ()
+  (let ((buffer (generate-new-buffer " *oc-initial-undo*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (buffer-enable-undo)
+          (opencode-shell-mode)
+          (should-not buffer-undo-list)
+          (opencode-shell--render-messages
+           (list (opencode-shell-test--message "u1" "user" "question")
+                 (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+          (should-not buffer-undo-list)
+          (should-error (undo-only 1) :type 'user-error)
+          (should (= 1 (how-many "USER>" (point-min) (point-max))))
+          (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max)))))
+      (kill-buffer buffer))))
+
 (ert-deftest opencode-shell-shifts-documented-composer-undo-entry-shapes ()
   (let* ((threshold 10)
          (delta 7)
