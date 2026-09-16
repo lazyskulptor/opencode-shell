@@ -1171,12 +1171,15 @@ every other populated value (observed: \"stop\") is terminal."
   (equal (format "%s" finish) "tool-calls"))
 
 (defun opencode-shell--message-error-label (info)
-  "Return a bounded human-readable label for INFO's terminal error, or nil."
+  "Return a bounded, single-line human-readable label for INFO's terminal
+error, or nil."
   (when-let ((err (opencode-shell--get info 'error)))
     (let* ((name (format "%s" (or (opencode-shell--get err 'name) "Error")))
            (message (opencode-shell--get (opencode-shell--get err 'data) 'message)))
       (truncate-string-to-width
-       (if message (format "%s: %s" name message) name)
+       (replace-regexp-in-string
+        "[\n\r\t ]+" " "
+        (if message (format "%s: %s" name message) name))
        200 nil nil t))))
 
 (defun opencode-shell--assistant-envelope-complete-p (envelope)

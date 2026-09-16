@@ -1181,6 +1181,8 @@
 (ert-deftest opencode-shell-multi-step-turn-completes-only-at-final-stop-step ()
   (with-temp-buffer
     (opencode-shell-mode)
+    (setq opencode-shell--submit-in-flight "u1"
+          opencode-shell--composer-visible nil)
     (let ((user (opencode-shell-test--message "u1" "user" "question"))
           (step1 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
                             (finish . "tool-calls") (time . ((created . 1) (completed . 2)))))
@@ -1190,12 +1192,25 @@
           (step2 '((info . ((id . "a2") (role . "assistant") (parentID . "u1")
                             (finish . "stop") (time . ((created . 3) (completed . 4)))))
                    (parts . (((id . "p3") (type . "text") (text . "answer"))
-                             ((id . "p4") (type . "step-finish")))))))
-      (opencode-shell--render-messages (list user step1))
-      (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-      (opencode-shell--render-messages (list user step1 step2))
-      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-      (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer")))))
+                             ((id . "p4") (type . "step-finish"))))))
+          (timer (run-at-time 60 nil #'ignore)))
+      (unwind-protect
+          (progn
+            (setq opencode-shell--poll-timer timer)
+            (opencode-shell--render-messages (list user step1))
+            (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+            ;; The premature-completion bug would restore the composer and
+            ;; cancel polling right after this first (non-final) step.
+            (should (timerp opencode-shell--poll-timer))
+            (should opencode-shell--submit-in-flight)
+            (should-not opencode-shell--composer-visible)
+            (opencode-shell--render-messages (list user step1 step2))
+            (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+            (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
+            (should-not opencode-shell--submit-in-flight)
+            (should opencode-shell--composer-visible)
+            (should-not opencode-shell--poll-timer))
+        (when (timerp timer) (cancel-timer timer))))))
 
 (ert-deftest opencode-shell-error-terminated-message-completes-turn ()
   (with-temp-buffer
