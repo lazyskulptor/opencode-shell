@@ -1646,25 +1646,17 @@
         (when (buffer-live-p first) (kill-buffer first))
         (when (buffer-live-p second) (kill-buffer second))))))
 
-(ert-deftest opencode-shell-session-candidates-distinguish-active-and-recent ()
-  (let* ((profile opencode-shell-test--local-profile)
-         (active (generate-new-buffer " *active-session*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer active
-            (opencode-shell-mode)
-            (setq opencode-shell--profile profile
-                  opencode-shell--directory "/work/"
-                  opencode-shell--session-id "s1"))
-          (let ((open (opencode-shell--session-candidate
-                       '((id . "s1") (title . "Open") (directory . "/work/")) profile))
-                (recent (opencode-shell--session-candidate
-                         '((id . "s2") (title . "Recent") (directory . "/work/")) profile)))
-            (should (eq (get-text-property 0 'face (car open))
-                        'opencode-shell-active-session-face))
-            (should (eq (get-text-property 0 'face (car recent))
-                        'opencode-shell-recent-session-face))))
-      (kill-buffer active))))
+(ert-deftest opencode-shell-session-browser-candidates-show-profile-path-and-state ()
+  (let ((active (opencode-shell--session-browser-candidate
+                 opencode-shell-test--local-profile "/work/" t))
+        (recent (opencode-shell--session-browser-candidate
+                 opencode-shell-test--remote-profile "/srv/work/" nil)))
+    (should (string-match-p "local : /work/" (car active)))
+    (should (string-match-p "remote : /srv/work/" (car recent)))
+    (should (eq (get-text-property 0 'face (car active))
+                'opencode-shell-active-session-face))
+    (should (eq (get-text-property 0 'face (car recent))
+                'opencode-shell-recent-session-face))))
 
 (ert-deftest opencode-shell-switch-buffer-shows-title-and-buffer-name ()
   (let ((shell (generate-new-buffer "*Opencode project shell*")) prompt selected)
@@ -1900,20 +1892,40 @@
               (should (= (length (delete-dups buffers)) 2)))
           (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))))
 
-(ert-deftest opencode-shell-find-session-requests-profile-wide-history ()
-  (let (request request-buffer)
-    (cl-letf (((symbol-function 'opencode-shell--current-server-directory)
-               (lambda (&rest _) (ert-fail "find-session must not scope by directory")))
-              ((symbol-function 'opencode-shell--request)
-               (lambda (method path _callback &optional _body params)
-                 (setq request (list method path params)
-                       request-buffer (current-buffer)))))
-      (unwind-protect
-          (progn
-            (opencode-shell-find-session opencode-shell-test--local-profile)
-            (should (equal request '("GET" "/session" ((limit . 1000)))))
-            (should-not (buffer-local-value 'opencode-shell--directory request-buffer)))
-        (when (buffer-live-p request-buffer) (kill-buffer request-buffer))))))
+(ert-deftest opencode-shell-find-session-selects-live-and-recent-profile-paths ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+        (browser (generate-new-buffer " *active-browser*")) requests prompt opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer browser
+            (opencode-shell-sessions-mode)
+            (setq-local opencode-shell--profile opencode-shell-test--local-profile
+                        opencode-shell--directory "/work/"))
+          (cl-letf (((symbol-function 'opencode-shell--request)
+                     (lambda (method path callback &optional _body params _error)
+                       (push (list opencode-shell--profile method path params callback) requests)))
+                    ((symbol-function 'completing-read)
+                     (lambda (text candidates &rest _)
+                       (setq prompt (list text (mapcar #'car candidates)))
+                       (caar candidates)))
+                    ((symbol-function 'opencode-shell--open-sessions)
+                     (lambda (profile directory) (setq opened (list profile directory)))))
+            (opencode-shell-find-session)
+            (should (= (length requests) 2))
+            (dolist (request requests)
+              (should (equal (cl-subseq request 1 4)
+                             '("GET" "/session" ((limit . 1000)))))
+              (funcall (nth 4 request)
+                       (if (equal (opencode-shell--profile-name (car request)) "local")
+                           '(((id . "live") (directory . "/work/")
+                              (time . ((updated . 1)))))
+                         '(((id . "recent") (directory . "/srv/recent/")
+                            (time . ((updated . 2))))))))
+            (should (equal (car prompt) "OpenCode profile : path: "))
+            (should (string-match-p "local : /work/" (car (cadr prompt))))
+            (should (equal opened (list opencode-shell-test--local-profile "/work/")))))
+      (when (buffer-live-p browser) (kill-buffer browser)))))
 
 (ert-deftest opencode-shell-register-profile-commands-refreshes-and-isolates-profiles ()
   (let ((opencode-shell-profiles

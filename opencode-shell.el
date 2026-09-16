@@ -2467,43 +2467,75 @@ auto-started."
      (cdr (assoc (completing-read "OpenCode shell: " candidates nil t)
                  candidates)))))
 
-(defun opencode-shell--session-candidate (session profile)
-  "Return a styled completion candidate for SESSION under PROFILE."
-  (let* ((id (opencode-shell--get session 'id))
-         (directory (opencode-shell--get session 'directory))
-         (active (and directory (opencode-shell--transcript-buffer profile directory id)))
-         (label (format "%s  %s  %s" (if active "●" "○")
-                        (or (opencode-shell--get session 'title) "Untitled") id)))
-    (cons (propertize label 'face (if active 'opencode-shell-active-session-face
-                                   'opencode-shell-recent-session-face))
-          session)))
+(defun opencode-shell--session-browser-candidate (profile directory active)
+  "Return a styled PROFILE and DIRECTORY completion candidate.
+ACTIVE means that their session browser is already live."
+  (cons (propertize (format "%s %s : %s"
+                            (if active "●" "○")
+                            (opencode-shell--profile-name profile) directory)
+                    'face (if active 'opencode-shell-active-session-face
+                            'opencode-shell-recent-session-face))
+        (cons profile directory)))
 
 ;;;###autoload
 (defun opencode-shell-find-session (&optional profile)
-  "Select a canonical PROFILE session and open or reuse its transcript."
-  (interactive (list (opencode-shell--read-profile)))
-  (let* ((profile (opencode-shell--resolve-or-read-profile profile))
-         (buffer (generate-new-buffer " *opencode-find-session*")))
-    (with-current-buffer buffer
-      (setq-local opencode-shell--profile profile
-                  opencode-shell--base-url (or (plist-get profile :base-url)
-                                                opencode-shell-base-url))
-      (opencode-shell--request
-       "GET" "/session"
-       (lambda (response)
-         (let* ((sessions (opencode-shell--normalize-sessions response))
-                (candidates (mapcar (lambda (session)
-                                      (opencode-shell--session-candidate session profile))
-                                    sessions)))
-           (kill-buffer buffer)
-           (unless candidates (user-error "No OpenCode sessions"))
-           (let* ((choice (completing-read "OpenCode session: " candidates nil t))
-                  (session (cdr (assoc choice candidates)))
-                  (id (opencode-shell--get session 'id))
-                  (session-directory (opencode-shell--get session 'directory)))
-             (unless session-directory (user-error "Session %s has no directory" id))
-             (opencode-shell-open-session id session-directory profile))))
-       nil '((limit . 1000))))))
+  "Select a live or recent PROFILE directory and open its session browser."
+  (interactive)
+  (opencode-shell--validate-profiles)
+  (let* ((profiles (if profile
+                       (list (opencode-shell--resolve-or-read-profile profile))
+                     opencode-shell-profiles))
+         (pending (length profiles))
+         (locations (make-hash-table :test #'equal)))
+    (unless profiles (user-error "No OpenCode profiles configured"))
+    (cl-labels
+        ((remember (candidate-profile directory updated active)
+           (when directory
+             (let* ((key (cons (opencode-shell--profile-key candidate-profile) directory))
+                    (existing (gethash key locations)))
+               (when (or (null existing) active (> updated (nth 2 existing)))
+                 (puthash key (list candidate-profile directory updated active) locations)))))
+         (finish ()
+           (when (= (cl-decf pending) 0)
+             (let (entries)
+               (maphash (lambda (_ entry) (push entry entries)) locations)
+               (setq entries (sort entries
+                                   (lambda (a b)
+                                     (or (and (nth 3 a) (not (nth 3 b)))
+                                         (and (eq (nth 3 a) (nth 3 b))
+                                              (> (nth 2 a) (nth 2 b)))))))
+               (unless entries (user-error "No OpenCode session locations"))
+               (let* ((candidates
+                       (mapcar (lambda (entry)
+                                 (opencode-shell--session-browser-candidate
+                                  (nth 0 entry) (nth 1 entry) (nth 3 entry)))
+                               entries))
+                      (choice (completing-read "OpenCode profile : path: " candidates nil t))
+                      (location (cdr (assoc choice candidates))))
+                 (opencode-shell--open-sessions (car location) (cdr location)))))))
+      (dolist (buffer (buffer-list))
+        (with-current-buffer buffer
+          (when (derived-mode-p 'opencode-shell-sessions-mode)
+            (remember opencode-shell--profile opencode-shell--directory
+                      most-positive-fixnum t))))
+      (dolist (candidate-profile profiles)
+        (let ((buffer (generate-new-buffer " *opencode-find-session*")))
+          (with-current-buffer buffer
+            (setq-local opencode-shell--profile candidate-profile
+                        opencode-shell--base-url
+                        (or (plist-get candidate-profile :base-url) opencode-shell-base-url))
+            (opencode-shell--request
+             "GET" "/session"
+             (lambda (response)
+               (dolist (session (opencode-shell--normalize-sessions response))
+                 (remember candidate-profile (opencode-shell--get session 'directory)
+                           (opencode-shell--time session) nil))
+               (kill-buffer buffer)
+               (finish))
+             nil '((limit . 1000))
+             (lambda ()
+               (kill-buffer buffer)
+               (finish)))))))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)
