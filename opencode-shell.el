@@ -18,6 +18,7 @@
 (require 'seq)
 (require 'map)
 (require 'cl-lib)
+(require 'project)
 (require 'opencode-shell-render)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
@@ -71,6 +72,9 @@ and lifecycle keys."
 (defvar-local opencode-shell--workspace nil)
 
 (defconst opencode-shell--process-tail-limit 4096)
+
+(defvar projectile-mode)
+(declare-function projectile-project-root "projectile")
 
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
@@ -211,13 +215,28 @@ and lifecycle keys."
              (or (opencode-shell--resolve-profile name)
                  (user-error "Unknown OpenCode server alias: %s" name)))))
 
+(defun opencode-shell--project-directory (&optional directory)
+  "Return the project root for DIRECTORY, falling back to DIRECTORY itself."
+  (let* ((default-directory
+          (opencode-shell--canonical-directory (or directory default-directory)))
+         (root
+          (or (and (file-remote-p default-directory) default-directory)
+              (when (and (boundp 'projectile-mode) projectile-mode
+                         (fboundp 'projectile-project-root))
+                (ignore-errors (projectile-project-root)))
+              (when-let ((project (ignore-errors (project-current nil))))
+                (ignore-errors (project-root project)))
+              (locate-dominating-file default-directory ".git")
+              default-directory)))
+    (opencode-shell--canonical-directory root)))
+
 (defun opencode-shell--current-server-directory (profile)
   "Return current `default-directory' as an absolute PROFILE server path."
-  (let* ((client-root (plist-get profile :directory))
+  (let* ((directory (opencode-shell--project-directory))
+         (client-root (plist-get profile :directory))
          (workspace (plist-get profile :workspace))
          (native (expand-file-name
-                  (or (file-remote-p default-directory 'localname)
-                      default-directory)))
+                  (or (file-remote-p directory 'localname) directory)))
          (root-native (and client-root
                            (expand-file-name
                             (or (file-remote-p client-root 'localname)
@@ -228,11 +247,12 @@ and lifecycle keys."
                      (string-prefix-p (file-name-as-directory
                                             (expand-file-name workspace))
                                       (file-name-as-directory native))))
-         (directory (and mapped
-                         (opencode-shell--server-directory default-directory profile))))
-    (unless (and (stringp directory) (file-name-absolute-p directory))
+         (server-directory (and mapped
+                                (opencode-shell--server-directory directory profile))))
+    (unless (and (stringp server-directory)
+                 (file-name-absolute-p server-directory))
       (user-error "Current directory cannot be mapped to the OpenCode server"))
-    (file-name-as-directory directory)))
+    (file-name-as-directory server-directory)))
 
 (defun opencode-shell--create-and-open-session (profile directory)
   "Create and open a title-less PROFILE session in DIRECTORY."

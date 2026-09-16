@@ -15,3 +15,5 @@
   conflicting lifecycle configuration for a shared endpoint.
 - Preserve the single-server variables and the historical directory argument to
   `opencode-shell-sessions` while allowing that command to accept a profile.
+- Group browser and new-session launches at the Projectile, project.el, or Git
+  project root, with current-directory fallback and existing profile mapping.

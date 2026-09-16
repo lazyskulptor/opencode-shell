@@ -9,7 +9,9 @@ Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
 original single-server setup, the local endpoint defaults to
 `http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it and
 optionally configure `opencode-shell-directory`, then run `M-x opencode-shell`
-to select a server and open sessions for the current Emacs directory.
+to select a server and open sessions for the current project root. Root detection
+prefers active Projectile and `project.el` projects, then a Git root, and falls
+back to the current Emacs directory.
 
 ## Profiles
 
@@ -18,7 +20,9 @@ to select a server and open sessions for the current Emacs directory.
 authentication source, and local server lifecycle settings. Session inventory
 is scoped to the invocation buffer's `default-directory`, translated to the
 server-native absolute path.
-`M-x opencode-shell` always selects a server first. Each alias also generates
+`M-x opencode-shell` always selects a server first. Browser and new-session
+commands map the detected client project root to the server workspace, so calls
+from nested directories share one project session history. Each alias also generates
 `opencode-shell-<alias>-sessions` and `opencode-shell-<alias>-start`, such as
 `opencode-shell-local-sessions` and `opencode-shell-local-start`. The start
 command creates a title-less session in the current directory and opens it.

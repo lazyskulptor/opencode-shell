@@ -13,6 +13,7 @@
 
 (defvar opencode-shell-test--local-profile)
 (defvar opencode-shell-test--remote-profile)
+(defvar projectile-mode)
 
 (ert-deftest opencode-shell-query-and-payload ()
   (should (equal (opencode-shell--query '((directory . "/tmp/a b") (empty)))
@@ -2318,6 +2319,52 @@
     :workspace "/srv/project"
     :start-command ("opencode" "serve")))
 
+(ert-deftest opencode-shell-project-directory-precedence-and-fallbacks ()
+  (let ((projectile-mode t)
+        (default-directory "/work/nested/"))
+    (cl-letf (((symbol-function 'projectile-project-p) (lambda () t))
+              ((symbol-function 'projectile-project-root) (lambda () "/projectile/root"))
+              ((symbol-function 'project-current) (lambda (&rest _) 'project))
+              ((symbol-function 'project-root) (lambda (_) "/project/root")))
+      (should (equal (opencode-shell--project-directory) "/projectile/root/"))))
+  (let ((projectile-mode nil)
+        (default-directory "/work/nested/"))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) 'project))
+              ((symbol-function 'project-root) (lambda (_) "/project/root")))
+      (should (equal (opencode-shell--project-directory) "/project/root/"))))
+  (dolist (marker '(directory file))
+    (let* ((root (make-temp-file "opencode-shell-git-root-" t))
+           (nested (expand-file-name "one/two/" root))
+           (git (expand-file-name ".git" root)))
+      (unwind-protect
+          (progn
+            (make-directory nested t)
+            (if (eq marker 'directory)
+                (make-directory git)
+              (write-region "gitdir: elsewhere\n" nil git nil 'silent))
+            (let ((projectile-mode nil)
+                  (default-directory nested))
+              (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+                (should (equal (opencode-shell--project-directory)
+                               (file-name-as-directory root))))))
+        (delete-directory root t))))
+  (let* ((directory (make-temp-file "opencode-shell-no-project-" t))
+         (projectile-mode nil)
+         (default-directory directory))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+          (should (equal (opencode-shell--project-directory)
+                         (file-name-as-directory directory))))
+      (delete-directory directory t))))
+
+(ert-deftest opencode-shell-current-server-directory-maps-project-root ()
+  (let ((default-directory "/client/project/nested/"))
+    (cl-letf (((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) "/client/project/")))
+      (should (equal (opencode-shell--current-server-directory
+                      opencode-shell-test--local-profile)
+                     "/server/project/")))))
+
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
                     opencode-shell--default-profile opencode-shell--read-profile
@@ -2439,15 +2486,17 @@
     (should-not (string-match-p "profile-secret"
                                 (format "%S%S" opencode-shell-test--local-profile messages)))))
 
-(ert-deftest opencode-shell-entry-opens-explicit-server-with-current-directory ()
+(ert-deftest opencode-shell-entry-opens-explicit-server-with-project-root ()
   (let ((default-directory "/client/project/current/") opened)
     (cl-letf (((symbol-function 'opencode-shell--start-server)
                (lambda (profile callback) (funcall callback profile)))
+              ((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) "/client/project/"))
               ((symbol-function 'opencode-shell--sessions)
                (lambda (&optional directory profile _current-window)
-                  (setq opened (list directory profile)))))
+                   (setq opened (list directory profile)))))
       (opencode-shell opencode-shell-test--local-profile)
-       (should (equal opened (list "/server/project/current/" opencode-shell-test--local-profile))))
+       (should (equal opened (list "/server/project/" opencode-shell-test--local-profile))))
     (let ((opencode-shell-poll-interval 60) buffers)
       (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
                ((symbol-function 'opencode-shell--resync) #'ignore)
@@ -2603,12 +2652,14 @@
     (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
               ((symbol-function 'opencode-shell--request)
                (lambda (method path _callback &optional _data query)
-                 (push (list method path opencode-shell--directory query) requests))))
+                  (push (list method path opencode-shell--directory query) requests)))
+              ((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) "/Workspace/")))
       (unwind-protect
           (progn
-            (opencode-shell profile)
-             (should (equal (cl-subseq (car requests) 0 3)
-                            '("GET" "/session/status" "/server/Workspace/personal/translator/")))
+             (opencode-shell profile)
+              (should (equal (cl-subseq (car requests) 0 3)
+                             '("GET" "/session/status" "/server/Workspace/")))
             (opencode-shell--sessions "/Workspace/" profile)
              (should (equal (cl-subseq (car requests) 0 3)
                             '("GET" "/session/status" "/Workspace/")))
