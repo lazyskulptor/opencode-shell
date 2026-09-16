@@ -91,6 +91,50 @@
                            (plist-get result :events))
                    '("yes")))))
 
+(ert-deftest opencode-shell-sse-parser-supports-bom-and-cr-line-endings ()
+  (let* ((bom (encode-coding-string "\ufeff" 'utf-8 t))
+         (result
+          (opencode-shell-sse-test--feed
+           (list (concat
+                  "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+                  bom "data: one\rdata: two\r\r")))))
+    (should-not (plist-get result :error))
+    (should (equal (plist-get (car (plist-get result :events)) :data)
+                   "one\ntwo"))))
+
+(ert-deftest opencode-shell-sse-parser-rejects-invalid-utf8-and-encodings ()
+  (let ((invalid
+         (opencode-shell-sse-test--feed
+          (list (concat
+                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: "
+                 (unibyte-string 255) "\n\n")))))
+    (should (eq (plist-get (plist-get invalid :error) :reason) 'invalid-utf8)))
+  (dolist (header '("Transfer-Encoding: gzip, chunked\r\n"
+                    "Content-Encoding: gzip\r\n"))
+    (let ((result
+           (opencode-shell-sse-test--feed
+            (list (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                          header "\r\n")))))
+      (should (eq (plist-get (plist-get result :error) :reason)
+                  'unsupported-encoding)))))
+
+(ert-deftest opencode-shell-sse-parser-preserves-multibyte-data-at-every-split ()
+  (let* ((text "한글🙂")
+         (wire (concat
+                (encode-coding-string
+                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: "
+                 'us-ascii t)
+                (encode-coding-string text 'utf-8 t)
+                (encode-coding-string "\n\n" 'us-ascii t))))
+    (dotimes (boundary (1- (length wire)))
+      (let ((result
+             (opencode-shell-sse-test--feed
+              (list (substring wire 0 (1+ boundary))
+                    (substring wire (1+ boundary))))))
+        (should-not (plist-get result :error))
+        (should (equal (plist-get (car (plist-get result :events)) :data)
+                       text))))))
+
 (ert-deftest opencode-shell-sse-parser-bounds-header-not-coalesced-body ()
   (let* ((data (make-string 256 ?x))
          (wire (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
@@ -274,6 +318,16 @@
         (should (eq (opencode-shell-sse-connection-state connection) 'closed))
         (should (eq (plist-get (car errors) :type) 'config))
         (should-not made)))))
+
+(ert-deftest opencode-shell-sse-transport-rejects-reserved-request-headers ()
+  (let (error made)
+    (cl-letf (((symbol-function 'make-network-process)
+               (lambda (&rest _) (setq made t))))
+      (opencode-shell-sse-start
+       "http://localhost/event" '(("Host" . "attacker.invalid")) #'ignore
+       (lambda (value) (setq error value)))
+      (should (eq (plist-get error :type) 'config))
+      (should-not made))))
 
 (ert-deftest opencode-shell-sse-transport-validates-open-callback ()
   (should-error

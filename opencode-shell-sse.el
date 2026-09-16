@@ -19,7 +19,7 @@
 
 (cl-defstruct (opencode-shell-sse-parser
                (:constructor opencode-shell-sse--make-parser))
-  phase input transfer chunk-state chunk-size sse-input
+  phase input transfer chunk-state chunk-size sse-input sse-started
   max-header-bytes max-chunk-bytes max-frame-bytes)
 
 (cl-defun opencode-shell-sse-parser-create
@@ -34,7 +34,7 @@ positive integers."
       (error "SSE parser limits must be positive integers")))
   (opencode-shell-sse--make-parser
    :phase 'headers :input "" :transfer 'identity
-   :chunk-state 'size :chunk-size nil :sse-input ""
+   :chunk-state 'size :chunk-size nil :sse-input "" :sse-started nil
    :max-header-bytes max-header-bytes
    :max-chunk-bytes max-chunk-bytes
    :max-frame-bytes max-frame-bytes))
@@ -61,11 +61,19 @@ Return nil on success or a protocol error plist."
          (status (car lines))
          (fields (cdr lines))
          (content-types (opencode-shell-sse--header-values fields "content-type"))
-         (encodings (opencode-shell-sse--header-values fields "transfer-encoding")))
+         (encodings (opencode-shell-sse--header-values fields "transfer-encoding"))
+         (content-encodings
+          (opencode-shell-sse--header-values fields "content-encoding"))
+         (transfer-codings
+          (apply #'append
+                 (mapcar (lambda (value)
+                           (mapcar #'string-trim
+                                   (split-string (downcase value) "," t)))
+                         encodings))))
     (cond
      ((not (and status
                 (string-match-p
-                 "\\`HTTP/[0-9]+\\.[0-9]+ 2[0-9][0-9]\\(?: [^\r\n]*\\)?\\'"
+                 "\\`HTTP/[0-9]+\\.[0-9]+ 200\\(?: [^\r\n]*\\)?\\'"
                  status)))
       (opencode-shell-sse--error parser 'http-status))
      ((seq-some
@@ -80,15 +88,17 @@ Return nil on success or a protocol error plist."
                   (string-trim (car (split-string (car content-types) ";"))))
                  "text/event-stream")))
       (opencode-shell-sse--error parser 'content-type))
+     ((or (not (or (null transfer-codings)
+                   (equal transfer-codings '("chunked"))))
+          (seq-some
+           (lambda (value)
+             (not (string-equal (downcase (string-trim value)) "identity")))
+           content-encodings))
+      (opencode-shell-sse--error parser 'unsupported-encoding))
      (t
       (setf (opencode-shell-sse-parser-phase parser) 'body
             (opencode-shell-sse-parser-transfer parser)
-            (if (seq-some
-                 (lambda (value)
-                   (member "chunked"
-                           (mapcar #'string-trim
-                                   (split-string (downcase value) "," t))))
-                 encodings)
+            (if transfer-codings
                 'chunked
               'identity))
       nil))))
@@ -173,7 +183,7 @@ Return nil on success or a protocol error plist."
 (defun opencode-shell-sse--frame-event (frame)
   "Convert a complete SSE FRAME into an event plist, or nil."
   (let (data event id saw-data)
-    (dolist (line (split-string frame "\r?\n"))
+    (dolist (line (split-string frame "\r\n\\|\r\\|\n"))
       (cond
        ((or (string-empty-p line) (string-prefix-p ":" line)))
        ((string-match-p "\\`data\\(?:\\'\\|:\\)" line)
@@ -184,23 +194,95 @@ Return nil on success or a protocol error plist."
        ((string-match-p "\\`id\\(?:\\'\\|:\\)" line)
         (setq id (opencode-shell-sse--field-value line)))))
     (when saw-data
-      (list :data (decode-coding-string
-                   (mapconcat #'identity (nreverse data) "\n") 'utf-8)
+      (list :data (mapconcat #'identity (nreverse data) "\n")
             :event event :id id))))
+
+(defun opencode-shell-sse--continuation-byte-p (byte)
+  "Return non-nil when BYTE is a UTF-8 continuation byte."
+  (and (>= byte #x80) (<= byte #xbf)))
+
+(defun opencode-shell-sse--valid-utf8-p (bytes)
+  "Return non-nil when unibyte string BYTES is canonical UTF-8."
+  (let ((index 0) (length (length bytes)) valid)
+    (setq valid t)
+    (while (and valid (< index length))
+      (let ((first (aref bytes index)))
+        (cond
+         ((<= first #x7f)
+          (setq index (1+ index)))
+         ((and (>= first #xc2) (<= first #xdf)
+               (< (1+ index) length)
+               (opencode-shell-sse--continuation-byte-p
+                (aref bytes (1+ index))))
+          (setq index (+ index 2)))
+         ((and (or (and (= first #xe0)
+                        (< (1+ index) length)
+                        (>= (aref bytes (1+ index)) #xa0)
+                        (<= (aref bytes (1+ index)) #xbf))
+                   (and (or (and (>= first #xe1) (<= first #xec))
+                            (and (>= first #xee) (<= first #xef)))
+                        (< (1+ index) length)
+                        (opencode-shell-sse--continuation-byte-p
+                         (aref bytes (1+ index))))
+                   (and (= first #xed)
+                        (< (1+ index) length)
+                        (>= (aref bytes (1+ index)) #x80)
+                        (<= (aref bytes (1+ index)) #x9f)))
+               (< (+ index 2) length)
+               (opencode-shell-sse--continuation-byte-p
+                (aref bytes (+ index 2))))
+          (setq index (+ index 3)))
+         ((and (or (and (= first #xf0)
+                        (< (1+ index) length)
+                        (>= (aref bytes (1+ index)) #x90)
+                        (<= (aref bytes (1+ index)) #xbf))
+                   (and (>= first #xf1) (<= first #xf3)
+                        (< (1+ index) length)
+                        (opencode-shell-sse--continuation-byte-p
+                         (aref bytes (1+ index))))
+                   (and (= first #xf4)
+                        (< (1+ index) length)
+                        (>= (aref bytes (1+ index)) #x80)
+                        (<= (aref bytes (1+ index)) #x8f)))
+               (< (+ index 3) length)
+               (opencode-shell-sse--continuation-byte-p
+                (aref bytes (+ index 2)))
+               (opencode-shell-sse--continuation-byte-p
+                (aref bytes (+ index 3))))
+          (setq index (+ index 4)))
+         (t (setq valid nil)))))
+    valid))
+
+(defun opencode-shell-sse--decode-utf8 (bytes)
+  "Return strict UTF-8 decoding of BYTES, or nil when BYTES is invalid."
+  (let ((raw (with-suppressed-warnings ((obsolete string-as-unibyte))
+               (string-as-unibyte bytes))))
+    (when (opencode-shell-sse--valid-utf8-p raw)
+      (decode-coding-string raw 'utf-8))))
 
 (defun opencode-shell-sse--consume-frames (parser bytes)
   "Append BYTES to PARSER's SSE input and return (EVENTS ERROR)."
   (let ((input (concat (opencode-shell-sse-parser-sse-input parser) bytes))
         events error delimiter)
     (while (and (not error)
-                (setq delimiter (string-match "\r?\n\r?\n" input)))
+                (setq delimiter
+                      (string-match
+                       "\\(?:\r\n\\|\r\\|\n\\)\\(?:\r\n\\|\r\\|\n\\)"
+                       input)))
       (let ((frame (substring input 0 delimiter))
             (next-input (substring input (match-end 0))))
         (if (> (length frame) (opencode-shell-sse-parser-max-frame-bytes parser))
             (setq error (opencode-shell-sse--error parser 'frame-too-large))
-          (when-let ((event (opencode-shell-sse--frame-event frame)))
-            (push event events))
-          (setq input next-input))))
+          (if-let ((decoded (opencode-shell-sse--decode-utf8 frame)))
+              (progn
+                (unless (opencode-shell-sse-parser-sse-started parser)
+                  (setf (opencode-shell-sse-parser-sse-started parser) t)
+                  (when (string-prefix-p "\ufeff" decoded)
+                    (setq decoded (substring decoded 1))))
+                (when-let ((event (opencode-shell-sse--frame-event decoded)))
+                  (push event events))
+                (setq input next-input))
+            (setq error (opencode-shell-sse--error parser 'invalid-utf8))))))
     (when (and (not error)
                (> (length input) (opencode-shell-sse-parser-max-frame-bytes parser)))
       (setq error (opencode-shell-sse--error parser 'frame-too-large)))
@@ -357,6 +439,9 @@ not mutated; the returned parser is the next state."
           (and (consp header)
                (string-match-p "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'"
                                (format "%s" (car header)))
+               (not (member (downcase (format "%s" (car header)))
+                            '("host" "connection" "content-length"
+                              "transfer-encoding")))
                (seq-every-p
                 (lambda (character)
                   (or (= character 9) (<= 32 character 126)))
@@ -467,11 +552,11 @@ event plists; ON-ERROR receives typed error plists."
     (error "SSE open callback must be nil or a function"))
   (unless (and (numberp header-timeout) (> header-timeout 0))
     (error "SSE header timeout must be positive"))
-  (let* ((parsed (url-generic-parse-url url))
-         (scheme (downcase (or (url-type parsed) "")))
-         (host (url-host parsed))
-         (port (or (url-port parsed) 80))
-         (path (or (url-filename parsed) "/"))
+  (let* ((parsed (condition-case nil (url-generic-parse-url url) (error nil)))
+         (scheme (and parsed (downcase (or (url-type parsed) ""))))
+         (host (and parsed (url-host parsed)))
+         (port (and parsed (or (url-port parsed) 80)))
+         (path (and parsed (or (url-filename parsed) "/")))
          (token (make-symbol "opencode-sse-connection"))
          (connection
           (opencode-shell-sse--make-connection
@@ -479,7 +564,11 @@ event plists; ON-ERROR receives typed error plists."
            :parser (opencode-shell-sse-parser-create)
            :header-timer nil :on-open on-open
            :on-event on-event :on-error on-error)))
-    (if (not (and (string-equal scheme "http")
+    (if (not (and parsed
+                  (string-equal scheme "http")
+                  (integerp port) (> port 0) (<= port 65535)
+                  (null (url-user parsed))
+                  (null (url-password parsed))
                   (opencode-shell-sse--valid-request-p host path headers)))
         (progn
           (setf (opencode-shell-sse-connection-state connection) 'closed)
