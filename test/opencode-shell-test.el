@@ -233,18 +233,39 @@
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
+    (insert "draft")
+    (goto-char (+ opencode-shell--composer-start 2))
     (opencode-shell--receive-questions
-     '(((id . "q1") (sessionID . "s") (question . "Choose"))
+     '(((id . "q1") (sessionID . "s") (header . "Choice")
+        (question . "Choose"))
        ((id . "q2") (sessionID . "s") (question . "Later"))))
     (should (= 1 (how-many "┌─ QUESTION" (point-min) (point-max))))
-    (should (string-match-p "Waiting for answer" (buffer-string)))
+    (should (string-match-p
+             "│  Choice\n│\n│  Choose\n│\n│  RET/a answer  r reject"
+             (buffer-string)))
+    (should-not (string-match-p "Waiting for answer" (buffer-string)))
     (should-not (string-match-p "Later" (buffer-string)))
+    (should (equal (opencode-shell--composer-text) "draft"))
+    (should (= (- (point) opencode-shell--composer-start) 2))
     (opencode-shell--receive-permissions
      '(((id . "p1") (sessionID . "s") (permission . "read"))))
     (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
     (should-not (string-match-p "┌─ QUESTION" (buffer-string)))
     (opencode-shell--receive-permissions nil)
     (should (= 1 (how-many "┌─ QUESTION" (point-min) (point-max))))))
+
+(ert-deftest opencode-shell-question-card-does-not-duplicate-header ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-questions
+     '(((id . "q") (sessionID . "s") (header . "Choose")
+        (question . "Choose"))))
+    (should (= 1 (how-many "│  Choose" (point-min) (point-max))))
+    (should (eq (lookup-key opencode-shell-question-map (kbd "RET"))
+                #'opencode-shell--questions))
+    (should (eq (lookup-key opencode-shell-question-map (kbd "r"))
+                #'opencode-shell--question-reject))))
 
 (ert-deftest opencode-shell-inline-question-reply-resyncs-immediately ()
   (with-temp-buffer

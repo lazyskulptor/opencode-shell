@@ -1523,13 +1523,20 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                  opencode-shell--questions-pending)
         (let* ((item (car opencode-shell--questions-pending))
                (question (car (or (opencode-shell--get item 'questions)
-                                  (list item))))
+                                   (list item))))
+               (prompt (or (opencode-shell--get question 'question)
+                           "Answer required"))
+               (header (opencode-shell--get question 'header))
                (begin (point)))
           (insert (propertize "┌─ QUESTION ───────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
-                  "│ " (or (opencode-shell--get question 'question)
-                            (opencode-shell--get question 'header) "Answer required") "\n"
-                  "│ Waiting for answer · RET/a answer  r reject\n"
+                  "│\n"
+                  (if (and header (not (equal header prompt)))
+                      (concat "│  " header "\n│\n")
+                    "")
+                  "│  " prompt "\n"
+                  "│\n"
+                  "│  RET/a answer  r reject\n"
                   "└───────────────────────────────────────────\n")
           (add-text-properties
            begin (point)
