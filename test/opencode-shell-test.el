@@ -18,6 +18,12 @@
   (should (equal (opencode-shell--query '((directory . "/tmp/a b") (empty)))
                  "directory=%2Ftmp%2Fa%20b"))
   (with-temp-buffer
+    (setq-local opencode-shell--base-url "http://127.0.0.1:4199"
+                opencode-shell--directory "/implicit/")
+    (should (equal (opencode-shell--url
+                    "/session" '((directory . "/explicit/") (limit . 1000)))
+                   "http://127.0.0.1:4199/session?directory=%2Fexplicit%2F&limit=1000")))
+  (with-temp-buffer
     (setq-local opencode-shell--selected-model
                 '((providerID . "openai") (modelID . "gpt")))
     (setq-local opencode-shell--selected-agent "build")

@@ -491,6 +491,7 @@ and lifecycle keys."
   (let* ((query (opencode-shell--query
                  (append params
                          (and opencode-shell--directory
+                              (not (assoc 'directory params))
                               `((directory . ,opencode-shell--directory))))))
          (base (string-remove-suffix "/" (or opencode-shell--base-url
                                                (plist-get opencode-shell--profile :base-url)
