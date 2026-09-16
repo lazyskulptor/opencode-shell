@@ -1118,6 +1118,26 @@
         (opencode-shell-async-drain (current-buffer))
         (should-not called)))))
 
+(ert-deftest opencode-shell-stale-request-failure-is-not-user-visible ()
+  (with-temp-buffer
+    (setq-local opencode-shell--generation 7)
+    (let (retrieve-callback messages logs)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _) (setq retrieve-callback callback)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (push args messages)))
+                ((symbol-function 'opencode-shell--log)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) logs))))
+        (opencode-shell--request "GET" "/stale-error" #'ignore)
+        (cl-incf opencode-shell--generation)
+        (with-temp-buffer
+          (funcall retrieve-callback '(:error (error connection-failed))))
+        (should-not messages)
+        (should-not (seq-some (lambda (line)
+                                (string-match-p "transport-error" line))
+                              logs))))))
+
 (ert-deftest opencode-shell-reopen-keeps-one-timer ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (opencode-shell-async--animation-subscribers
@@ -2444,6 +2464,25 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest opencode-shell-sse-reconnect-backoff-increases-after-rejection ()
+  (let* ((key 'reconnect)
+         (subscribers (make-hash-table :test #'eq))
+         (runtime (list :subscribers subscribers :backoff 1
+                        :reconnect-timer nil)))
+    (puthash (current-buffer) #'ignore subscribers)
+    (puthash key runtime opencode-shell-async--runtimes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest _) 'reconnect-timer))
+                  ((symbol-function 'timerp)
+                   (lambda (value) (eq value 'reconnect-timer))))
+          (opencode-shell-async--schedule-reconnect key)
+          (should (= (plist-get runtime :backoff) 2))
+          (setf (plist-get runtime :reconnect-timer) nil)
+          (opencode-shell-async--schedule-reconnect key)
+          (should (= (plist-get runtime :backoff) 4)))
+      (remhash key opencode-shell-async--runtimes))))
+
 (ert-deftest opencode-shell-sse-validates-content-type-and-chunk-framing ()
   (let* ((key 'stream)
          (process 'stream-process)
@@ -2470,10 +2509,13 @@
       (should (zerop deletes))
       (setf (plist-get runtime :headers-done) nil
             (plist-get runtime :connected) nil
-            (plist-get runtime :input) "")
+            (plist-get runtime :input) ""
+            (plist-get runtime :backoff) 8)
       (opencode-shell-async--stream-filter
-       key process "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")
+       key process
+       "HTTP/1.1 200 OK\r\nX-Reason: content-type: text/event-stream\r\nContent-Type: application/json\r\n\r\n{}")
       (should (= deletes 1))
+      (should (= (plist-get runtime :backoff) 8))
       (setf (plist-get runtime :headers-done) t
             (plist-get runtime :chunked) t
             (plist-get runtime :input) "ZZ\r\n")

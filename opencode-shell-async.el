@@ -136,9 +136,10 @@
                 (plist-get runtime :connected)
                 (and (string-match-p "\\`HTTP/[0-9.]+ 2[0-9][0-9]" headers)
                      (string-match-p
-                      "content-type:[ \t]*text/event-stream\\(?:[;\r\n]\\|$\\)"
-                      (downcase headers)))
-                (plist-get runtime :backoff) 1)
+                      "\\(?:\\`\\|\r\n\\)content-type:[ \t]*text/event-stream[ \t]*\\(?:;[^\r\n]*\\)?\\(?:\r\n\\|\\'\\)"
+                      (downcase headers))))
+          (when (plist-get runtime :connected)
+            (setf (plist-get runtime :backoff) 1))
           (opencode-shell-async--runtime-log
            runtime "transport=%s"
            (if (plist-get runtime :connected) "sse-connected" "fallback-http"))

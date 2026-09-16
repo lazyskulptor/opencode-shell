@@ -651,7 +651,9 @@ called after a transport, status, or decoding failure."
        (let ((response (current-buffer)))
          (unwind-protect
               (if-let ((err (plist-get status :error)))
-                  (when (buffer-live-p origin)
+                   (when (and (buffer-live-p origin)
+                              (with-current-buffer origin
+                                (= request-generation opencode-shell--generation)))
                     (with-current-buffer origin
                       (when opencode-shell-log-requests
                          (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
@@ -664,7 +666,9 @@ called after a transport, status, or decoding failure."
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
-                          (when (buffer-live-p origin)
+                           (when (and (buffer-live-p origin)
+                                      (with-current-buffer origin
+                                        (= request-generation opencode-shell--generation)))
                             (with-current-buffer origin
                               (when opencode-shell-log-requests
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
@@ -676,7 +680,9 @@ called after a transport, status, or decoding failure."
                                    request-generation error-callback))))
                         (let ((value (unless (= code 204)
                                        (opencode-shell--json-read-buffer))))
-                          (when (buffer-live-p origin)
+                           (when (and (buffer-live-p origin)
+                                      (with-current-buffer origin
+                                        (= request-generation opencode-shell--generation)))
                             (with-current-buffer origin
                               (when opencode-shell-log-requests
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
@@ -685,7 +691,9 @@ called after a transport, status, or decoding failure."
                                 origin (list 'request request-id)
                                  request-generation callback value))))))
                  (error
-                  (when (buffer-live-p origin)
+                   (when (and (buffer-live-p origin)
+                              (with-current-buffer origin
+                                (= request-generation opencode-shell--generation)))
                     (with-current-buffer origin
                       (when opencode-shell-log-requests
                          (opencode-shell--log "OpenCode API #%d ← decode-error %.2fs [%s %s]"
