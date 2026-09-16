@@ -1908,6 +1908,9 @@
 (ert-deftest opencode-shell-find-session-selects-live-and-recent-profile-paths ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+        (opencode-shell--recent-session-locations
+         (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                     "/cached")))
         (browser (generate-new-buffer " *active-browser*")) requests prompt opened)
     (unwind-protect
         (progn
@@ -1951,10 +1954,19 @@
             (let ((labels (cadr prompt)))
               (should (< (cl-position-if (lambda (label) (string-match-p "local : /work/" label)) labels)
                          (cl-position-if (lambda (label) (string-match-p "inactive" label)) labels)
+                         (cl-position-if (lambda (label) (string-match-p "local : /cached/" label)) labels)
                          (cl-position-if (lambda (label) (string-match-p "local : /z/" label)) labels)
                          (cl-position-if (lambda (label) (string-match-p "remote : /srv/recent/" label)) labels))))
             (should (equal opened (list opencode-shell-test--local-profile "/work/" t)))))
       (when (buffer-live-p browser) (kill-buffer browser)))))
+
+(ert-deftest opencode-shell-remembers-session-browser-locations-without-slash-duplicates ()
+  (let ((opencode-shell--recent-session-locations nil))
+    (opencode-shell--remember-session-location opencode-shell-test--local-profile "/work")
+    (opencode-shell--remember-session-location opencode-shell-test--local-profile "/work/")
+    (should (equal opencode-shell--recent-session-locations
+                   (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                               "/work/"))))))
 
 (ert-deftest opencode-shell-find-session-quit-is-silent ()
   (let ((opencode-shell-profiles (list opencode-shell-test--local-profile)) callback)

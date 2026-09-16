@@ -449,6 +449,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--table-render-width nil)
 (defvar-local opencode-shell--table-rerendering nil)
 (defvar opencode-shell--generation-counter 0)
+(defvar opencode-shell--recent-session-locations nil
+  "Session browser locations opened during this Emacs session.")
 (defvar-local opencode-shell--filter "")
 
 (defface opencode-shell-user-face
@@ -724,6 +726,13 @@ Each retained session keeps its server-reported directory unchanged."
 (add-hook 'opencode-shell-sessions-mode-hook
           #'opencode-shell--setup-sessions-evil-buffer)
 
+(defun opencode-shell--remember-session-location (profile directory)
+  "Remember PROFILE and DIRECTORY for session browser completion."
+  (let* ((directory (concat (directory-file-name directory) "/"))
+         (key (cons (opencode-shell--profile-key profile) directory)))
+    (setq opencode-shell--recent-session-locations
+          (cons key (delete key opencode-shell--recent-session-locations)))))
+
 (defun opencode-shell--sessions (directory &optional profile current-window)
   "Open PROFILE's session browser scoped to server-native DIRECTORY.
 When CURRENT-WINDOW is non-nil, display it in the selected window."
@@ -734,6 +743,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (unless (and (stringp directory) (file-name-absolute-p directory))
     (user-error "OpenCode session directory must be absolute"))
   (setq directory (file-name-as-directory directory))
+  (opencode-shell--remember-session-location profile directory)
   (let ((buffer (or (opencode-shell--sessions-buffer profile directory)
                     (generate-new-buffer
                      (format "*Opencode %s sessions*"
@@ -2541,6 +2551,13 @@ ACTIVE means that their session browser is already live."
           (when (derived-mode-p 'opencode-shell-sessions-mode)
             (remember opencode-shell--profile opencode-shell--directory
                       most-positive-fixnum t))))
+      (dolist (location opencode-shell--recent-session-locations)
+        (when-let ((candidate-profile
+                    (seq-find (lambda (item)
+                                (equal (car location)
+                                       (opencode-shell--profile-key item)))
+                              profiles)))
+          (remember candidate-profile (cdr location) 0 nil)))
       (dolist (candidate-profile profiles)
         (let ((buffer (generate-new-buffer " *opencode-find-session*")))
           (with-current-buffer buffer
