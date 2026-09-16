@@ -1,0 +1,90 @@
+;;; opencode-shell-sse-test.el --- SSE protocol tests -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+(require 'opencode-shell-sse)
+
+(defun opencode-shell-sse-test--feed (parts &rest limits)
+  "Feed PARTS through a parser configured with LIMITS."
+  (let ((parser (apply #'opencode-shell-sse-parser-create limits)) events error)
+    (dolist (part parts)
+      (let ((result (opencode-shell-sse-parser-feed parser part)))
+        (setq parser (plist-get result :parser)
+              events (nconc events (plist-get result :events))
+              error (or error (plist-get result :error)))))
+    (list :parser parser :events events :error error)))
+
+(defun opencode-shell-sse-test--wire ()
+  "Return a representative chunked HTTP event stream."
+  (let* ((first "event: update\ndata: one\ndata: two\n\n")
+         (second ": heartbeat\ndata: three\n\n"))
+    (concat "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Transfer-Encoding: chunked\r\n\r\n"
+            (format "%x;source=test\r\n%s\r\n" (length first) first)
+            (format "%x\r\n%s\r\n" (length second) second)
+            "0\r\nX-End: yes\r\n\r\n")))
+
+(ert-deftest opencode-shell-sse-parser-is-independent-of-split-boundary ()
+  (let* ((wire (opencode-shell-sse-test--wire))
+         (whole (opencode-shell-sse-test--feed (list wire)))
+         (expected (plist-get whole :events)))
+    (should-not (plist-get whole :error))
+    (should (eq (opencode-shell-sse-parser-phase (plist-get whole :parser)) 'done))
+    (should (equal (mapcar (lambda (event) (plist-get event :data)) expected)
+                   '("one\ntwo" "three")))
+    (dotimes (boundary (1- (length wire)))
+      (let ((result (opencode-shell-sse-test--feed
+                     (list (substring wire 0 (1+ boundary))
+                           (substring wire (1+ boundary))))))
+        (should-not (plist-get result :error))
+        (should (equal (plist-get result :events) expected))
+        (should (eq (opencode-shell-sse-parser-phase
+                     (plist-get result :parser))
+                    'done))))))
+
+(ert-deftest opencode-shell-sse-parser-does-not-mutate-prior-state ()
+  (let* ((parser (opencode-shell-sse-parser-create))
+         (result (opencode-shell-sse-parser-feed
+                  parser "HTTP/1.1 200 OK\r\n")))
+    (should (string-empty-p (opencode-shell-sse-parser-input parser)))
+    (should (equal (opencode-shell-sse-parser-input (plist-get result :parser))
+                   "HTTP/1.1 200 OK\r\n"))))
+
+(ert-deftest opencode-shell-sse-parser-bounds-header-not-coalesced-body ()
+  (let* ((data (make-string 256 ?x))
+         (wire (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+                       "data: " data "\n\n"))
+         (result (opencode-shell-sse-test--feed
+                  (list wire) :max-header-bytes 64 :max-frame-bytes 512)))
+    (should-not (plist-get result :error))
+    (should (equal (plist-get (car (plist-get result :events)) :data) data))))
+
+(ert-deftest opencode-shell-sse-parser-rejects-invalid-limits ()
+  (dolist (arguments '((:max-header-bytes 0)
+                       (:max-chunk-bytes -1)
+                       (:max-frame-bytes 0.5)))
+    (should-error (apply #'opencode-shell-sse-parser-create arguments))))
+
+(ert-deftest opencode-shell-sse-parser-validates-real-header-fields ()
+  (let ((result
+         (opencode-shell-sse-test--feed
+          '("HTTP/1.1 200 OK\r\nX-Reason: content-type: text/event-stream\r\nContent-Type: application/json\r\n\r\n{}"))))
+    (should (eq (plist-get (plist-get result :error) :reason) 'content-type))))
+
+(ert-deftest opencode-shell-sse-parser-rejects-malformed-and-oversized-chunks ()
+  (dolist (body '("ZZ\r\n" "5\r\nabcdeXX"))
+    (let ((result
+           (opencode-shell-sse-test--feed
+            (list (concat "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/event-stream\r\n"
+                          "Transfer-Encoding: chunked\r\n\r\n" body)))))
+      (should (plist-get result :error))))
+  (let ((result
+         (opencode-shell-sse-test--feed
+          '("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n11\r\n")
+          :max-chunk-bytes 16)))
+    (should (eq (plist-get (plist-get result :error) :reason) 'chunk-too-large))))
+
+(provide 'opencode-shell-sse-test)
+;;; opencode-shell-sse-test.el ends here
