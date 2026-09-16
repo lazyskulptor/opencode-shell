@@ -1869,6 +1869,24 @@
     (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
     (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
 
+(ert-deftest opencode-shell-shifts-documented-composer-undo-entry-shapes ()
+  (let* ((threshold 10)
+         (delta 7)
+         (property-entry '(nil face bold 10 . 12)))
+    (should (= (opencode-shell--shift-undo-entry 11 threshold delta) 18))
+    (should (equal (opencode-shell--shift-undo-entry '(10 . 13) threshold delta)
+                   '(17 . 20)))
+    (should (equal (opencode-shell--shift-undo-entry '("x" . -10) threshold delta)
+                   '("x" . -17)))
+    (should (equal (opencode-shell--shift-undo-entry property-entry threshold delta)
+                   '(nil face bold 17 . 19)))
+    (should (equal (opencode-shell--shift-undo-entry
+                    '(apply 1 10 12 delete-region 10 12) threshold delta)
+                   '(apply 1 17 19 delete-region 10 12)))
+    (should (equal (opencode-shell--shift-undo-entry
+                    '(apply function 10 12) threshold delta)
+                   '(apply function 10 12)))))
+
 (ert-deftest opencode-shell-submit-resets-undo-before-new-composer-edits ()
   (with-temp-buffer
     (opencode-shell-mode)

@@ -1034,20 +1034,26 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 (defun opencode-shell--shift-undo-entry (entry threshold delta)
   "Shift composer positions in undo ENTRY by DELTA after THRESHOLD."
   (cond
+   ((integerp entry)
+    (opencode-shell--shift-undo-position entry threshold delta))
    ((and (consp entry) (integerp (car entry)) (integerp (cdr entry)))
     (cons (opencode-shell--shift-undo-position (car entry) threshold delta)
           (opencode-shell--shift-undo-position (cdr entry) threshold delta)))
    ((and (consp entry) (stringp (car entry)) (integerp (cdr entry)))
     (cons (car entry)
           (opencode-shell--shift-undo-position (cdr entry) threshold delta)))
-   ((and (listp entry) (null (car entry)) (>= (length entry) 5))
-    (let ((copy (copy-sequence entry)))
-      (setf (nth 3 copy) (opencode-shell--shift-undo-position
-                          (nth 3 copy) threshold delta)
-            (nth 4 copy) (opencode-shell--shift-undo-position
-                          (nth 4 copy) threshold delta))
-      copy))
-   ((and (listp entry) (eq (car entry) 'apply) (>= (length entry) 4)
+   ((and (consp entry) (null (car entry))
+         (integerp (nth 3 entry))
+         (integerp (cdr (nthcdr 3 entry))))
+    (cons nil
+          (cons (nth 1 entry)
+                (cons (nth 2 entry)
+                      (cons (opencode-shell--shift-undo-position
+                             (nth 3 entry) threshold delta)
+                            (opencode-shell--shift-undo-position
+                             (cdr (nthcdr 3 entry)) threshold delta))))))
+   ((and (listp entry) (eq (car entry) 'apply)
+         (integerp (nth 1 entry))
          (integerp (nth 2 entry)) (integerp (nth 3 entry)))
     (let ((copy (copy-sequence entry)))
       (setf (nth 2 copy) (opencode-shell--shift-undo-position
