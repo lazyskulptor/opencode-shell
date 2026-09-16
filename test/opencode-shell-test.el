@@ -153,6 +153,19 @@
     (should-error (opencode-shell-fork-session) :type 'user-error))
   (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-f"))))
 
+(ert-deftest opencode-shell-fork-session-requires-server-prompt-id ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--turns
+                (list (opencode-shell--make-turn
+                       :id "local" :user "pending" :status 'complete)))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (ert-fail "empty candidates must not prompt")))
+              ((symbol-function 'opencode-shell--request)
+               (lambda (&rest _) (ert-fail "empty candidates must not request"))))
+      (should-error (opencode-shell-fork-session) :type 'user-error))))
+
 (ert-deftest opencode-shell-move-directory-updates-current-buffer-only ()
   (with-temp-buffer
     (opencode-shell-mode)

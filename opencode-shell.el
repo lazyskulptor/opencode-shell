@@ -995,21 +995,23 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Fork this session before a minibuffer-selected prompt."
   (interactive)
   (opencode-shell--assert-session-operation-ready)
-  (let* ((candidates (opencode-shell--fork-candidates))
-         (choice (completing-read "Fork session: " candidates nil t))
-         (message-id (cdr (assoc choice candidates)))
-         (profile opencode-shell--profile)
-         (directory opencode-shell--directory))
-    (opencode-shell--request
-     "POST" (format "/session/%s/fork" opencode-shell--session-id)
-     (lambda (session)
-       (let ((id (opencode-shell--get session 'id))
-             (fork-directory (or (opencode-shell--get session 'directory)
-                                 directory)))
-         (unless id (user-error "Fork response has no session ID"))
-         (opencode-shell-open-session id fork-directory profile)))
-     `((messageID . ,message-id)) nil
-     (lambda () (message "OpenCode session fork failed")))))
+  (let ((candidates (opencode-shell--fork-candidates)))
+    (unless candidates (user-error "No forkable prompts in this session"))
+    (let* ((choice (completing-read "Fork session: " candidates nil t))
+           (message-id (cdr (assoc choice candidates)))
+           (profile opencode-shell--profile)
+           (directory opencode-shell--directory))
+      (unless message-id (user-error "No fork boundary selected"))
+      (opencode-shell--request
+       "POST" (format "/session/%s/fork" opencode-shell--session-id)
+       (lambda (session)
+         (let ((id (opencode-shell--get session 'id))
+               (fork-directory (or (opencode-shell--get session 'directory)
+                                   directory)))
+           (unless id (user-error "Fork response has no session ID"))
+           (opencode-shell-open-session id fork-directory profile)))
+       `((messageID . ,message-id)) nil
+       (lambda () (message "OpenCode session fork failed"))))))
 
 (defun opencode-shell--destination-server-directory (directory profile)
   "Return DIRECTORY's project root in PROFILE server-native form."
