@@ -127,6 +127,9 @@ its reported directory.
 `M-x opencode-shell-move-session-directory` is a separate unbound function for
 a transcript. It reads a destination, normalizes it to that project's root, and
 updates the same buffer's server request scope and Emacs `default-directory`.
+The client persists this directory override, so the session moves from the old
+project browser to the destination browser even when the server retains its
+original directory metadata.
 The session ID, visible history, composer, and polling state stay in that buffer.
 This is a client-side scope change; it does not mutate persisted server metadata.
 
@@ -164,6 +167,8 @@ Submitting starts a fresh composer undo history, so undo cannot restore a sent
 draft; edits to the current draft remain normally undoable.
 An ambiguous `prompt_async` failure keeps the attempted turn visible and polls
 history for its stable ID instead of automatically submitting it again.
+Observed tool parts add payload-free `TOOL> name` lines (for example `bash`,
+`edit`, or `write`) without exposing tool inputs or outputs.
 
 For polling diagnostics, leave `opencode-shell-log-requests` enabled and run
 `M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted

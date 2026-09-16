@@ -37,6 +37,11 @@
   "File used to persist recently opened session browser locations."
   :type 'file :group 'opencode-shell)
 
+(defcustom opencode-shell-session-directory-overrides-file
+  (locate-user-emacs-file "opencode-shell-session-directories.eld")
+  "File used to persist client-side session directory moves."
+  :type 'file :group 'opencode-shell)
+
 (defcustom opencode-shell-auth-function nil
   "Optional function returning an Authorization header value or nil.
 The value is never included in client error messages."
@@ -519,6 +524,29 @@ and lifecycle keys."
 (defvar opencode-shell--recent-session-locations
   (opencode-shell--load-recent-session-locations)
   "Persisted session browser locations opened by OpenCode Shell.")
+
+(defun opencode-shell--load-session-directory-overrides ()
+  "Read persisted session directory overrides, returning nil on failure."
+  (condition-case nil
+      (when (file-readable-p opencode-shell-session-directory-overrides-file)
+        (with-temp-buffer
+          (insert-file-contents opencode-shell-session-directory-overrides-file)
+          (let ((value (read (current-buffer))))
+            (and (listp value) value))))
+    (error nil)))
+
+(defun opencode-shell--save-session-directory-overrides ()
+  "Persist client-side session directory overrides."
+  (make-directory (file-name-directory
+                   opencode-shell-session-directory-overrides-file) t)
+  (with-temp-file opencode-shell-session-directory-overrides-file
+    (let ((print-length nil) (print-level nil))
+      (prin1 opencode-shell--session-directory-overrides (current-buffer))
+      (insert "\n"))))
+
+(defvar opencode-shell--session-directory-overrides
+  (opencode-shell--load-session-directory-overrides)
+  "Persisted directory overrides keyed by profile identity and session ID.")
 (defvar-local opencode-shell--filter "")
 
 (defface opencode-shell-user-face
@@ -724,6 +752,37 @@ Each retained session keeps its server-reported directory unchanged."
                (if (> (opencode-shell--time session) 0)
                    (format-time-string "%Y-%m-%d %H:%M" updated) "")))))
 
+(defun opencode-shell--session-directory-override (profile session-id)
+  "Return the client-side directory override for PROFILE and SESSION-ID."
+  (cdr (assoc (list (opencode-shell--profile-key profile) session-id)
+              opencode-shell--session-directory-overrides)))
+
+(defun opencode-shell--set-session-directory-override (profile session-id directory)
+  "Persist DIRECTORY as PROFILE's effective location for SESSION-ID."
+  (let ((key (list (opencode-shell--profile-key profile) session-id)))
+    (setf (alist-get key opencode-shell--session-directory-overrides nil nil #'equal)
+          (file-name-as-directory directory))
+    (unless noninteractive (opencode-shell--save-session-directory-overrides))))
+
+(defun opencode-shell--effective-session (session profile)
+  "Return a copy of SESSION with PROFILE's directory override applied."
+  (let* ((copy (copy-tree session))
+         (id (opencode-shell--get copy 'id))
+         (override (and id (opencode-shell--session-directory-override profile id))))
+    (when override
+      (setf (alist-get 'directory copy) override))
+    copy))
+
+(defun opencode-shell--sessions-in-directory (sessions profile directory)
+  "Return SESSIONS whose effective PROFILE directory equals DIRECTORY."
+  (let ((target (opencode-shell--canonical-directory directory)))
+    (seq-filter
+     (lambda (session)
+       (and-let* ((value (opencode-shell--get session 'directory)))
+         (equal target (opencode-shell--canonical-directory value))))
+     (mapcar (lambda (session) (opencode-shell--effective-session session profile))
+             sessions))))
+
 (defun opencode-shell--child-session-p (session)
   "Return non-nil when SESSION belongs to a parent session."
   (let ((parent (or (opencode-shell--get session 'parentID)
@@ -851,17 +910,19 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
      (lambda (statuses)
        (when (= generation opencode-shell--generation)
          (setq opencode-shell--session-status statuses)
-          (opencode-shell--request
-           "GET" "/session"
+         (opencode-shell--request
+          "GET" "/session"
           (lambda (sessions)
             (when (= generation opencode-shell--generation)
-              (setq opencode-shell--sessions (opencode-shell--normalize-sessions sessions)
+              (setq opencode-shell--sessions
+                    (opencode-shell--normalize-sessions
+                     (opencode-shell--sessions-in-directory
+                      sessions opencode-shell--profile opencode-shell--directory))
                     tabulated-list-entries (opencode-shell--session-entries))
-              (tabulated-list-print t)
+               (tabulated-list-print t)
                (when id (goto-char (point-min)) (search-forward id nil t)))))
-            nil
-            `((directory . ,opencode-shell--directory)
-              (limit . 1000)))))))
+          nil
+          '((limit . 1000)))))))
 
 (defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
@@ -908,7 +969,17 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (let ((id (or (tabulated-list-get-id) (user-error "No session at point"))))
     (when (yes-or-no-p (format "Delete OpenCode session %s? " id))
       (opencode-shell--request "DELETE" (format "/session/%s" id)
-                                (lambda (_) (opencode-shell--refresh))))))
+                                (lambda (_)
+                                  (let ((key (list (opencode-shell--profile-key
+                                                    opencode-shell--profile)
+                                                   id)))
+                                    (setq opencode-shell--session-directory-overrides
+                                          (assoc-delete-all
+                                           key opencode-shell--session-directory-overrides
+                                           #'equal))
+                                    (unless noninteractive
+                                      (opencode-shell--save-session-directory-overrides)))
+                                  (opencode-shell--refresh))))))
 
 (defun opencode-shell--normalize-models (response)
   "Return models from server-connected providers in RESPONSE."
@@ -1062,6 +1133,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (when (equal (opencode-shell--canonical-directory source-directory)
                  (opencode-shell--canonical-directory destination))
       (user-error "Session is already in that project directory"))
+    (opencode-shell--set-session-directory-override
+     profile opencode-shell--session-id destination)
+    (opencode-shell--remember-session-location profile destination)
     (setq-local opencode-shell--directory destination
                 default-directory
                 (opencode-shell--client-directory destination profile))))
@@ -1907,6 +1981,7 @@ request settles."
       (opencode-shell--insert-permission-results
        (opencode-shell--turn-id turn))
       (let ((response-begin (point)))
+      (insert (opencode-shell--tool-name-display turn))
       (if (eq (opencode-shell--turn-status turn) 'complete)
           (let ((answer (opencode-shell--assistant-display-text turn)))
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
@@ -1950,21 +2025,40 @@ request settles."
 
 (defun opencode-shell--response-display (turn)
   "Return the propertized response display for TURN."
-  (if (eq (opencode-shell--turn-status turn) 'complete)
-      (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
+  (concat
+   (opencode-shell--tool-name-display turn)
+   (if (eq (opencode-shell--turn-status turn) 'complete)
+       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
                (opencode-shell--assistant-display-text turn)
                (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
-    (propertize
-     (pcase (opencode-shell--turn-status turn)
-       ('sending (opencode-shell--status-display "Sending"))
-       ('thinking (opencode-shell--status-display "Thinking"))
-       ('receiving (opencode-shell--status-display "Receiving"))
-       ('recovering (opencode-shell--status-display "Recovering"))
-       ('aborting (opencode-shell--status-display "Aborting"))
-       ('error "Request failed\n\n")
-       (_ (opencode-shell--status-display "Waiting for response")))
+     (propertize
+      (pcase (opencode-shell--turn-status turn)
+        ('sending (opencode-shell--status-display "Sending"))
+        ('thinking (opencode-shell--status-display "Thinking"))
+        ('receiving (opencode-shell--status-display "Receiving"))
+        ('recovering (opencode-shell--status-display "Recovering"))
+        ('aborting (opencode-shell--status-display "Aborting"))
+        ('error "Request failed\n\n")
+        (_ (opencode-shell--status-display "Waiting for response")))
       'face (if (eq (opencode-shell--turn-status turn) 'error)
-                 'opencode-shell-error-face 'opencode-shell-waiting-face))))
+                'opencode-shell-error-face 'opencode-shell-waiting-face)))))
+
+(defun opencode-shell--tool-name-display (turn)
+  "Return payload-free tool names observed in TURN."
+  (let (names)
+    (dolist (part (opencode-shell--turn-parts turn))
+      (when (member (format "%s" (opencode-shell--get part 'type))
+                    '("tool" "tool_use" "tool-result"))
+        (when-let ((name (or (opencode-shell--get part 'tool)
+                             (opencode-shell--get part 'name))))
+          (cl-pushnew (format "%s" name) names :test #'equal))))
+    (if names
+        (propertize
+         (concat (mapconcat (lambda (name) (format "TOOL> %s" name))
+                            (nreverse names) "\n")
+                 "\n\n")
+         'font-lock-face 'shadow)
+      "")))
 
 (defun opencode-shell--permission-status-turn ()
   "Return the latest nonterminal turn while permission blocks input."
@@ -2972,7 +3066,12 @@ ACTIVE means that their session browser is already live."
             (opencode-shell--request
              "GET" "/session"
              (lambda (response)
-               (dolist (session (opencode-shell--normalize-sessions response))
+               (dolist (session
+                        (mapcar
+                         (lambda (item)
+                           (opencode-shell--effective-session
+                            item candidate-profile))
+                         (opencode-shell--normalize-sessions response)))
                  (remember candidate-profile (opencode-shell--get session 'directory)
                            (opencode-shell--time session) nil))
                (kill-buffer buffer)

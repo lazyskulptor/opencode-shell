@@ -179,7 +179,8 @@
     (insert "draft")
     (let* ((buffer (current-buffer))
            (turns (list (opencode-shell-test--complete-user-turn "msg-1" "done")))
-           (poll-timer 'existing-poll-timer))
+           (poll-timer 'existing-poll-timer)
+           (opencode-shell--session-directory-overrides nil))
       (setq-local opencode-shell--session-id "ses-source"
                   opencode-shell--profile opencode-shell-test--local-profile
                   opencode-shell--directory "/server/project/old/"
@@ -200,22 +201,40 @@
       (should (eq opencode-shell--poll-timer poll-timer))
       (should (equal (opencode-shell--composer-text) "draft"))
       (should (equal opencode-shell--directory "/server/project/new/"))
+      (should (equal (opencode-shell--session-directory-override
+                      opencode-shell-test--local-profile "ses-source")
+                     "/server/project/new/"))
       (should (equal default-directory "/client/project/new/")))))
 
 (ert-deftest opencode-shell-move-directory-maps-remote-scope-in-place ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq-local opencode-shell--session-id "ses-source"
-                opencode-shell--profile opencode-shell-test--remote-profile
-                opencode-shell--directory "/srv/project/old/")
-    (cl-letf (((symbol-function 'read-directory-name)
-               (lambda (&rest _) "/ssh:code.example.test:/srv/project/new/"))
-              ((symbol-function 'opencode-shell--project-directory)
-               (lambda (&optional directory) directory)))
-      (opencode-shell-move-session-directory))
-    (should (equal opencode-shell--directory "/srv/project/new/"))
-    (should (equal default-directory
-                   "/ssh:code.example.test:/srv/project/new/"))))
+    (let ((opencode-shell--session-directory-overrides nil))
+      (setq-local opencode-shell--session-id "ses-source"
+                  opencode-shell--profile opencode-shell-test--remote-profile
+                  opencode-shell--directory "/srv/project/old/")
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (&rest _) "/ssh:code.example.test:/srv/project/new/"))
+                ((symbol-function 'opencode-shell--project-directory)
+                 (lambda (&optional directory) directory)))
+        (opencode-shell-move-session-directory))
+      (should (equal opencode-shell--directory "/srv/project/new/"))
+      (should (equal default-directory
+                     "/ssh:code.example.test:/srv/project/new/")))))
+
+(ert-deftest opencode-shell-directory-overrides-relocate-session-list-rows ()
+  (let* ((profile opencode-shell-test--local-profile)
+         (key (list (opencode-shell--profile-key profile) "moved"))
+         (opencode-shell--session-directory-overrides
+          (list (cons key "/server/project/new/")))
+         (sessions '(((id . "moved") (directory . "/server/project/old/"))
+                     ((id . "native") (directory . "/server/project/new/")))))
+    (should (equal (mapcar (lambda (session) (opencode-shell--get session 'id))
+                           (opencode-shell--sessions-in-directory
+                            sessions profile "/server/project/new/"))
+                   '("moved" "native")))
+    (should-not (opencode-shell--sessions-in-directory
+                 sessions profile "/server/project/old/"))))
 
 (ert-deftest opencode-shell-move-directory-rejects-current-project ()
   (with-temp-buffer
@@ -1560,6 +1579,24 @@
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
       (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer")))))
 
+(ert-deftest opencode-shell-renders-tool-names-without-payloads ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((messages
+           (list
+            (opencode-shell-test--message "u1" "user" "change files")
+            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+              (parts . (((id . "tool-1") (type . "tool") (tool . "edit")
+                         (state . ((status . "running")
+                                   (input . "SECRET EDIT PAYLOAD"))))
+                        ((id . "tool-2") (type . "tool_use") (name . "write")
+                         (input . "SECRET WRITE PAYLOAD"))))))))
+      (dotimes (_ 3) (opencode-shell--render-messages messages))
+      (should (= 1 (how-many "TOOL> edit" (point-min) (point-max))))
+      (should (= 1 (how-many "TOOL> write" (point-min) (point-max))))
+      (should-not (string-match-p "SECRET .* PAYLOAD" (buffer-string)))
+      (should (= 1 (how-many "Receiving" (point-min) (point-max)))))))
+
 (ert-deftest opencode-shell-partial-assistant-update-retains-known-parts ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2745,6 +2782,20 @@
       (when (file-exists-p opencode-shell-recent-locations-file)
         (delete-file opencode-shell-recent-locations-file)))))
 
+(ert-deftest opencode-shell-persists-session-directory-overrides ()
+  (let ((opencode-shell-session-directory-overrides-file
+         (make-temp-file "opencode-shell-session-directories-"))
+        (opencode-shell--session-directory-overrides
+         '((("local" "session") . "/work/"))))
+    (unwind-protect
+        (progn
+          (opencode-shell--save-session-directory-overrides)
+          (setq opencode-shell--session-directory-overrides nil)
+          (should (equal (opencode-shell--load-session-directory-overrides)
+                         '((("local" "session") . "/work/")))))
+      (when (file-exists-p opencode-shell-session-directory-overrides-file)
+        (delete-file opencode-shell-session-directory-overrides-file)))))
+
 (ert-deftest opencode-shell-find-session-quit-is-silent ()
   (let ((opencode-shell-profiles (list opencode-shell-test--local-profile)) callback)
     (cl-letf (((symbol-function 'opencode-shell--request)
@@ -3154,6 +3205,8 @@
           (dolist (buffer (list one two))
             (with-current-buffer buffer
               (opencode-shell-sessions-mode)
+              (setq-local opencode-shell--profile opencode-shell-test--local-profile
+                          opencode-shell--directory "/work/")
               (opencode-shell--refresh)))
           (dolist (request (copy-sequence requests))
             (when (equal (cadr request) "/session/status")
@@ -3165,7 +3218,8 @@
             (when (equal (cadr request) "/session")
               (with-current-buffer (car request)
                 (funcall (nth 2 request)
-                         `(((id . ,(if (eq (car request) one) "one" "two"))))))))
+                         `(((id . ,(if (eq (car request) one) "one" "two"))
+                            (directory . "/work/")))))))
           (should (equal (with-current-buffer one (opencode-shell--get
                                                    opencode-shell--session-status "one"))
                          '((type . "busy"))))
