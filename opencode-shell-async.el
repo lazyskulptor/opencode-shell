@@ -92,12 +92,18 @@
 (defun opencode-shell-async--parse-sse (runtime text)
   "Append TEXT and wake RUNTIME once per complete SSE data frame."
   (let ((input (concat (or (plist-get runtime :sse-input) "")
-                       (replace-regexp-in-string "\r" "" text))))
-    (while (string-match "\n\n" input)
+                       (replace-regexp-in-string "\r" "" text)))
+        done)
+    (while (and (not done) (string-match "\n\n" input))
       (let ((frame (substring input 0 (match-beginning 0))))
         (setq input (substring input (match-end 0)))
-        (when (string-match-p "\\(?:^\\|\n\\)data:" frame)
-          (opencode-shell-async--deliver-runtime runtime 'event))))
+        (if (> (length frame) opencode-shell-async--max-sse-frame-bytes)
+            (progn
+              (setq input "" done t)
+              (when (process-live-p (plist-get runtime :process))
+                (delete-process (plist-get runtime :process))))
+          (when (string-match-p "\\(?:^\\|\n\\)data:" frame)
+            (opencode-shell-async--deliver-runtime runtime 'event)))))
     (when (> (length input) opencode-shell-async--max-sse-frame-bytes)
       (setq input "")
       (when (process-live-p (plist-get runtime :process))
@@ -158,39 +164,43 @@
               (plist-get runtime :connecting) nil))
       (setf (plist-get runtime :input)
             (concat (or (plist-get runtime :input) "") chunk))
-      (when (and (not (plist-get runtime :headers-done))
-                 (> (length (plist-get runtime :input))
-                    opencode-shell-async--max-header-bytes))
-        (delete-process process))
-    (unless (plist-get runtime :headers-done)
-      (when (string-match "\r\n\r\n" (plist-get runtime :input))
-        (let* ((input (plist-get runtime :input))
-               (headers (substring input 0 (match-beginning 0))))
-          (setf (plist-get runtime :input) (substring input (match-end 0))
-                (plist-get runtime :headers-done) t
-                (plist-get runtime :chunked)
-                (string-match-p "transfer-encoding:[ \t]*chunked" (downcase headers))
-                (plist-get runtime :connected)
-                (and (string-match-p
-                      "\\`HTTP/[0-9]+\\.[0-9]+ 2[0-9][0-9]\\(?: [^\r\n]*\\)?\r\n"
-                      headers)
-                     (string-match-p
-                      "\\(?:\\`\\|\r\n\\)content-type:[ \t]*text/event-stream[ \t]*\\(?:;[^\r\n]*\\)?\\(?:\r\n\\|\\'\\)"
-                      (downcase headers))))
-          (opencode-shell-async--cancel-header-timer runtime)
-          (when (plist-get runtime :connected)
-            (setf (plist-get runtime :backoff) 1))
-          (opencode-shell-async--runtime-log
-           runtime "transport=%s"
-           (if (plist-get runtime :connected) "sse-connected" "fallback-http"))
-          (unless (plist-get runtime :connected)
-            (delete-process (plist-get runtime :process))))))
-    (when (plist-get runtime :headers-done)
-      (if (plist-get runtime :chunked)
-          (opencode-shell-async--parse-chunks runtime)
-        (let ((body (plist-get runtime :input)))
-          (setf (plist-get runtime :input) "")
-          (opencode-shell-async--parse-sse runtime body)))))))
+      (let ((oversized
+             (and (not (plist-get runtime :headers-done))
+                  (> (length (plist-get runtime :input))
+                     opencode-shell-async--max-header-bytes))))
+        (if oversized
+            (progn
+              (setf (plist-get runtime :input) "")
+              (delete-process process))
+          (unless (plist-get runtime :headers-done)
+            (when (string-match "\r\n\r\n" (plist-get runtime :input))
+              (let* ((input (plist-get runtime :input))
+                     (headers (substring input 0 (match-beginning 0))))
+                (setf (plist-get runtime :input) (substring input (match-end 0))
+                      (plist-get runtime :headers-done) t
+                      (plist-get runtime :chunked)
+                      (string-match-p "transfer-encoding:[ \t]*chunked" (downcase headers))
+                      (plist-get runtime :connected)
+                      (and (string-match-p
+                            "\\`HTTP/[0-9]+\\.[0-9]+ 2[0-9][0-9]\\(?: [^\r\n]*\\)?\r\n"
+                            headers)
+                           (string-match-p
+                            "\\(?:\\`\\|\r\n\\)content-type:[ \t]*text/event-stream[ \t]*\\(?:;[^\r\n]*\\)?\\(?:\r\n\\|\\'\\)"
+                            (downcase headers))))
+                (opencode-shell-async--cancel-header-timer runtime)
+                (when (plist-get runtime :connected)
+                  (setf (plist-get runtime :backoff) 1))
+                (opencode-shell-async--runtime-log
+                 runtime "transport=%s"
+                 (if (plist-get runtime :connected) "sse-connected" "fallback-http"))
+                (unless (plist-get runtime :connected)
+                  (delete-process (plist-get runtime :process))))))
+          (when (plist-get runtime :headers-done)
+            (if (plist-get runtime :chunked)
+                (opencode-shell-async--parse-chunks runtime)
+              (let ((body (plist-get runtime :input)))
+                (setf (plist-get runtime :input) "")
+                (opencode-shell-async--parse-sse runtime body)))))))))
 
 (defun opencode-shell-async--schedule-reconnect (key)
   "Schedule a bounded asynchronous reconnect for runtime KEY."
@@ -231,13 +241,18 @@
 
 (defun opencode-shell-async--valid-request-p (host path headers)
   "Return non-nil when HOST, PATH, and HEADERS are safe for raw HTTP."
-  (and (stringp host) (not (string-match-p "[\r\n]" host))
-       (stringp path) (not (string-match-p "[\r\n]" path))
+  (and (stringp host)
+       (string-match-p "\\`[][0-9A-Za-z.:-]+\\'" host)
+       (stringp path) (string-prefix-p "/" path)
+       (seq-every-p (lambda (character) (<= 33 character 126)) path)
        (seq-every-p
         (lambda (header)
           (and (string-match-p "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'"
                                (format "%s" (car header)))
-               (not (string-match-p "[\r\n]" (format "%s" (cdr header))))))
+               (seq-every-p
+                (lambda (character)
+                  (or (= character 9) (<= 32 character 126)))
+                (format "%s" (cdr header)))))
         headers)))
 
 (defun opencode-shell-async--connect (key)
@@ -245,24 +260,34 @@
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (setf (plist-get runtime :reconnect-timer) nil)
     (when (and (plist-get runtime :sse-enabled)
+               (not (plist-get runtime :sse-disabled))
                (not (process-live-p (plist-get runtime :process)))
                (> (hash-table-count (plist-get runtime :subscribers)) 0))
       (condition-case nil
           (let* ((url (url-generic-parse-url (plist-get runtime :url)))
                  (host (url-host url))
+                 (header-host (if (and (string-match-p ":" host)
+                                       (not (string-prefix-p "[" host)))
+                                  (format "[%s]" host) host))
                  (port (or (url-port url) 80))
                  (path (or (url-filename url) "/event"))
                  (token (cons key (float-time)))
                  (_valid
                   (unless (opencode-shell-async--valid-request-p
                            host path (plist-get runtime :headers))
-                    (setf (plist-get runtime :sse-enabled) nil)
+                    (setf (plist-get runtime :sse-disabled) t)
                     (error "Unsafe SSE request metadata")))
                  (process
                   (progn
                     (setf (plist-get runtime :connect-token) token
                           (plist-get runtime :connecting) t
-                          (plist-get runtime :process) nil)
+                          (plist-get runtime :process) nil
+                          (plist-get runtime :input) ""
+                          (plist-get runtime :sse-input) ""
+                          (plist-get runtime :headers-done) nil
+                          (plist-get runtime :header-timer)
+                          (run-at-time opencode-shell-async--header-timeout nil
+                                       #'opencode-shell-async--header-timeout key token))
                    (make-network-process
                     :name (format "opencode-sse-%s" (sxhash-equal key))
                     :host host :service port :coding 'binary :noquery t
@@ -276,12 +301,7 @@
             (set-process-query-on-exit-flag process nil)
             (when (null (plist-get runtime :process))
               (setf (plist-get runtime :process) process))
-            (setf (plist-get runtime :connecting) nil
-                  (plist-get runtime :input) ""
-                  (plist-get runtime :sse-input) ""
-                  (plist-get runtime :header-timer)
-                  (run-at-time opencode-shell-async--header-timeout nil
-                               #'opencode-shell-async--header-timeout key token))
+            (setf (plist-get runtime :connecting) nil)
             (if (not (process-live-p process))
                 (progn
                   (setf (plist-get runtime :process) nil)
@@ -289,16 +309,17 @@
                   (opencode-shell-async--schedule-reconnect key))
               (process-send-string
                process
-               (concat "GET " path " HTTP/1.1\r\nHost: " host ":" (number-to-string port)
+               (concat "GET " path " HTTP/1.1\r\nHost: " header-host ":" (number-to-string port)
                        "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n"
                        (mapconcat (lambda (header)
                                     (format "%s: %s\r\n" (car header) (cdr header)))
                                   (plist-get runtime :headers) "")
                        "Connection: keep-alive\r\n\r\n"))))
         (error
-         (unless (plist-get runtime :sse-enabled)
+         (when (plist-get runtime :sse-disabled)
            (opencode-shell-async--runtime-log runtime "transport=fallback unsafe-config"))
-         (when (plist-get runtime :sse-enabled)
+         (when (and (plist-get runtime :sse-enabled)
+                    (not (plist-get runtime :sse-disabled)))
            (opencode-shell-async--schedule-reconnect key)))))))
 
 (defun opencode-shell-async-subscribe-runtime
@@ -315,7 +336,8 @@
             (error "Conflicting asynchronous runtime configuration")))
          (runtime (or existing
                       (list :subscribers (make-hash-table :test #'eq :weakness 'key)
-                           :url url :headers headers :sse-enabled sse-enabled
+                            :url url :headers headers :sse-enabled sse-enabled
+                            :sse-disabled nil
                            :poll-interval poll-interval
                            :logger logger
                             :backoff 1 :ticks 0 :poll-timer nil

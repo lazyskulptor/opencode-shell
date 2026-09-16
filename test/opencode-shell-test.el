@@ -2568,6 +2568,41 @@
           (should (eq (plist-get runtime :reconnect-timer) 'timer)))
       (remhash key opencode-shell-async--runtimes))))
 
+(ert-deftest opencode-shell-sse-immediate-filter-preserves-partial-headers ()
+  (let* ((key 'immediate-filter)
+         (subscribers (make-hash-table :test #'eq))
+         (runtime (list :subscribers subscribers :url "http://localhost:4199/event"
+                        :headers nil :sse-enabled t :sse-disabled nil :backoff 1
+                        :reconnect-timer nil :header-timer nil :process nil
+                        :connected nil :connecting nil :connect-token nil
+                        :headers-done nil :input "" :sse-input "")))
+    (puthash (current-buffer) #'ignore subscribers)
+    (puthash key runtime opencode-shell-async--runtimes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-network-process)
+                   (lambda (&rest args)
+                     (funcall (plist-get args :filter) 'stream
+                              "HTTP/1.1 200 OK\r\nContent-Type: text/")
+                     'stream))
+                  ((symbol-function 'process-live-p)
+                   (lambda (process) (eq process 'stream)))
+                  ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+                  ((symbol-function 'process-send-string) #'ignore)
+                  ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                  ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                  ((symbol-function 'timerp) (lambda (value) (eq value 'timer)))
+                  ((symbol-function 'cancel-timer) #'ignore))
+          (opencode-shell-async--connect key)
+          (should (string-match-p "Content-Type: text/"
+                                  (plist-get runtime :input)))
+          (opencode-shell-async--stream-filter
+           key (plist-get runtime :connect-token) 'stream
+           "event-stream\r\n\r\ndata: {}\n\n")
+          (should (plist-get runtime :connected))
+          (should (plist-get runtime :headers-done))
+          (should-not (plist-get runtime :header-timer)))
+      (remhash key opencode-shell-async--runtimes))))
+
 (ert-deftest opencode-shell-sse-rejects-unsafe-and-conflicting-config ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (buffer (current-buffer)) made)
@@ -2579,8 +2614,12 @@
        'unsafe buffer "http://localhost:4199/event"
        '(("Authorization" . "bad\r\nInjected: yes")) t 2 #'ignore)
       (should-not made)
-      (should-not (plist-get (opencode-shell-async-runtime-get 'unsafe)
-                             :sse-enabled))
+      (should (plist-get (opencode-shell-async-runtime-get 'unsafe) :sse-enabled))
+      (should (plist-get (opencode-shell-async-runtime-get 'unsafe) :sse-disabled))
+      (should
+       (opencode-shell-async-subscribe-runtime
+        'unsafe buffer "http://localhost:4199/event"
+        '(("Authorization" . "bad\r\nInjected: yes")) t 2 #'ignore))
       (should-error
        (opencode-shell-async-subscribe-runtime
         'unsafe buffer "http://localhost:4199/event"
@@ -2620,6 +2659,14 @@
       (setf (plist-get runtime :sse-input)
             (make-string (1+ opencode-shell-async--max-sse-frame-bytes) ?x))
       (opencode-shell-async--parse-sse runtime "")
+      (should (= deletes 1))
+      (setq deletes 0)
+      (setf (plist-get runtime :sse-input) "")
+      (opencode-shell-async--parse-sse
+       runtime
+       (concat "data: "
+               (make-string opencode-shell-async--max-sse-frame-bytes ?x)
+               "\n\n"))
       (should (= deletes 1)))))
 
 (ert-deftest opencode-shell-sse-header-timeout-closes-current-connection ()
