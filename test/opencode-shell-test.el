@@ -422,8 +422,7 @@
                  (setq candidates (mapcar #'car table))
                  (caar table))))
       (opencode-shell--choose-pending "permission" #'ignore)
-      (should (string-match-p
-               "p2: edit: src/a.el.*src/b.el" (car candidates))))))
+      (should (equal (car candidates) "p2: edit: src/a.el")))))
 
 (ert-deftest opencode-shell-permission-context-is-bounded ()
   (let ((description
@@ -444,6 +443,25 @@
          (description (opencode-shell--permission-description item)))
     (should (equal description "bash: bash -n scripts/*.sh"))
     (should-not (string-match-p "hidden" description))))
+
+(ert-deftest opencode-shell-permission-card-shows-only-actionable-context ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--receive-permissions
+     '(((id . "p") (sessionID . "s") (permission . "bash")
+        (patterns . ("fallback")) (always . ("bash *"))
+        (tool . ((messageID . "hidden-message") (callID . "hidden-call")))
+        (metadata . ((command . "bash -n scripts/*.sh")
+                     (cwd . "/hidden/workspace"))))))
+    (let ((card (buffer-substring-no-properties
+                 opencode-shell--permission-begin opencode-shell--permission-end)))
+      (should (string-match-p
+               "│  bash\n│\n│  bash -n scripts/\\*.sh\n│\n│  C-c C-y once  C-c C-l always  C-c C-n reject"
+               card))
+      (dolist (hidden '("Always scope" "hidden-message" "hidden-call"
+                        "metadata" "patterns=" "tool="))
+        (should-not (string-match-p hidden card))))))
 
 (ert-deftest opencode-shell-permission-state-deduplicates-by-id ()
   (let* ((first '((id . "p1") (permission . "bash")))
@@ -515,16 +533,16 @@
     (goto-char (+ opencode-shell--composer-start 2))
     (opencode-shell--receive-permissions
      '(((id . "missing") (permission . "write"))
-       ((id . "other") (sessionID . "x") (permission . "read"))
-       ((id . "p") (sessionID . "s") (permission . "bash")
-        (patterns . ("git status")) (always . ("git *")))))
+        ((id . "other") (sessionID . "x") (permission . "read"))
+        ((id . "p") (sessionID . "s") (permission . "bash")
+         (patterns . ("git status")) (always . ("git *")))))
     (should (= (length opencode-shell--permissions) 1))
     (should (equal (opencode-shell--composer-text) "draft"))
     (should (= (- (point) opencode-shell--composer-start) 2))
     (goto-char opencode-shell--permission-begin)
     (should (search-forward "PERMISSION" opencode-shell--permission-end t))
     (should (search-forward "git status" opencode-shell--permission-end t))
-    (should (search-forward "Always scope: git *" opencode-shell--permission-end t))
+    (should-not (search-forward "Always scope" opencode-shell--permission-end t))
     (opencode-shell--receive-permissions opencode-shell--permissions)
     (goto-char (point-min))
     (should (= (how-many "PERMISSION" (point-min) (point-max)) 1))
