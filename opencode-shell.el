@@ -497,7 +497,7 @@ and lifecycle keys."
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
   id server-user-id user assistant parts assistant-messages status acknowledged user-begin user-end
-  response-begin response-end terminal-error)
+  response-begin response-end terminal-error locally-settled)
 
 (defun opencode-shell--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -1299,6 +1299,18 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                   (equal id (opencode-shell--turn-server-user-id turn))))
             turns))
 
+(defun opencode-shell--settle-superseded-turns (turns &optional all)
+  "Settle nonterminal TURNS superseded by a later prompt.
+When ALL is non-nil, settle every existing nonterminal turn because a new
+prompt is about to be appended.  Otherwise leave the newest turn active."
+  (dolist (turn (if all turns (butlast turns)))
+    (unless (eq (opencode-shell--turn-status turn) 'complete)
+      (setf (opencode-shell--turn-status turn) 'complete
+            (opencode-shell--turn-terminal-error turn)
+            "Interrupted: Superseded by a later prompt"
+            (opencode-shell--turn-locally-settled turn) t)))
+  turns)
+
 (defun opencode-shell--normalize-turns (messages)
   "Reconcile server MESSAGES into stable buffer-local turn records."
   (let ((old opencode-shell--turns) observed current used)
@@ -1325,7 +1337,9 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                   (opencode-shell--turn-user turn) text
                   (opencode-shell--turn-parts turn) nil
                   (opencode-shell--turn-status turn)
-                  (if (opencode-shell--turn-assistant turn) 'complete 'waiting))
+                  (if (or (opencode-shell--turn-assistant turn)
+                          (opencode-shell--turn-locally-settled turn))
+                      'complete 'waiting))
             (setq current turn)
             (push turn used)
             (push turn observed)))
@@ -1346,24 +1360,34 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                       (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
                                  messages "")
                       (opencode-shell--turn-terminal-error turn)
-                      (and (opencode-shell--assistant-envelope-complete-p
-                            (cdar (last messages)))
-                           (not (seq-some #'opencode-shell--running-tool-part-p
-                                          (opencode-shell--turn-parts turn)))
-                           (opencode-shell--message-error-label
-                            (opencode-shell--get (cdar (last messages)) 'info)))
+                      (if (and (opencode-shell--assistant-envelope-complete-p
+                                (cdar (last messages)))
+                               (not (seq-some #'opencode-shell--running-tool-part-p
+                                              (opencode-shell--turn-parts turn))))
+                          (opencode-shell--message-error-label
+                           (opencode-shell--get (cdar (last messages)) 'info))
+                        (opencode-shell--turn-terminal-error turn))
                       (opencode-shell--turn-status turn)
-                       (if (and (opencode-shell--assistant-envelope-complete-p
-                                 (cdar (last messages)))
-                                (not (seq-some #'opencode-shell--running-tool-part-p
-                                               (opencode-shell--turn-parts turn))))
-                            'complete (opencode-shell--response-phase turn))))))))))
+                      (cond
+                       ((and (opencode-shell--assistant-envelope-complete-p
+                              (cdar (last messages)))
+                             (not (seq-some #'opencode-shell--running-tool-part-p
+                                            (opencode-shell--turn-parts turn))))
+                        'complete)
+                       ((opencode-shell--turn-locally-settled turn) 'complete)
+                       (t (opencode-shell--response-phase turn)))
+                      (opencode-shell--turn-locally-settled turn)
+                      (and (opencode-shell--turn-locally-settled turn)
+                           (not (and (opencode-shell--assistant-envelope-complete-p
+                                      (cdar (last messages)))
+                                     (not (seq-some #'opencode-shell--running-tool-part-p
+                                                    (opencode-shell--turn-parts turn))))))))))))))
     (setq observed (nreverse observed))
     (let ((result (copy-sequence old)))
       (dolist (turn observed)
         (unless (memq turn result)
           (setq result (append result (list turn)))))
-      result)))
+      (opencode-shell--settle-superseded-turns result))))
 
 (defun opencode-shell--composer-text ()
   "Return the composer contents without properties."
@@ -2028,6 +2052,7 @@ request settles."
     (when opencode-shell--submit-in-flight
       (user-error "A prompt delivery is already being reconciled"))
     (when (string-blank-p text) (user-error "Prompt is blank"))
+    (opencode-shell--settle-superseded-turns opencode-shell--turns t)
     (let ((turn (opencode-shell--make-turn
                   :id (format "msg_%s_%d" (format-time-string "%s%N")
                               (cl-incf opencode-shell--turn-counter))
@@ -2069,7 +2094,17 @@ request settles."
       (opencode-shell--render-turns)))
   (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
                             (lambda (_)
+                              (when-let ((turn (car (last opencode-shell--turns))))
+                                (unless (eq (opencode-shell--turn-status turn) 'complete)
+                                  (setf (opencode-shell--turn-status turn) 'complete
+                                        (opencode-shell--turn-terminal-error turn)
+                                        "MessageAbortedError: Aborted"
+                                        (opencode-shell--turn-locally-settled turn) t)))
                               (setq opencode-shell--submit-in-flight nil)
+                              (unless (opencode-shell--permission-blocked-p)
+                                (setq opencode-shell--composer-visible t))
+                              (opencode-shell--render-turns)
+                              (opencode-shell--log-lifecycle "abort-ack" t)
                               (opencode-shell--resync)) '()))
 
 (defun opencode-shell--choose-pending (kind callback)

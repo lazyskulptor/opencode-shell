@@ -1108,6 +1108,80 @@
       (should (equal (mapcar #'opencode-shell--turn-server-user-id opencode-shell--turns)
                      '("u1" "u2"))))))
 
+(ert-deftest opencode-shell-superseded-history-orphan-stops-polling ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((timer (run-at-time 60 nil #'ignore)) events)
+      (unwind-protect
+          (progn
+            (setq opencode-shell--poll-timer timer)
+            (cl-letf (((symbol-function 'opencode-shell--log-lifecycle)
+                       (lambda (event &optional _force) (push event events))))
+              (opencode-shell--render-messages
+               (list (opencode-shell-test--message "u1" "user" "orphan")
+                     (opencode-shell-test--message "u2" "user" "new")
+                     (opencode-shell-test--message "a2" "assistant" "answer" "u2")))
+              (let ((orphan (car opencode-shell--turns)))
+                (should (eq (opencode-shell--turn-status orphan) 'complete))
+                (should (opencode-shell--turn-locally-settled orphan))
+                (should (equal (opencode-shell--turn-terminal-error orphan)
+                               "Interrupted: Superseded by a later prompt")))
+              (should (equal opencode-shell--request-status "idle"))
+              (should-not opencode-shell--poll-timer)
+              (should (member "poll-stop" events))))
+        (when (timerp timer) (cancel-timer timer))))))
+
+(ert-deftest opencode-shell-submit-settles-existing-nonterminal-turns ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--selected-model '((providerID . "p") (modelID . "m"))
+          opencode-shell--selected-agent "build"
+          opencode-shell--turns
+          (list (opencode-shell--make-turn :id "u1" :user "old" :status 'waiting)))
+    (insert "new prompt")
+    (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+              ((symbol-function 'opencode-shell--request) (lambda (&rest _))))
+      (opencode-shell--submit))
+    (should (= (length opencode-shell--turns) 2))
+    (let ((old (car opencode-shell--turns))
+          (new (cadr opencode-shell--turns)))
+      (should (eq (opencode-shell--turn-status old) 'complete))
+      (should (opencode-shell--turn-locally-settled old))
+      (should (eq (opencode-shell--turn-status new) 'sending))
+      (should (equal opencode-shell--submit-in-flight
+                     (opencode-shell--turn-id new))))))
+
+(ert-deftest opencode-shell-abort-settlement-survives-stale-snapshot ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--submit-in-flight "u1"
+          opencode-shell--composer-visible nil
+          opencode-shell--turns
+          (list (opencode-shell--make-turn :id "u1" :user "question" :status 'waiting)))
+    (let (callback)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path cb &rest _) (setq callback cb)))
+                ((symbol-function 'opencode-shell--resync) #'ignore))
+        (opencode-shell--abort)
+        (funcall callback nil)))
+    (let ((turn (car opencode-shell--turns)))
+      (should (eq (opencode-shell--turn-status turn) 'complete))
+      (should (opencode-shell--turn-locally-settled turn))
+      (should (equal (opencode-shell--turn-terminal-error turn)
+                     "MessageAbortedError: Aborted")))
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")))
+    (should (opencode-shell--turn-locally-settled (car opencode-shell--turns)))
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+    (let ((turn (car opencode-shell--turns)))
+      (should (eq (opencode-shell--turn-status turn) 'complete))
+      (should-not (opencode-shell--turn-locally-settled turn))
+      (should-not (opencode-shell--turn-terminal-error turn)))))
+
 (ert-deftest opencode-shell-completed-tool-alone-does-not-complete-turn ()
   (with-temp-buffer
     (opencode-shell-mode)
