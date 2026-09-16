@@ -1903,15 +1903,22 @@ request settles."
   "Update only TURN's immutable response block."
   (let ((begin (opencode-shell--turn-response-begin turn))
         (end (opencode-shell--turn-response-end turn))
+        (user-end-position
+         (marker-position (opencode-shell--turn-user-end turn)))
         (display (opencode-shell--response-display turn))
         (inhibit-read-only t))
     (unless (string= display (buffer-substring begin end))
-      (delete-region begin end)
-      (goto-char begin)
-      (insert display)
-      (add-text-properties begin (point)
+      (let ((position (marker-position begin)))
+        (delete-region begin end)
+        (goto-char position)
+        ;; Advance every downstream transcript/composer marker past the
+        ;; replacement, then restore this region's opening marker explicitly.
+        (insert-before-markers display)
+        (set-marker (opencode-shell--turn-user-end turn) user-end-position)
+        (set-marker begin position)
+        (add-text-properties begin (point)
                            '(read-only t rear-nonsticky (read-only face)))
-      (set-marker end (point)))))
+        (set-marker end (point))))))
 
 (defun opencode-shell--render-status-animation ()
   "Rerender only live transient status regions for the current frame."
@@ -1932,10 +1939,12 @@ request settles."
                (display (or (opencode-shell--permission-status-display) ""))
                (inhibit-read-only t))
           (unless (string= display (buffer-substring begin end))
-            (delete-region begin end)
-            (goto-char begin)
-            (insert display)
-            (set-marker end (point)))))))))
+            (let ((position (marker-position begin)))
+              (delete-region begin end)
+              (goto-char position)
+              (insert-before-markers display)
+              (set-marker begin position)
+              (set-marker end (point))))))))))
 
 (defun opencode-shell--animation-tick ()
   "Advance one UI-only spinner frame without issuing network requests."
