@@ -1968,6 +1968,18 @@
                    (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
                                "/work/"))))))
 
+(ert-deftest opencode-shell-persists-session-browser-locations ()
+  (let ((opencode-shell-recent-locations-file (make-temp-file "opencode-shell-locations-"))
+        (opencode-shell--recent-session-locations '(("local" . "/work/"))))
+    (unwind-protect
+        (progn
+          (opencode-shell--save-recent-session-locations)
+          (setq opencode-shell--recent-session-locations nil)
+          (should (equal (opencode-shell--load-recent-session-locations)
+                         '(("local" . "/work/")))))
+      (when (file-exists-p opencode-shell-recent-locations-file)
+        (delete-file opencode-shell-recent-locations-file)))))
+
 (ert-deftest opencode-shell-find-session-quit-is-silent ()
   (let ((opencode-shell-profiles (list opencode-shell-test--local-profile)) callback)
     (cl-letf (((symbol-function 'opencode-shell--request)

@@ -31,6 +31,11 @@
   :type '(choice (const :tag "Unscoped" nil) directory)
   :group 'opencode-shell)
 
+(defcustom opencode-shell-recent-locations-file
+  (locate-user-emacs-file "opencode-shell-locations.eld")
+  "File used to persist recently opened session browser locations."
+  :type 'file :group 'opencode-shell)
+
 (defcustom opencode-shell-auth-function nil
   "Optional function returning an Authorization header value or nil.
 The value is never included in client error messages."
@@ -449,8 +454,27 @@ and lifecycle keys."
 (defvar-local opencode-shell--table-render-width nil)
 (defvar-local opencode-shell--table-rerendering nil)
 (defvar opencode-shell--generation-counter 0)
-(defvar opencode-shell--recent-session-locations nil
-  "Session browser locations opened during this Emacs session.")
+(defun opencode-shell--load-recent-session-locations ()
+  "Read persisted session browser locations, returning nil on failure."
+  (condition-case nil
+      (when (file-readable-p opencode-shell-recent-locations-file)
+        (with-temp-buffer
+          (insert-file-contents opencode-shell-recent-locations-file)
+          (let ((value (read (current-buffer))))
+            (and (listp value) value))))
+    (error nil)))
+
+(defun opencode-shell--save-recent-session-locations ()
+  "Persist recently opened session browser locations."
+  (make-directory (file-name-directory opencode-shell-recent-locations-file) t)
+  (with-temp-file opencode-shell-recent-locations-file
+    (let ((print-length nil) (print-level nil))
+      (prin1 opencode-shell--recent-session-locations (current-buffer))
+      (insert "\n"))))
+
+(defvar opencode-shell--recent-session-locations
+  (opencode-shell--load-recent-session-locations)
+  "Persisted session browser locations opened by OpenCode Shell.")
 (defvar-local opencode-shell--filter "")
 
 (defface opencode-shell-user-face
@@ -731,7 +755,8 @@ Each retained session keeps its server-reported directory unchanged."
   (let* ((directory (concat (directory-file-name directory) "/"))
          (key (cons (opencode-shell--profile-key profile) directory)))
     (setq opencode-shell--recent-session-locations
-          (cons key (delete key opencode-shell--recent-session-locations)))))
+          (cons key (delete key opencode-shell--recent-session-locations)))
+    (unless noninteractive (opencode-shell--save-recent-session-locations))))
 
 (defun opencode-shell--sessions (directory &optional profile current-window)
   "Open PROFILE's session browser scoped to server-native DIRECTORY.
