@@ -391,8 +391,10 @@ and lifecycle keys."
   "Seconds between UI-only request-status animation frames."
   :type 'number :group 'opencode-shell)
 
-(defconst opencode-shell--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Deterministic frames used for transient request statuses.")
+(defconst opencode-shell--spinner-frames
+  ["▰" "▰▰" "▰▰▰" "▰▰▰▰" "▰▰▰▰▰"
+   "▰▰▰▰▰▰" "▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰▰▰"]
+  "Right-growing frames used for transient request statuses.")
 
 (defcustom opencode-shell-log-requests t
   "When non-nil, log API results without payloads or secrets."
@@ -2131,6 +2133,9 @@ request settles."
   (when full (opencode-shell--refresh-session-metadata))
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
+      (setq opencode-shell--animation-frame 0)
+      (when opencode-shell--turns
+        (opencode-shell--render-status-animation))
       (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
       (when opencode-shell--turns (opencode-shell--render-turns))
       (opencode-shell--guarded-request

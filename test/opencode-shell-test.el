@@ -1718,6 +1718,27 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest opencode-shell-history-poll-restarts-growing-animation ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--animation-frame 7
+          opencode-shell--turns
+          (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+    (opencode-shell--render-turns)
+    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
+      (opencode-shell--resync))
+    (should (= opencode-shell--animation-frame 0))
+    (should (string-match-p
+             (format "Waiting for response %s"
+                     (regexp-quote (aref opencode-shell--spinner-frames 0)))
+             (buffer-string)))
+    (opencode-shell--animation-tick)
+    (should (string-match-p
+             (format "Waiting for response %s"
+                     (regexp-quote (aref opencode-shell--spinner-frames 1)))
+             (buffer-string)))))
+
 (ert-deftest opencode-shell-overlapping-resync-does-not-advance-heartbeat ()
   (with-temp-buffer
     (opencode-shell-mode)

@@ -76,9 +76,9 @@ Each recurring poll is limited to message history, session status, and pending
 permissions; session metadata and model/agent capabilities are full-resync data.
 The transcript shows sending, waiting, receiving, recovering, aborting, or error
 state and never replaces an already completed response with stale data. Pending
-status uses a deterministic spinner that advances on the UI-only
+status uses a right-growing progress animation that advances on the UI-only
 `opencode-shell-animation-interval` (0.2 seconds by default). It restarts from
-its first frame whenever polling starts and does not issue requests. Reasoning-only
+its first frame for each network poll and does not issue requests. Reasoning-only
 updates show `Thinking`; text or tool activity shows `Receiving`.
 Assistant completion comes from the matching message's `time.completed`
 metadata together with either a genuinely terminal `finish` value or a
