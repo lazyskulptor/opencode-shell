@@ -1217,7 +1217,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   )
 
 (defun opencode-shell--cleanup ()
-  "Cancel this buffer's timers and invalidate outstanding callbacks."
+  "Cancel timers, close the session log, and invalidate callbacks."
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--refresh-table-layout t)
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
@@ -1227,6 +1227,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
         opencode-shell--animation-timer nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
+  (when opencode-shell--session-id
+    (when-let ((log-buffer (get-buffer (opencode-shell--log-buffer-name))))
+      (kill-buffer log-buffer)))
   (cl-incf opencode-shell--generation))
 
 (defun opencode-shell--stop-polling ()

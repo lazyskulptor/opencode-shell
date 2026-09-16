@@ -469,6 +469,22 @@
         (when-let ((buffer (get-buffer "*Opencode project shell*-log")))
           (kill-buffer buffer))))))
 
+(ert-deftest opencode-shell-killing-session-buffer-kills-its-log ()
+  (let ((shell (generate-new-buffer "*Opencode cleanup-log shell*"))
+        log)
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "session-1")
+            (opencode-shell--log "session request")
+            (setq log (get-buffer (opencode-shell--log-buffer-name))))
+          (should (buffer-live-p log))
+          (kill-buffer shell)
+          (should-not (buffer-live-p log)))
+      (when (buffer-live-p shell) (kill-buffer shell))
+      (when (buffer-live-p log) (kill-buffer log)))))
+
 (ert-deftest opencode-shell-api-log-separates-identical-session-ids-by-profile ()
   (let ((one (generate-new-buffer "*Opencode project shell*"))
         (two (generate-new-buffer "*Opencode project shell*")))
