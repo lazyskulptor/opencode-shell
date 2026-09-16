@@ -391,10 +391,8 @@ and lifecycle keys."
   "Seconds between UI-only request-status animation frames."
   :type 'number :group 'opencode-shell)
 
-(defconst opencode-shell--spinner-frames
-  ["▰" "▰▰" "▰▰▰" "▰▰▰▰" "▰▰▰▰▰"
-   "▰▰▰▰▰▰" "▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰▰" "▰▰▰▰▰▰▰▰▰▰"]
-  "Right-growing frames used for transient request statuses.")
+(defconst opencode-shell--spinner-character ?▰
+  "Character appended by each transient-status animation tick.")
 
 (defcustom opencode-shell-log-requests t
   "When non-nil, log API results without payloads or secrets."
@@ -1857,9 +1855,8 @@ request settles."
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current UI-only spinner frame."
   (format "%s %s\n\n" label
-          (aref opencode-shell--spinner-frames
-                (% opencode-shell--animation-frame
-                   (length opencode-shell--spinner-frames)))))
+          (make-string (1+ opencode-shell--animation-frame)
+                       opencode-shell--spinner-character)))
 
 (defun opencode-shell--transcript-window ()
   "Return the preferred live window displaying the current transcript."
@@ -1950,9 +1947,7 @@ request settles."
 
 (defun opencode-shell--animation-tick ()
   "Advance one UI-only spinner frame without issuing network requests."
-  (setq opencode-shell--animation-frame
-        (% (1+ opencode-shell--animation-frame)
-           (length opencode-shell--spinner-frames)))
+  (cl-incf opencode-shell--animation-frame)
   (opencode-shell--render-status-animation))
 
 (defun opencode-shell--render-turns ()

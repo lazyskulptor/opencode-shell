@@ -912,7 +912,7 @@
         (should (= 2 (length timers)))
         (should (member opencode-shell-poll-interval (mapcar #'cadr timers)))
         (should (member opencode-shell-animation-interval (mapcar #'cadr timers)))
-        (should (string-match-p (regexp-quote (aref opencode-shell--spinner-frames 0))
+        (should (string-match-p (regexp-quote (make-string 1 opencode-shell--spinner-character))
                                 (buffer-string)))
         (opencode-shell--start-polling)
         (should (= 2 (length timers)))
@@ -923,7 +923,7 @@
           (funcall (nth 3 animation) (nth 4 animation)))
         (should (= opencode-shell--animation-frame 1))
         (should-not network-calls)
-        (should (string-match-p (regexp-quote (aref opencode-shell--spinner-frames 1))
+        (should (string-match-p (regexp-quote (make-string 2 opencode-shell--spinner-character))
                                 (buffer-string)))
         (opencode-shell--stop-polling)
         (should-not opencode-shell--poll-timer)
@@ -1710,7 +1710,7 @@
             (should (= opencode-shell--poll-heartbeat 1))
             (should (equal (opencode-shell--status-display "Waiting")
                            (format "Waiting %s\n\n"
-                                   (aref opencode-shell--spinner-frames 0)))))
+                                   (make-string 1 opencode-shell--spinner-character)))))
           (with-current-buffer second
             (opencode-shell-mode)
             (should (= opencode-shell--poll-heartbeat 0))
@@ -1731,12 +1731,26 @@
     (should (= opencode-shell--animation-frame 0))
     (should (string-match-p
              (format "Waiting for response %s"
-                     (regexp-quote (aref opencode-shell--spinner-frames 0)))
+                     (regexp-quote (make-string 1 opencode-shell--spinner-character)))
              (buffer-string)))
     (opencode-shell--animation-tick)
     (should (string-match-p
              (format "Waiting for response %s"
-                     (regexp-quote (aref opencode-shell--spinner-frames 1)))
+                     (regexp-quote (make-string 2 opencode-shell--spinner-character)))
+             (buffer-string)))))
+
+(ert-deftest opencode-shell-animation-keeps-growing-until-next-poll ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--turns
+          (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+    (opencode-shell--render-turns)
+    (dotimes (_ 12) (opencode-shell--animation-tick))
+    (should (= opencode-shell--animation-frame 12))
+    (should (string-match-p
+             (format "Waiting for response %s"
+                     (regexp-quote
+                      (make-string 13 opencode-shell--spinner-character)))
              (buffer-string)))))
 
 (ert-deftest opencode-shell-overlapping-resync-does-not-advance-heartbeat ()
