@@ -1224,6 +1224,27 @@
                         (state . ((status . "running")))))))))
     (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
 
+(ert-deftest opencode-shell-error-terminated-message-shows-reason ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                      (time . ((created . 1) (completed . 2)))
+                      (error . ((name . "MessageAbortedError")
+                                (data . ((message . "Aborted")))))))
+             (parts . nil))))
+    (should (string-match-p "MessageAbortedError: Aborted" (buffer-string)))))
+
+(ert-deftest opencode-shell-normal-completion-has-no-error-suffix ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+    (should-not (opencode-shell--turn-terminal-error (car opencode-shell--turns)))
+    (should-not (string-match-p "\\[" (buffer-string)))))
+
 (ert-deftest opencode-shell-sanitized-polling-fixture-completes-authoritatively ()
   (with-temp-buffer
     (opencode-shell-mode)

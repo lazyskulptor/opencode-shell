@@ -1645,7 +1645,9 @@ request settles."
       (if (eq (opencode-shell--turn-status turn) 'complete)
           (let ((answer (opencode-shell--assistant-display-text turn)))
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
-                  (or answer "") "\n\n"))
+                  (or answer "")
+                  (opencode-shell--turn-terminal-error-suffix turn)
+                  "\n\n"))
         (insert (propertize
      (pcase (opencode-shell--turn-status turn)
        ('sending (opencode-shell--status-display "Sending"))
@@ -1684,7 +1686,8 @@ request settles."
   "Return the propertized response display for TURN."
   (if (eq (opencode-shell--turn-status turn) 'complete)
       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
-               (opencode-shell--assistant-display-text turn) "\n\n")
+               (opencode-shell--assistant-display-text turn)
+               (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
     (propertize
      (pcase (opencode-shell--turn-status turn)
        ('sending (opencode-shell--status-display "Sending"))
@@ -1725,6 +1728,12 @@ request settles."
     (if opencode-shell--table-render-width
         (opencode-shell-render-tables raw opencode-shell--table-render-width)
       raw)))
+
+(defun opencode-shell--turn-terminal-error-suffix (turn)
+  "Return a bounded, propertized terminal-error annotation for TURN, or \"\"."
+  (if-let ((label (opencode-shell--turn-terminal-error turn)))
+      (propertize (format "\n[%s]\n" label) 'font-lock-face 'opencode-shell-error-face)
+    ""))
 
 (defun opencode-shell--refresh-table-layout ()
   "Rerender completed tables when the transcript window width changes."
