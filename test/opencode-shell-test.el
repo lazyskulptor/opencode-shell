@@ -344,6 +344,7 @@
                (lambda (format-string &rest args)
                  (push (apply #'format format-string args) messages))))
       (opencode-shell--request "GET" "/ok" (lambda (value) (setq called (list value))))
+      (opencode-shell-async-drain (current-buffer))
       (should (equal called '(nil)))
       (setq called nil)
       (cl-letf (((symbol-function 'url-retrieve)
@@ -353,9 +354,29 @@
                      (setq-local url-http-response-status 300)
                      (funcall callback nil)))))
         (opencode-shell--request "GET" "/bad" (lambda (_) (setq called t))))
+      (opencode-shell-async-drain (current-buffer))
       (should-not called)
       (should (string-match-p "HTTP 300 request failed" (car messages)))
       (should-not (seq-some (lambda (text) (string-match-p "not success" text)) messages)))))
+
+(ert-deftest opencode-shell-async-queue-coalesces-and-drops-stale-work ()
+  (with-temp-buffer
+    (setq-local opencode-shell--generation 3)
+    (let (values)
+      (cl-letf (((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer)))
+                ((symbol-function 'cancel-timer) #'ignore))
+        (opencode-shell-async-enqueue (current-buffer) 'messages 3
+                                      (lambda (value) (push value values)) 'old)
+        (opencode-shell-async-enqueue (current-buffer) 'messages 3
+                                      (lambda (value) (push value values)) 'latest)
+        (opencode-shell-async-enqueue (current-buffer) 'status 2
+                                      (lambda (value) (push value values)) 'stale)
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal values '(latest)))
+        (should-not opencode-shell-async--queue)
+        (should-not opencode-shell-async--idle-timer)))))
 
 (ert-deftest opencode-shell-question-multiple-custom-semantics ()
   (let ((item '((id . "q")

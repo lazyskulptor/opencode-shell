@@ -23,6 +23,7 @@
 (require 'cl-lib)
 (require 'project)
 (require 'opencode-shell-render)
+(require 'opencode-shell-async)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
@@ -649,8 +650,11 @@ called after a transport, status, or decoding failure."
                       (when opencode-shell-log-requests
                          (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
                                              request-id (- (float-time) started) method path))
-                      (message "OpenCode: %s" (opencode-shell--bounded-error err))
-                     (when error-callback (funcall error-callback))))
+                       (message "OpenCode: %s" (opencode-shell--bounded-error err))
+                       (when error-callback
+                         (opencode-shell-async-enqueue
+                          origin (list 'request-error request-id)
+                          opencode-shell--generation error-callback))))
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
@@ -659,8 +663,11 @@ called after a transport, status, or decoding failure."
                               (when opencode-shell-log-requests
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
                                                      request-id code (- (float-time) started) method path))
-                              (message "OpenCode: HTTP %s request failed" code)
-                              (when error-callback (funcall error-callback))))
+                               (message "OpenCode: HTTP %s request failed" code)
+                               (when error-callback
+                                 (opencode-shell-async-enqueue
+                                  origin (list 'request-error request-id)
+                                  opencode-shell--generation error-callback))))
                         (let ((value (unless (= code 204)
                                        (opencode-shell--json-read-buffer))))
                           (when (buffer-live-p origin)
@@ -668,16 +675,21 @@ called after a transport, status, or decoding failure."
                               (when opencode-shell-log-requests
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
                                                      request-id code (- (float-time) started) method path))
-                              (funcall callback value))))))
+                               (opencode-shell-async-enqueue
+                                origin (list 'request request-id)
+                                opencode-shell--generation callback value))))))
                  (error
                   (when (buffer-live-p origin)
                     (with-current-buffer origin
                       (when opencode-shell-log-requests
                          (opencode-shell--log "OpenCode API #%d ← decode-error %.2fs [%s %s]"
                                              request-id (- (float-time) started) method path))
-                      (message "OpenCode: %s" (opencode-shell--bounded-error
-                                                (error-message-string err)))
-                      (when error-callback (funcall error-callback)))))))
+                       (message "OpenCode: %s" (opencode-shell--bounded-error
+                                                 (error-message-string err)))
+                       (when error-callback
+                         (opencode-shell-async-enqueue
+                          origin (list 'request-error request-id)
+                          opencode-shell--generation error-callback)))))))
            (kill-buffer response))))
      nil t t)))
 
@@ -1350,6 +1362,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--cleanup ()
   "Cancel timers, close the session log, and invalidate callbacks."
+  (opencode-shell-async-cancel)
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--refresh-table-layout t)
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
@@ -1366,6 +1379,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--stop-polling ()
   "Stop periodic network polling and UI animation in the current buffer."
+  (opencode-shell-async-cancel)
   (when (timerp opencode-shell--poll-timer)
     (cancel-timer opencode-shell--poll-timer))
   (when (timerp opencode-shell--animation-timer)
@@ -3141,6 +3155,7 @@ ACTIVE means that their session browser is already live."
 (defun opencode-shell-reload ()
   "Reload OpenCode Shell sources and refresh existing package buffers."
   (interactive)
+  (opencode-shell-async-reset)
   (let* ((main (or load-file-name (locate-library "opencode-shell")))
          (directory (and main (file-name-directory main)))
          (render (and directory (expand-file-name "opencode-shell-render.el" directory)))
