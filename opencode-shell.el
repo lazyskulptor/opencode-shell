@@ -455,6 +455,7 @@ and lifecycle keys."
 (defvar opencode-shell--transcript-end)
 
 (defvar-local opencode-shell--sessions nil)
+(defvar-local opencode-shell--show-child-sessions nil)
 (defvar-local opencode-shell--session-status nil)
 (defvar-local opencode-shell--directory nil)
 (defvar-local opencode-shell--session-id nil)
@@ -720,17 +721,26 @@ Each retained session keeps its server-reported directory unchanged."
               (truncate-string-to-width id 10 nil nil t)
               (or (opencode-shell--get session 'agent) "")
               (or model "") (opencode-shell--status id)
-              (if (> (opencode-shell--time session) 0)
-                  (format-time-string "%Y-%m-%d %H:%M" updated) "")))))
+               (if (> (opencode-shell--time session) 0)
+                   (format-time-string "%Y-%m-%d %H:%M" updated) "")))))
+
+(defun opencode-shell--child-session-p (session)
+  "Return non-nil when SESSION belongs to a parent session."
+  (let ((parent (or (opencode-shell--get session 'parentID)
+                    (opencode-shell--get session 'parentId))))
+    (and parent (not (equal parent "")))))
 
 (defun opencode-shell--session-entries ()
-  "Return filtered rows from the single normalized session collection."
+  "Return visible filtered rows from the normalized session collection."
   (mapcar #'opencode-shell--session-row
           (seq-filter
            (lambda (session)
-             (or (string-empty-p opencode-shell--filter)
-                 (string-match-p (regexp-quote (downcase opencode-shell--filter))
-                                 (downcase (opencode-shell--session-text session)))))
+             (and (or opencode-shell--show-child-sessions
+                      (not (opencode-shell--child-session-p session)))
+                  (or (string-empty-p opencode-shell--filter)
+                      (string-match-p
+                       (regexp-quote (downcase opencode-shell--filter))
+                       (downcase (opencode-shell--session-text session))))))
            opencode-shell--sessions)))
 
 (defvar opencode-shell-sessions-mode-map
@@ -739,6 +749,7 @@ Each retained session keeps its server-reported directory unchanged."
     (define-key map (kbd "RET") #'opencode-shell--open-at-point)
     (define-key map (kbd "c") #'opencode-shell--create-session)
     (define-key map (kbd "/") #'opencode-shell--filter)
+    (define-key map (kbd "T") #'opencode-shell--toggle-child-sessions)
     (define-key map (kbd "d") #'opencode-shell--delete-session)
     (define-key map (kbd "?") #'opencode-shell-sessions-help)
     map))
@@ -761,7 +772,8 @@ Each retained session keeps its server-reported directory unchanged."
       ("d" "Delete" opencode-shell--delete-session)]
      ["List"
       ("g" "Refresh" opencode-shell--refresh)
-      ("/" "Filter" opencode-shell--filter)]
+      ("/" "Filter" opencode-shell--filter)
+      ("T" "Toggle child sessions" opencode-shell--toggle-child-sessions)]
      ["Global"
       ("s" "Start (select profile)" opencode-shell-start)
        ("l" "Sessions (select profile)" opencode-shell)
@@ -786,6 +798,7 @@ Each retained session keeps its server-reported directory unchanged."
                        (,(kbd "g r") . opencode-shell--refresh)
                        (,(kbd "c") . opencode-shell--create-session)
                        (,(kbd "/") . opencode-shell--filter)
+                       (,(kbd "T") . opencode-shell--toggle-child-sessions)
                        (,(kbd "d") . opencode-shell--delete-session)
                        (,(kbd "?") . opencode-shell-sessions-help)))
       (evil-local-set-key 'normal (car binding) (cdr binding)))))
@@ -856,6 +869,16 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (setq opencode-shell--filter text
         tabulated-list-entries (opencode-shell--session-entries))
   (tabulated-list-print t))
+
+(defun opencode-shell--toggle-child-sessions ()
+  "Toggle display of child sessions in the current session browser."
+  (interactive)
+  (setq opencode-shell--show-child-sessions
+        (not opencode-shell--show-child-sessions)
+        tabulated-list-entries (opencode-shell--session-entries))
+  (tabulated-list-print t)
+  (message "Child sessions %s"
+           (if opencode-shell--show-child-sessions "shown" "hidden")))
 
 (defun opencode-shell--create-session ()
   "Create a session in the browser's fixed directory."

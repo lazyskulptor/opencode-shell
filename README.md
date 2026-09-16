@@ -65,7 +65,9 @@ owned process; use the explicit restart command to replace it.
 Each session browser is fixed to one server-native directory and encoded in its
 buffer identity. Use `/` for a text filter, `g` to
 refresh, `c` to create in that fixed directory, `RET` to open, and `d` for
-confirmed delete. `RET` uses the selected row's exact server-reported directory, which is
+confirmed delete. Child sessions created by subagents are hidden by default;
+use `T` to show or hide them without deleting their server history. `RET` uses
+the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
 and status requests. A transcript buffer has a multiline composer after
 `Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET`
