@@ -2504,22 +2504,37 @@ ACTIVE means that their session browser is already live."
            (when (= (cl-decf pending) 0)
              (let (entries)
                (maphash (lambda (_ entry) (push entry entries)) locations)
-               (setq entries (sort entries
-                                   (lambda (a b)
-                                     (or (and (nth 3 a) (not (nth 3 b)))
-                                         (and (eq (nth 3 a) (nth 3 b))
-                                              (> (nth 2 a) (nth 2 b)))))))
-               (unless entries (user-error "No OpenCode session locations"))
-                (condition-case nil
-                    (let* ((candidates
-                            (mapcar (lambda (entry)
-                                      (opencode-shell--session-browser-candidate
-                                       (nth 0 entry) (nth 1 entry) (nth 3 entry)))
-                                    entries))
-                           (choice (completing-read "OpenCode profile : path: " candidates nil t))
-                           (location (cdr (assoc choice candidates))))
-                      (opencode-shell--open-sessions
-                       (car location) (cdr location) t))
+                (setq entries (sort entries
+                                    (lambda (a b)
+                                      (if (eq (nth 3 a) (nth 3 b))
+                                          (string-lessp
+                                           (downcase (format "%s : %s"
+                                                             (opencode-shell--profile-name (nth 0 a))
+                                                             (nth 1 a)))
+                                           (downcase (format "%s : %s"
+                                                             (opencode-shell--profile-name (nth 0 b))
+                                                             (nth 1 b))))
+                                        (nth 3 a)))))
+                (unless entries (user-error "No OpenCode session locations"))
+                 (condition-case nil
+                     (let* ((active (seq-filter (lambda (entry) (nth 3 entry)) entries))
+                            (inactive (seq-remove (lambda (entry) (nth 3 entry)) entries))
+                            (make-candidate
+                             (lambda (entry)
+                               (opencode-shell--session-browser-candidate
+                                (nth 0 entry) (nth 1 entry) (nth 3 entry))))
+                            (separator (propertize "──────── inactive ────────" 'face 'shadow))
+                            (candidates
+                             (append (mapcar make-candidate active)
+                                     (and inactive (list (cons separator nil)))
+                                     (mapcar make-candidate inactive)))
+                            location)
+                       (while (null location)
+                         (let ((choice (completing-read
+                                        "OpenCode profile : path: " candidates nil t)))
+                           (setq location (cdr (assoc choice candidates)))))
+                       (opencode-shell--open-sessions
+                        (car location) (cdr location) t))
                   (quit nil))))))
       (dolist (buffer (buffer-list))
         (with-current-buffer buffer
