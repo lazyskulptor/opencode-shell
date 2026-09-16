@@ -60,9 +60,13 @@ update field.
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 
-The client deliberately uses `/session/:id/message` polling as its only
-transcript data path. It does not require `/event`; stable message identities and
-monotonic history reconciliation provide recovery after request interruption.
+The client uses `/event` as a shared asynchronous wake-up signal when a safe SSE
+connection is available. Event payloads never become authoritative transcript
+state: they schedule coalesced reads from `/session/:id/message`, `/permission`,
+`/question`, and `/session/status`. Stable message identities and monotonic
+history reconciliation remain authoritative and recover after event loss or
+request interruption. A low-frequency polling fallback preserves the same
+behavior when SSE is unavailable or disconnected.
 
 A session may be absent from `/session/status` while its history still contains an
 assistant message with a running tool and no `step-finish`. This is not completion:

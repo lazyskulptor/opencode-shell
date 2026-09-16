@@ -8,6 +8,9 @@
 ;;; Commentary:
 
 ;; Unofficial Emacs client for sessions owned by an OpenCode HTTP server.
+;; Network and process work must remain asynchronous; callbacks reconcile state
+;; and visible UI updates are coalesced at idle time.  See
+;; docs/async-runtime.md for the runtime invariants.
 
 ;;; Code:
 

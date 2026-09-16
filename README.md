@@ -181,6 +181,19 @@ The network cadence remains controlled independently by
 `opencode-shell-poll-interval` (2 seconds by default); spinner ticks are not logged
 as polls because they perform no network work.
 
+## Asynchronous runtime principles
+
+Interactive commands never wait synchronously for network or process I/O.
+Transport callbacks reconcile authoritative server snapshots but do not directly
+rewrite transcript or browser buffers. UI work is coalesced and applied at idle
+time, and hidden buffers retain dirty state without spending time rendering it.
+OpenCode's `/event` SSE endpoint is the preferred wake-up path, shared per server;
+low-frequency snapshot polling remains the recovery and compatibility path.
+
+These rules apply to all new runtime work. See
+[`docs/async-runtime.md`](docs/async-runtime.md) for the architecture, fallback,
+cancellation, cleanup, and review checklist.
+
 ## Security
 
 Use TLS and server/network access controls for remote servers. The legacy
