@@ -940,8 +940,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   [["Session"
     ("RET" "Submit" opencode-shell--submit)
     ("g" "Resync" opencode-shell--resync)
-    ("a" "Abort" opencode-shell--abort)
-    ("y" "Copy session ID" opencode-shell-copy-session-id)]
+    ("a" "Abort" opencode-shell--abort)]
    ["Options"
     ("m" "Model" opencode-shell--select-model)
     ("A" "Agent" opencode-shell--select-agent)
