@@ -732,6 +732,15 @@
       (should (equal "turn-1"
                      (opencode-shell--get (car opencode-shell--resolved-permissions)
                                           'after-turn-id)))
+      ;; The normal live callback path must anchor immediately; it must not
+      ;; depend on a later stale-marker or forced full rerender.
+      (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+      (should (< (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "PERMISSION ALWAYS"))
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "Waiting for response"))))
       (setq opencode-shell--rendered-turns
             (list (opencode-shell--make-turn :id "not-a-prefix")))
       (opencode-shell--render-turns)

@@ -2050,8 +2050,9 @@ request settles."
   (cl-incf opencode-shell--animation-frame)
   (opencode-shell--render-status-animation))
 
-(defun opencode-shell--render-turns ()
-  "Render immutable turn blocks without changing composer bytes or point."
+(defun opencode-shell--render-turns (&optional force)
+  "Render immutable turn blocks without changing composer bytes or point.
+When FORCE is non-nil, rebuild every turn so anchored event positions settle."
   (opencode-shell--without-user-undo
    (let* ((composer-offset (and (opencode-shell--in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
@@ -2063,7 +2064,8 @@ request settles."
             (seq-every-p #'opencode-shell--turn-rendered-p
                          opencode-shell--rendered-turns))
            (append-only
-            (and rendered-valid
+            (and (not force)
+                 rendered-valid
                  (<= known-count (length opencode-shell--turns))
                   (cl-every #'eq opencode-shell--rendered-turns
                            (seq-take opencode-shell--turns known-count)))))
@@ -2452,10 +2454,10 @@ request settles."
               (seq-remove (lambda (entry)
                             (equal id (opencode-shell--permission-id entry)))
                           opencode-shell--permissions))
+        (opencode-shell--render-turns t)
         (opencode-shell--refresh-permissions)
         (unless (opencode-shell--permission-blocked-p)
           (opencode-shell--resync))
-         (opencode-shell--render-permissions)
          (opencode-shell--log-lifecycle "permission-reply-ok")
          (message "Permission %s" reply))
      `((reply . ,reply)) nil
