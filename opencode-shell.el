@@ -2483,13 +2483,11 @@ auto-started."
   "Select a canonical PROFILE session and open or reuse its transcript."
   (interactive (list (opencode-shell--read-profile)))
   (let* ((profile (opencode-shell--resolve-or-read-profile profile))
-         (directory (opencode-shell--current-server-directory profile))
          (buffer (generate-new-buffer " *opencode-find-session*")))
     (with-current-buffer buffer
       (setq-local opencode-shell--profile profile
                   opencode-shell--base-url (or (plist-get profile :base-url)
-                                                opencode-shell-base-url)
-                  opencode-shell--directory directory)
+                                                opencode-shell-base-url))
       (opencode-shell--request
        "GET" "/session"
        (lambda (response)
@@ -2505,7 +2503,7 @@ auto-started."
                   (session-directory (opencode-shell--get session 'directory)))
              (unless session-directory (user-error "Session %s has no directory" id))
              (opencode-shell-open-session id session-directory profile))))
-       nil `((directory . ,directory) (limit . 1000))))))
+       nil '((limit . 1000))))))
 
 ;;;###autoload
 (defun opencode-shell-status (profile)

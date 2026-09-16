@@ -1900,6 +1900,21 @@
               (should (= (length (delete-dups buffers)) 2)))
           (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))))
 
+(ert-deftest opencode-shell-find-session-requests-profile-wide-history ()
+  (let (request request-buffer)
+    (cl-letf (((symbol-function 'opencode-shell--current-server-directory)
+               (lambda (&rest _) (ert-fail "find-session must not scope by directory")))
+              ((symbol-function 'opencode-shell--request)
+               (lambda (method path _callback &optional _body params)
+                 (setq request (list method path params)
+                       request-buffer (current-buffer)))))
+      (unwind-protect
+          (progn
+            (opencode-shell-find-session opencode-shell-test--local-profile)
+            (should (equal request '("GET" "/session" ((limit . 1000)))))
+            (should-not (buffer-local-value 'opencode-shell--directory request-buffer)))
+        (when (buffer-live-p request-buffer) (kill-buffer request-buffer))))))
+
 (ert-deftest opencode-shell-register-profile-commands-refreshes-and-isolates-profiles ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
