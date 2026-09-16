@@ -1467,10 +1467,15 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
       (set-marker opencode-shell--permission-begin (point))
       (dolist (item (seq-take (opencode-shell--deduplicate-permissions
                                opencode-shell--permissions) 1))
-        (let ((begin (point)))
+        (let ((begin (point))
+              (always (opencode-shell--get item 'always)))
           (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
                   "│ " (opencode-shell--permission-description item) "\n"
+                  (if always
+                      (format "│ Always scope: %s\n"
+                              (opencode-shell--permission-value always))
+                    "")
                   "│ C-c C-y once  C-c C-l always  C-c C-n reject\n"
                   "└───────────────────────────────────────────\n")
           (add-text-properties
@@ -2011,26 +2016,23 @@ request settles."
   (truncate-string-to-width
    (replace-regexp-in-string
     "[\n\r\t ]+" " "
-    (let ((print-length 8)
-          (print-level 4)
-          (print-escape-newlines t))
-      (prin1-to-string value)))
-   160 nil nil t))
+    (if (and (listp value) (seq-every-p #'stringp value))
+        (string-join value " · ")
+      (format "%s" value)))
+   120 nil nil t))
 
 (defun opencode-shell--permission-description (item)
   "Return concise, bounded user-facing context for permission ITEM."
-  (string-join
-   (delq nil
-         (list (format "%s" (or (opencode-shell--get item 'permission) "permission"))
-               (when-let ((patterns (opencode-shell--get item 'patterns)))
-                 (format "patterns=%s" (opencode-shell--permission-value patterns)))
-               (when-let ((always (opencode-shell--get item 'always)))
-                 (format "always=%s" (opencode-shell--permission-value always)))
-               (when-let ((tool (opencode-shell--get item 'tool)))
-                 (format "tool=%s" (opencode-shell--permission-value tool)))
-               (when-let ((metadata (opencode-shell--get item 'metadata)))
-                 (format "metadata=%s" (opencode-shell--permission-value metadata)))))
-   " | "))
+  (let* ((permission (format "%s" (or (opencode-shell--get item 'permission)
+                                        "permission")))
+         (metadata (opencode-shell--get item 'metadata))
+         (tool (opencode-shell--get item 'tool))
+         (context (or (opencode-shell--get metadata 'command)
+                      (opencode-shell--get tool 'command)
+                      (opencode-shell--get item 'patterns))))
+    (if context
+        (format "%s: %s" permission (opencode-shell--permission-value context))
+      permission)))
 
 (defun opencode-shell--permissions ()
   "Move to the first pending inline permission request."
