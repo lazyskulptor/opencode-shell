@@ -2088,24 +2088,30 @@ request settles."
   "Abort work in the current session."
   (interactive)
   (setq opencode-shell--request-status "aborting")
-  (when-let ((turn (car (last opencode-shell--turns))))
-    (unless (eq (opencode-shell--turn-status turn) 'complete)
-      (setf (opencode-shell--turn-status turn) 'aborting)
-      (opencode-shell--render-turns)))
-  (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
-                            (lambda (_)
-                              (when-let ((turn (car (last opencode-shell--turns))))
-                                (unless (eq (opencode-shell--turn-status turn) 'complete)
-                                  (setf (opencode-shell--turn-status turn) 'complete
-                                        (opencode-shell--turn-terminal-error turn)
-                                        "MessageAbortedError: Aborted"
-                                        (opencode-shell--turn-locally-settled turn) t)))
-                              (setq opencode-shell--submit-in-flight nil)
-                              (unless (opencode-shell--permission-blocked-p)
-                                (setq opencode-shell--composer-visible t))
-                              (opencode-shell--render-turns)
-                              (opencode-shell--log-lifecycle "abort-ack" t)
-                              (opencode-shell--resync)) '()))
+  (let ((target (car (last opencode-shell--turns))))
+    (when (and target
+               (not (eq (opencode-shell--turn-status target) 'complete)))
+      (setf (opencode-shell--turn-status target) 'aborting)
+      (opencode-shell--render-turns))
+    (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
+                             (lambda (_)
+                               (when (and target
+                                          (not (eq (opencode-shell--turn-status target)
+                                                   'complete)))
+                                 (setf (opencode-shell--turn-status target) 'complete
+                                       (opencode-shell--turn-terminal-error target)
+                                       "MessageAbortedError: Aborted"
+                                       (opencode-shell--turn-locally-settled target) t))
+                               (when (or (null target)
+                                         (equal opencode-shell--submit-in-flight
+                                                (opencode-shell--turn-id target)))
+                                 (setq opencode-shell--submit-in-flight nil))
+                               (unless (or opencode-shell--submit-in-flight
+                                           (opencode-shell--permission-blocked-p))
+                                 (setq opencode-shell--composer-visible t))
+                               (opencode-shell--render-turns)
+                               (opencode-shell--log-lifecycle "abort-ack" t)
+                               (opencode-shell--resync)) '())))
 
 (defun opencode-shell--choose-pending (kind callback)
   "Fetch pending KIND and invoke CALLBACK with the selected object."

@@ -1182,6 +1182,32 @@
       (should-not (opencode-shell--turn-locally-settled turn))
       (should-not (opencode-shell--turn-terminal-error turn)))))
 
+(ert-deftest opencode-shell-abort-callback-does-not-settle-newer-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((target (opencode-shell--make-turn
+                   :id "u1" :user "old" :status 'waiting))
+          callback)
+      (setq opencode-shell--session-id "s"
+            opencode-shell--submit-in-flight "u1"
+            opencode-shell--composer-visible nil
+            opencode-shell--turns (list target))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path cb &rest _) (setq callback cb)))
+                ((symbol-function 'opencode-shell--resync) #'ignore))
+        (opencode-shell--abort)
+        (let ((new (opencode-shell--make-turn
+                    :id "u2" :user "new" :status 'sending)))
+          (setq opencode-shell--turns (append opencode-shell--turns (list new))
+                opencode-shell--submit-in-flight "u2"
+                opencode-shell--request-status "sending")
+          (funcall callback nil)
+          (should (eq (opencode-shell--turn-status target) 'complete))
+          (should (opencode-shell--turn-locally-settled target))
+          (should (eq (opencode-shell--turn-status new) 'sending))
+          (should (equal opencode-shell--submit-in-flight "u2"))
+          (should-not opencode-shell--composer-visible))))))
+
 (ert-deftest opencode-shell-completed-tool-alone-does-not-complete-turn ()
   (with-temp-buffer
     (opencode-shell-mode)
