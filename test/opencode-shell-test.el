@@ -2109,6 +2109,28 @@
                     "/work/server/project/" nested)
                    "/work/server/project/"))))
 
+(ert-deftest opencode-shell-session-buffers-use-client-default-directory ()
+  (let ((profile opencode-shell-test--local-profile) browser transcript)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _)
+                 (if (with-current-buffer buffer
+                       (derived-mode-p 'opencode-shell-sessions-mode))
+                     (setq browser buffer)
+                   (setq transcript buffer))))
+              ((symbol-function 'opencode-shell--request) #'ignore)
+              ((symbol-function 'opencode-shell--resync) #'ignore)
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (unwind-protect
+          (progn
+            (opencode-shell--sessions "/server/project/src/" profile)
+            (opencode-shell-open-session "session" "/server/project/src/" profile)
+            (should (equal (buffer-local-value 'default-directory browser)
+                           "/client/project/src/"))
+            (should (equal (buffer-local-value 'default-directory transcript)
+                           "/client/project/src/")))
+        (when (buffer-live-p browser) (kill-buffer browser))
+        (when (buffer-live-p transcript) (kill-buffer transcript))))))
+
 (ert-deftest opencode-shell-profile-scopes-url-directory-workspace-and-auth ()
   (let ((opencode-shell-auth-source-function
          (lambda (profile)

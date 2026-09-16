@@ -317,6 +317,21 @@ and lifecycle keys."
              (expand-file-name (file-relative-name native root-native) workspace))
             (t native)))))
 
+(defun opencode-shell--client-directory (directory profile)
+  "Map server-native DIRECTORY to the path understood by Emacs for PROFILE."
+  (let* ((server-directory (expand-file-name (or directory default-directory)))
+         (workspace (and-let* ((path (plist-get profile :workspace)))
+                      (file-name-as-directory (expand-file-name path))))
+         (client-root (and-let* ((path (plist-get profile :directory)))
+                        (file-name-as-directory (expand-file-name path)))))
+    (file-name-as-directory
+     (if (and workspace client-root
+              (string-prefix-p workspace
+                               (file-name-as-directory server-directory)))
+         (expand-file-name (file-relative-name server-directory workspace)
+                           client-root)
+       server-directory))))
+
 (defun opencode-shell--profile-directory (profile directory)
   "Return DIRECTORY in PROFILE server-native form."
   (opencode-shell--server-directory directory profile))
@@ -780,6 +795,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory (file-name-as-directory directory))
+      (setq-local default-directory
+                  (opencode-shell--client-directory directory profile))
       (opencode-shell--refresh))
     (if current-window (switch-to-buffer buffer) (pop-to-buffer buffer))))
 
@@ -1082,6 +1099,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                                                 opencode-shell-base-url))
       (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
+      (setq-local default-directory
+                  (opencode-shell--client-directory resolved-directory profile))
       (setq-local opencode-shell--session-title nil)
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
