@@ -387,6 +387,13 @@ and lifecycle keys."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
+(defcustom opencode-shell-animation-interval 0.2
+  "Seconds between UI-only request-status animation frames."
+  :type 'number :group 'opencode-shell)
+
+(defconst opencode-shell--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Deterministic frames used for transient request statuses.")
+
 (defcustom opencode-shell-log-requests t
   "When non-nil, log API results without payloads or secrets."
   :type 'boolean :group 'opencode-shell)
@@ -437,6 +444,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--poll-timer nil)
+(defvar-local opencode-shell--animation-timer nil)
+(defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--generation 0)
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
@@ -1099,32 +1108,48 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   )
 
 (defun opencode-shell--cleanup ()
-  "Cancel this buffer's timer and invalidate outstanding callbacks."
+  "Cancel this buffer's timers and invalidate outstanding callbacks."
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--refresh-table-layout t)
   (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
-  (setq opencode-shell--poll-timer nil)
+  (when (timerp opencode-shell--animation-timer)
+    (cancel-timer opencode-shell--animation-timer))
+  (setq opencode-shell--poll-timer nil
+        opencode-shell--animation-timer nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
   (cl-incf opencode-shell--generation))
 
 (defun opencode-shell--stop-polling ()
-  "Stop periodic polling in the current session buffer."
+  "Stop periodic network polling and UI animation in the current buffer."
   (when (timerp opencode-shell--poll-timer)
     (cancel-timer opencode-shell--poll-timer))
-  (setq opencode-shell--poll-timer nil)
+  (when (timerp opencode-shell--animation-timer)
+    (cancel-timer opencode-shell--animation-timer))
+  (setq opencode-shell--poll-timer nil
+        opencode-shell--animation-timer nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
 (defun opencode-shell--start-polling ()
-  "Start periodic polling in the current session buffer if needed."
+  "Start periodic network polling and UI animation if needed."
   (unless (timerp opencode-shell--poll-timer)
     (let ((buffer (current-buffer)))
+      (setq opencode-shell--animation-frame 0)
+      (opencode-shell--render-status-animation)
       (setq opencode-shell--poll-timer
             (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
                          (lambda (target)
                            (when (buffer-live-p target)
                               (with-current-buffer target (opencode-shell--resync nil))))
-                          buffer))
+                          buffer)
+            opencode-shell--animation-timer
+            (run-at-time opencode-shell-animation-interval
+                         opencode-shell-animation-interval
+                         (lambda (target)
+                           (when (buffer-live-p target)
+                             (with-current-buffer target
+                               (opencode-shell--animation-tick))))
+                         buffer))
       (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload
@@ -1819,8 +1844,11 @@ request settles."
     (opencode-shell--response-display turn)))
 
 (defun opencode-shell--status-display (label)
-  "Return LABEL with the current history-poll heartbeat."
-  (format "%s %s\n\n" label (make-string (1+ (% opencode-shell--poll-heartbeat 3)) ?·)))
+  "Return LABEL with the current UI-only spinner frame."
+  (format "%s %s\n\n" label
+          (aref opencode-shell--spinner-frames
+                (% opencode-shell--animation-frame
+                   (length opencode-shell--spinner-frames)))))
 
 (defun opencode-shell--transcript-window ()
   "Return the preferred live window displaying the current transcript."
@@ -1875,6 +1903,37 @@ request settles."
       (add-text-properties begin (point)
                            '(read-only t rear-nonsticky (read-only face)))
       (set-marker end (point)))))
+
+(defun opencode-shell--render-status-animation ()
+  "Rerender only live transient status regions for the current frame."
+  (opencode-shell--without-user-undo
+    (let ((permission-turn (opencode-shell--permission-status-turn)))
+      (save-excursion
+        (dolist (turn opencode-shell--rendered-turns)
+          (when (and (not (eq turn permission-turn))
+                     (not (eq (opencode-shell--turn-status turn) 'complete))
+                     (opencode-shell--turn-rendered-p turn))
+            (opencode-shell--update-turn-response turn)))
+      (when (and (markerp opencode-shell--permission-status-begin)
+                 (marker-position opencode-shell--permission-status-begin)
+                 (markerp opencode-shell--permission-status-end)
+                 (marker-position opencode-shell--permission-status-end))
+        (let* ((begin opencode-shell--permission-status-begin)
+               (end opencode-shell--permission-status-end)
+               (display (or (opencode-shell--permission-status-display) ""))
+               (inhibit-read-only t))
+          (unless (string= display (buffer-substring begin end))
+            (delete-region begin end)
+            (goto-char begin)
+            (insert display)
+            (set-marker end (point)))))))))
+
+(defun opencode-shell--animation-tick ()
+  "Advance one UI-only spinner frame without issuing network requests."
+  (setq opencode-shell--animation-frame
+        (% (1+ opencode-shell--animation-frame)
+           (length opencode-shell--spinner-frames)))
+  (opencode-shell--render-status-animation))
 
 (defun opencode-shell--render-turns ()
   "Render immutable turn blocks without changing composer bytes or point."

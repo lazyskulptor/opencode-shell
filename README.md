@@ -74,11 +74,12 @@ Each prompt carries a stable message ID. Periodic history polling is the sole
 transcript data path and reconciles responses without deleting known history.
 Each recurring poll is limited to message history, session status, and pending
 permissions; session metadata and model/agent capabilities are full-resync data.
-The transcript shows stable sending, waiting, receiving, recovering, aborting,
-or error state and never replaces an already completed response with stale data.
-Pending status cycles `·`, `··`, `···` once per message-history poll. Reasoning-only
-updates show `Thinking`; text or tool activity shows `Receiving`. The dots indicate
-polling activity, not estimated progress.
+The transcript shows sending, waiting, receiving, recovering, aborting, or error
+state and never replaces an already completed response with stale data. Pending
+status uses a deterministic spinner that advances on the UI-only
+`opencode-shell-animation-interval` (0.2 seconds by default). It restarts from
+its first frame whenever polling starts and does not issue requests. Reasoning-only
+updates show `Thinking`; text or tool activity shows `Receiving`.
 Assistant completion comes from the matching message's `time.completed`
 metadata together with either a genuinely terminal `finish` value or a
 terminal `error`; `step-finish` is retained only as compatible evidence when
@@ -154,6 +155,9 @@ counts, pending permission count, and submit reconciliation state. Routine
 unchanged polls are coalesced. Logs intentionally exclude message/reasoning text,
 tool input/output, permission descriptions and patterns, request bodies, query
 parameters, directories, authorization values, and server error bodies.
+The network cadence remains controlled independently by
+`opencode-shell-poll-interval` (2 seconds by default); spinner ticks are not logged
+as polls because they perform no network work.
 
 ## Security
 
