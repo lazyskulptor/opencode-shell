@@ -113,7 +113,7 @@
     (should (eq (plist-get (plist-get result :error) :reason) 'content-type))))
 
 (ert-deftest opencode-shell-sse-parser-rejects-malformed-and-oversized-chunks ()
-  (dolist (body '("ZZ\r\n" "5\r\nabcdeXX"))
+  (dolist (body '("ZZ\r\n" "5\r\nabcdeXX" "1;bad@=x\r\na\r\n"))
     (let ((result
            (opencode-shell-sse-test--feed
             (list (concat "HTTP/1.1 200 OK\r\n"
@@ -161,6 +161,7 @@
                (lambda (&rest arguments)
                  (funcall (plist-get arguments :sentinel) 'dead "failed")
                  'dead))
+              ((symbol-function 'process-status) (lambda (_) 'failed))
               ((symbol-function 'process-live-p) (lambda (_) nil))
               ((symbol-function 'delete-process) #'ignore))
       (let ((connection
@@ -170,6 +171,72 @@
         (should (eq (opencode-shell-sse-connection-state connection) 'disconnected))
         (should (= (length errors) 1))
         (should (= (length cancelled) 1))))))
+
+(ert-deftest opencode-shell-sse-transport-ignores-nonterminal-sentinel ()
+  (let (sentinel errors)
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'header-timer))
+              ((symbol-function 'timerp) (lambda (timer) (eq timer 'header-timer)))
+              ((symbol-function 'make-network-process)
+               (lambda (&rest arguments)
+                 (setq sentinel (plist-get arguments :sentinel))
+                 'stream))
+              ((symbol-function 'process-status) (lambda (_) 'open))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'process-send-string) #'ignore))
+      (let ((connection
+             (opencode-shell-sse-start
+              "http://localhost:4199/event" nil #'ignore
+              (lambda (error) (push error errors)))))
+        (funcall sentinel 'stream "open")
+        (should (eq (opencode-shell-sse-connection-state connection) 'connecting))
+        (should-not errors)))))
+
+(ert-deftest opencode-shell-sse-transport-classifies-partial-eof-as-protocol-error ()
+  (let (filter sentinel errors)
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'header-timer))
+              ((symbol-function 'timerp) (lambda (timer) (eq timer 'header-timer)))
+              ((symbol-function 'cancel-timer) #'ignore)
+              ((symbol-function 'make-network-process)
+               (lambda (&rest arguments)
+                 (setq filter (plist-get arguments :filter)
+                       sentinel (plist-get arguments :sentinel))
+                 'stream))
+              ((symbol-function 'process-status) (lambda (_) 'closed))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'delete-process) #'ignore)
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'process-send-string) #'ignore))
+      (let ((connection
+             (opencode-shell-sse-start
+              "http://localhost:4199/event" nil #'ignore
+              (lambda (error) (push error errors)))))
+        (funcall filter 'stream "HTTP/1.1 200 OK\r\nContent-Type: text/")
+        (funcall sentinel 'stream "closed")
+        (should (eq (plist-get (car errors) :type) 'protocol))
+        (should (eq (plist-get (car errors) :reason) 'incomplete-headers))
+        (should (eq (opencode-shell-sse-connection-state connection)
+                    'disconnected))))))
+
+(ert-deftest opencode-shell-sse-transport-stops-delivery-after-callback-close ()
+  (let (connection delivered)
+    (setq connection
+          (opencode-shell-sse--make-connection
+           :token 'token :state 'streaming :process 'stream
+           :parser (let* ((parser (opencode-shell-sse-parser-create))
+                          (result (opencode-shell-sse-parser-feed
+                                   parser
+                                   "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")))
+                     (plist-get result :parser))
+           :on-event (lambda (event)
+                       (push (plist-get event :data) delivered)
+                       (opencode-shell-sse-stop connection))
+           :on-error #'ignore))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil)))
+      (opencode-shell-sse--filter
+       connection 'token 'stream "data: first\n\ndata: second\n\n"))
+    (should (equal delivered '("first")))
+    (should (eq (opencode-shell-sse-connection-state connection) 'closed))))
 
 (ert-deftest opencode-shell-sse-transport-stop-and-stale-filter-are-idempotent ()
   (let (filter errors (deleted 0))

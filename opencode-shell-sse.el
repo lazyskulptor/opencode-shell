@@ -100,6 +100,68 @@ Return nil on success or a protocol error plist."
         (if (string-prefix-p " " value) (substring value 1) value))
     ""))
 
+(defun opencode-shell-sse--token-character-p (character)
+  "Return non-nil when CHARACTER is valid in an HTTP token."
+  (or (and (>= character ?0) (<= character ?9))
+      (and (>= character ?A) (<= character ?Z))
+      (and (>= character ?a) (<= character ?z))
+      (memq character '(?! ?# ?$ ?% ?& ?' ?* ?+ ?- ?. ?^ ?_ ?` ?| ?~))))
+
+(defun opencode-shell-sse--chunk-size (line)
+  "Return the hexadecimal chunk size from valid LINE, or nil."
+  (when (string-match "\\`[[:xdigit:]]+" line)
+    (let ((hex-end (match-end 0))
+          (index (match-end 0))
+          (length (length line))
+          valid)
+      (setq valid t)
+      (while (and valid (< index length))
+        (if (/= (aref line index) ?\;)
+            (setq valid nil)
+          (setq index (1+ index))
+          (let ((start index))
+            (while (and (< index length)
+                        (opencode-shell-sse--token-character-p
+                         (aref line index)))
+              (setq index (1+ index)))
+            (when (= start index)
+              (setq valid nil)))
+          (when (and valid (< index length) (= (aref line index) ?=))
+            (setq index (1+ index))
+            (if (and (< index length) (= (aref line index) ?\"))
+                (let ((closed nil))
+                  (setq index (1+ index))
+                  (while (and valid (< index length) (not closed))
+                    (let ((character (aref line index)))
+                      (cond
+                       ((= character ?\")
+                        (setq closed t index (1+ index)))
+                       ((= character ?\\)
+                        (setq index (1+ index))
+                        (if (or (>= index length)
+                                (let ((escaped (aref line index)))
+                                  (not (or (= escaped ?\t)
+                                           (and (>= escaped 32)
+                                                (<= escaped 126))))))
+                            (setq valid nil)
+                          (setq index (1+ index))))
+                       ((or (= character ?\t)
+                            (= character 32)
+                            (= character 33)
+                            (and (>= character 35) (<= character 91))
+                            (and (>= character 93) (<= character 126)))
+                        (setq index (1+ index)))
+                       (t (setq valid nil)))))
+                  (unless closed (setq valid nil)))
+              (let ((start index))
+                (while (and (< index length)
+                            (opencode-shell-sse--token-character-p
+                             (aref line index)))
+                  (setq index (1+ index)))
+                (when (= start index)
+                  (setq valid nil)))))))
+      (when valid (substring line 0 hex-end)))))
+
 (defun opencode-shell-sse--frame-event (frame)
   "Convert a complete SSE FRAME into an event plist, or nil."
   (let (data event id saw-data)
@@ -151,11 +213,11 @@ Return nil on success or a protocol error plist."
                (cond
                 ((> (length line) 8192)
                  (setq error (opencode-shell-sse--error parser 'chunk-line-too-large)))
-                ((not (string-match
-                       "\\`\\([[:xdigit:]]+\\)\\(?:;[^\r\n]*\\)?\\'" line))
+                ((not (opencode-shell-sse--chunk-size line))
                  (setq error (opencode-shell-sse--error parser 'chunk-size)))
                 (t
-                 (let ((size (string-to-number (match-string 1 line) 16)))
+                 (let ((size (string-to-number
+                              (opencode-shell-sse--chunk-size line) 16)))
                    (if (> size (opencode-shell-sse-parser-max-chunk-bytes parser))
                        (setq error (opencode-shell-sse--error parser 'chunk-too-large))
                      (setq input (substring input (+ end 2))
@@ -261,12 +323,19 @@ not mutated; the returned parser is the next state."
       ('headers
        (setq error (opencode-shell-sse--error next 'incomplete-headers)))
       ('body
-       (setq error (opencode-shell-sse--error next 'unexpected-eof))))
+       (unless
+           (and (string-empty-p (opencode-shell-sse-parser-input next))
+                (string-empty-p (opencode-shell-sse-parser-sse-input next))
+                (or (eq (opencode-shell-sse-parser-transfer next) 'identity)
+                    (and (eq (opencode-shell-sse-parser-transfer next) 'chunked)
+                         (eq (opencode-shell-sse-parser-chunk-state next) 'size)
+                         (null (opencode-shell-sse-parser-chunk-size next)))))
+         (setq error (opencode-shell-sse--error next 'unexpected-eof)))))
     (list :parser next :events nil :error error)))
 
 (cl-defstruct (opencode-shell-sse-connection
                (:constructor opencode-shell-sse--make-connection))
-  token state process parser header-timer on-event on-error)
+  token state process parser header-timer on-open on-event on-error)
 
 (defun opencode-shell-sse--valid-request-p (host path headers)
   "Return non-nil when HOST, PATH, and HEADERS are safe for raw HTTP."
@@ -326,9 +395,13 @@ not mutated; the returned parser is the next state."
       (when (and (eq before 'headers)
                  (eq (opencode-shell-sse-parser-phase parser) 'body))
         (opencode-shell-sse--cancel-header-timer connection)
-        (setf (opencode-shell-sse-connection-state connection) 'streaming))
+        (setf (opencode-shell-sse-connection-state connection) 'streaming)
+        (when (opencode-shell-sse-connection-on-open connection)
+          (funcall (opencode-shell-sse-connection-on-open connection))))
       (dolist (event (plist-get result :events))
-        (funcall (opencode-shell-sse-connection-on-event connection) event))
+        (when (and (eq token (opencode-shell-sse-connection-token connection))
+                   (eq (opencode-shell-sse-connection-state connection) 'streaming))
+          (funcall (opencode-shell-sse-connection-on-event connection) event)))
       (cond
        (error
         (opencode-shell-sse--finish connection token 'disconnected error))
@@ -341,12 +414,18 @@ not mutated; the returned parser is the next state."
   (when (and (eq token (opencode-shell-sse-connection-token connection))
              (memq (opencode-shell-sse-connection-state connection)
                    '(connecting streaming))
+             (memq (process-status process) '(closed failed exit signal))
              (or (null (opencode-shell-sse-connection-process connection))
                  (eq process (opencode-shell-sse-connection-process connection))))
     (when (null (opencode-shell-sse-connection-process connection))
       (setf (opencode-shell-sse-connection-process connection) process))
-    (opencode-shell-sse--finish
-     connection token 'disconnected '(:type transport :reason closed))))
+    (let* ((finish (opencode-shell-sse-parser-finish
+                    (opencode-shell-sse-connection-parser connection)))
+           (error (or (plist-get finish :error)
+                      '(:type transport :reason closed))))
+      (setf (opencode-shell-sse-connection-parser connection)
+            (plist-get finish :parser))
+      (opencode-shell-sse--finish connection token 'disconnected error))))
 
 (defun opencode-shell-sse--header-timeout (connection token)
   "Expire CONNECTION's HTTP header deadline for TOKEN."
@@ -370,7 +449,7 @@ not mutated; the returned parser is the next state."
             "Connection: keep-alive\r\n\r\n")))
 
 (cl-defun opencode-shell-sse-start
-    (url headers on-event on-error &key (header-timeout 10))
+    (url headers on-event on-error &key (header-timeout 10) on-open)
   "Open URL as an SSE stream and return its connection object.
 HEADERS is an alist of additional HTTP headers.  ON-EVENT receives parsed
 event plists; ON-ERROR receives typed error plists."
@@ -388,7 +467,8 @@ event plists; ON-ERROR receives typed error plists."
           (opencode-shell-sse--make-connection
            :token token :state 'connecting :process nil
            :parser (opencode-shell-sse-parser-create)
-           :header-timer nil :on-event on-event :on-error on-error)))
+           :header-timer nil :on-open on-open
+           :on-event on-event :on-error on-error)))
     (if (not (and (string-equal scheme "http")
                   (opencode-shell-sse--valid-request-p host path headers)))
         (progn

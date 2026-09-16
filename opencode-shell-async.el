@@ -108,6 +108,14 @@
       (opencode-shell-async--runtime-log runtime "transport=sse wake=event")
       (opencode-shell-async--deliver-runtime runtime 'event))))
 
+(defun opencode-shell-async--transport-open (key attempt)
+  "Record a successful SSE handshake for KEY and ATTEMPT."
+  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+    (when (eq attempt (plist-get runtime :attempt))
+      (setf (plist-get runtime :backoff) 1
+            (plist-get runtime :failures) 0)
+      (opencode-shell-async--runtime-log runtime "transport=sse state=connected"))))
+
 (defun opencode-shell-async--transport-error (key attempt error)
   "Apply typed transport ERROR to KEY runtime's current ATTEMPT."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
@@ -147,7 +155,10 @@
                (lambda (event)
                  (opencode-shell-async--transport-event key attempt event))
                (lambda (error)
-                 (opencode-shell-async--transport-error key attempt error))))
+                 (opencode-shell-async--transport-error key attempt error))
+               :on-open
+               (lambda ()
+                 (opencode-shell-async--transport-open key attempt))))
         (when (and (eq attempt (plist-get runtime :attempt))
                    (memq (opencode-shell-sse-connection-state connection)
                          '(connecting streaming)))

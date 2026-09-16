@@ -2553,6 +2553,17 @@
           (should-not (plist-get runtime :reconnect-timer)))
       (remhash key opencode-shell-async--runtimes))))
 
+(ert-deftest opencode-shell-sse-handshake-resets-failure-budget-without-event ()
+  (let* ((key 'quiet-stream)
+         (runtime (list :attempt 'attempt :failures 4 :backoff 16)))
+    (puthash key runtime opencode-shell-async--runtimes)
+    (unwind-protect
+        (progn
+          (opencode-shell-async--transport-open key 'attempt)
+          (should (zerop (plist-get runtime :failures)))
+          (should (= (plist-get runtime :backoff) 1)))
+      (remhash key opencode-shell-async--runtimes))))
+
 (ert-deftest opencode-shell-async-rejects-nonpositive-runtime-intervals ()
   (dolist (interval '(0 -1))
     (should-error
