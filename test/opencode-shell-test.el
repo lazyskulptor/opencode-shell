@@ -114,8 +114,7 @@
                 (opencode-shell-test--complete-user-turn "msg-2" "same prompt")))
     (should (equal (opencode-shell--fork-candidates)
                    '(("Before prompt 1: same prompt" . "msg-1")
-                     ("Before prompt 2: same prompt" . "msg-2")
-                     ("End of session (copy all history)"))))))
+                     ("Before prompt 2: same prompt" . "msg-2"))))))
 
 (ert-deftest opencode-shell-fork-session-selects-boundary-and-opens-result ()
   (with-temp-buffer
@@ -146,23 +145,6 @@
                      (list "ses-fork" "/server/project/"
                            opencode-shell-test--local-profile))))))
 
-(ert-deftest opencode-shell-fork-session-can-copy-all-history ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq-local opencode-shell--session-id "ses-source"
-                opencode-shell--directory "/server/project/"
-                opencode-shell--turns
-                (list (opencode-shell-test--complete-user-turn "msg-1" "first")))
-    (let (body params)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt candidates &rest _) (car (car (last candidates)))))
-                ((symbol-function 'opencode-shell--request)
-                 (lambda (_method _path _callback &optional request-body request-params _error)
-                   (setq body request-body params request-params))))
-        (opencode-shell-fork-session))
-      (should-not body)
-      (should-not params))))
-
 (ert-deftest opencode-shell-fork-session-rejects-active-interaction ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -171,108 +153,49 @@
     (should-error (opencode-shell-fork-session) :type 'user-error))
   (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-f"))))
 
-(ert-deftest opencode-shell-move-directory-copies-before-deleting-source ()
-  (let ((buffer (generate-new-buffer " *opencode-move-success*"))
-        requests opened)
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (opencode-shell-mode)
-            (setq-local opencode-shell--session-id "ses-source"
-                        opencode-shell--profile opencode-shell-test--local-profile
-                        opencode-shell--directory "/server/project/old/"
-                        opencode-shell--turns
-                        (list (opencode-shell-test--complete-user-turn "msg-1" "done")))
-            (cl-letf (((symbol-function 'read-directory-name)
-                       (lambda (&rest _) "/client/project/new/nested/"))
-                      ((symbol-function 'opencode-shell--project-directory)
-                       (lambda (&optional _) "/client/project/new/"))
-                      ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _) (ert-fail "move must not ask for a fork point")))
-                      ((symbol-function 'opencode-shell--request)
-                       (lambda (method path callback &optional body params error)
-                         (push (list method path body params) requests)
-                         (if (equal method "POST")
-                             (funcall callback '((id . "ses-moved")
-                                                 (directory . "/server/project/new/")))
-                           (should (equal method "DELETE"))
-                           (should (functionp error))
-                           (funcall callback nil))))
-                      ((symbol-function 'opencode-shell-open-session)
-                       (lambda (id directory profile)
-                         (setq opened (list id directory profile)))))
-              (opencode-shell-move-session-directory)))
-          (should (equal (nreverse requests)
-                         '(("POST" "/session/ses-source/fork" nil
-                            ((directory . "/server/project/new/")))
-                           ("DELETE" "/session/ses-source" nil
-                            ((directory . "/server/project/old/"))))))
-          (should (equal opened
-                         (list "ses-moved" "/server/project/new/"
-                               opencode-shell-test--local-profile)))
-          (should-not (buffer-live-p buffer)))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
-(ert-deftest opencode-shell-move-directory-keeps-source-on-delete-failure ()
-  (let ((buffer (generate-new-buffer " *opencode-move-partial*"))
-        opened notice)
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (opencode-shell-mode)
-            (setq-local opencode-shell--session-id "ses-source"
-                        opencode-shell--profile opencode-shell-test--remote-profile
-                        opencode-shell--directory "/srv/project/old/"
-                        opencode-shell--turns nil)
-            (cl-letf (((symbol-function 'read-directory-name)
-                       (lambda (&rest _) "/ssh:code.example.test:/srv/project/new/"))
-                      ((symbol-function 'opencode-shell--project-directory)
-                       (lambda (&optional directory) directory))
-                      ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                      ((symbol-function 'opencode-shell--request)
-                       (lambda (method _path callback &optional _body _params error)
-                         (if (equal method "POST")
-                             (funcall callback '((id . "ses-copy")
-                                                 (directory . "/srv/project/new/")))
-                           (funcall error))))
-                      ((symbol-function 'opencode-shell-open-session)
-                       (lambda (id directory profile)
-                         (setq opened (list id directory profile))))
-                      ((symbol-function 'message)
-                       (lambda (format-string &rest args)
-                         (setq notice (apply #'format format-string args)))))
-              (opencode-shell-move-session-directory)))
-          (should (buffer-live-p buffer))
-          (should (equal opened
-                         (list "ses-copy" "/srv/project/new/"
-                               opencode-shell-test--remote-profile)))
-          (should (string-match-p "source deletion failed" notice)))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
-(ert-deftest opencode-shell-move-directory-cancel-and-copy-failure-preserve-source ()
-  (dolist (scenario '(cancel copy-failure))
-    (with-temp-buffer
-      (opencode-shell-mode)
+(ert-deftest opencode-shell-move-directory-updates-current-buffer-only ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (insert "draft")
+    (let* ((buffer (current-buffer))
+           (turns (list (opencode-shell-test--complete-user-turn "msg-1" "done")))
+           (poll-timer 'existing-poll-timer))
       (setq-local opencode-shell--session-id "ses-source"
                   opencode-shell--profile opencode-shell-test--local-profile
-                  opencode-shell--directory "/server/project/old/")
-      (let ((requests 0) opened)
-        (cl-letf (((symbol-function 'read-directory-name)
-                   (lambda (&rest _) "/client/project/new/"))
-                  ((symbol-function 'opencode-shell--project-directory)
-                   (lambda (&optional _) "/client/project/new/"))
-                  ((symbol-function 'yes-or-no-p)
-                   (lambda (&rest _) (eq scenario 'copy-failure)))
-                  ((symbol-function 'opencode-shell--request)
-                   (lambda (_method _path _callback &optional _body _params error)
-                     (cl-incf requests)
-                     (funcall error)))
-                  ((symbol-function 'opencode-shell-open-session)
-                   (lambda (&rest _) (setq opened t))))
-          (opencode-shell-move-session-directory))
-        (should (= requests (if (eq scenario 'cancel) 0 1)))
-        (should-not opened)))))
+                  opencode-shell--directory "/server/project/old/"
+                  opencode-shell--turns turns
+                  opencode-shell--poll-timer poll-timer)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (&rest _) "/client/project/new/nested/"))
+                ((symbol-function 'opencode-shell--project-directory)
+                 (lambda (&optional _) "/client/project/new/"))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (&rest _) (ert-fail "directory change must not request")))
+                ((symbol-function 'opencode-shell-open-session)
+                 (lambda (&rest _) (ert-fail "directory change must not reopen"))))
+        (opencode-shell-move-session-directory))
+      (should (eq (current-buffer) buffer))
+      (should (equal opencode-shell--session-id "ses-source"))
+      (should (eq opencode-shell--turns turns))
+      (should (eq opencode-shell--poll-timer poll-timer))
+      (should (equal (opencode-shell--composer-text) "draft"))
+      (should (equal opencode-shell--directory "/server/project/new/"))
+      (should (equal default-directory "/client/project/new/")))))
+
+(ert-deftest opencode-shell-move-directory-maps-remote-scope-in-place ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--profile opencode-shell-test--remote-profile
+                opencode-shell--directory "/srv/project/old/")
+    (cl-letf (((symbol-function 'read-directory-name)
+               (lambda (&rest _) "/ssh:code.example.test:/srv/project/new/"))
+              ((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional directory) directory)))
+      (opencode-shell-move-session-directory))
+    (should (equal opencode-shell--directory "/srv/project/new/"))
+    (should (equal default-directory
+                   "/ssh:code.example.test:/srv/project/new/"))))
 
 (ert-deftest opencode-shell-move-directory-rejects-current-project ()
   (with-temp-buffer
@@ -286,31 +209,6 @@
                (lambda (&optional _) "/client/project/")))
       (should-error (opencode-shell-move-session-directory) :type 'user-error)))
   (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-d"))))
-
-(ert-deftest opencode-shell-move-directory-locks-session-until-request-settles ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq-local opencode-shell--session-id "ses-source"
-                opencode-shell--profile opencode-shell-test--local-profile
-                opencode-shell--directory "/server/project/old/")
-    (let (failure)
-      (cl-letf (((symbol-function 'read-directory-name)
-                 (lambda (&rest _) "/client/project/new/"))
-                ((symbol-function 'opencode-shell--project-directory)
-                 (lambda (&optional _) "/client/project/new/"))
-                ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                ((symbol-function 'opencode-shell--request)
-                 (lambda (_method _path _callback &optional _body _params error)
-                   (setq failure error))))
-        (opencode-shell-move-session-directory)
-        (should (eq opencode-shell--session-operation-in-flight 'move))
-        (goto-char (point-max))
-        (insert "new prompt")
-        (should-error (opencode-shell--submit) :type 'user-error)
-        (should-error (opencode-shell-move-session-directory) :type 'user-error)
-        (should-error (opencode-shell-fork-session) :type 'user-error)
-        (funcall failure)
-        (should-not opencode-shell--session-operation-in-flight)))))
 
 (ert-deftest opencode-shell-model-agent-normalization ()
   (let* ((models (opencode-shell--normalize-models

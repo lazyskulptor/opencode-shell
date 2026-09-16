@@ -479,7 +479,6 @@ and lifecycle keys."
 (defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--poll-heartbeat 0)
 (defvar-local opencode-shell--submit-in-flight nil)
-(defvar-local opencode-shell--session-operation-in-flight nil)
 (defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
 (defvar-local opencode-shell--idle-completion-count 0)
@@ -968,7 +967,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (unless (and (derived-mode-p 'opencode-shell-mode) opencode-shell--session-id)
     (user-error "No OpenCode session in this buffer"))
   (when (or opencode-shell--submit-in-flight
-            opencode-shell--session-operation-in-flight
             opencode-shell--permission-sending
             opencode-shell--question-sending
             opencode-shell--permissions
@@ -990,23 +988,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                      70 nil nil t)))
           (push (cons (format "Before prompt %d: %s" index text) id)
                 candidates))))
-    (append (nreverse candidates)
-            (list (cons "End of session (copy all history)" nil)))))
-
-(defun opencode-shell--fork-request (message-id directory callback error-callback)
-  "Fork the current session at MESSAGE-ID into DIRECTORY.
-Call CALLBACK with the new session, or ERROR-CALLBACK on failure."
-  (opencode-shell--request
-   "POST" (format "/session/%s/fork" opencode-shell--session-id)
-   callback
-   (and message-id `((messageID . ,message-id)))
-   (and directory `((directory . ,directory)))
-   error-callback))
+    (nreverse candidates)))
 
 ;;;###autoload
 (defun opencode-shell-fork-session ()
-  "Fork this session before a minibuffer-selected prompt.
-Selecting the end-of-session candidate copies all current history."
+  "Fork this session before a minibuffer-selected prompt."
   (interactive)
   (opencode-shell--assert-session-operation-ready)
   (let* ((candidates (opencode-shell--fork-candidates))
@@ -1014,19 +1000,16 @@ Selecting the end-of-session candidate copies all current history."
          (message-id (cdr (assoc choice candidates)))
          (profile opencode-shell--profile)
          (directory opencode-shell--directory))
-    (setq opencode-shell--session-operation-in-flight 'fork)
-    (opencode-shell--fork-request
-     message-id nil
+    (opencode-shell--request
+     "POST" (format "/session/%s/fork" opencode-shell--session-id)
      (lambda (session)
        (let ((id (opencode-shell--get session 'id))
              (fork-directory (or (opencode-shell--get session 'directory)
                                  directory)))
          (unless id (user-error "Fork response has no session ID"))
-         (setq opencode-shell--session-operation-in-flight nil)
          (opencode-shell-open-session id fork-directory profile)))
-     (lambda ()
-       (setq opencode-shell--session-operation-in-flight nil)
-       (message "OpenCode session fork failed")))))
+     `((messageID . ,message-id)) nil
+     (lambda () (message "OpenCode session fork failed")))))
 
 (defun opencode-shell--destination-server-directory (directory profile)
   "Return DIRECTORY's project root in PROFILE server-native form."
@@ -1040,14 +1023,11 @@ Selecting the end-of-session candidate copies all current history."
 
 ;;;###autoload
 (defun opencode-shell-move-session-directory ()
-  "Move this session and its complete history to another project directory.
-The server has no directory mutation endpoint, so copy the history first and
-delete the source only after that copy succeeds."
+  "Change this transcript buffer's request scope to another project directory."
   (interactive)
-  (opencode-shell--assert-session-operation-ready)
-  (let* ((source-buffer (current-buffer))
-         (source-id opencode-shell--session-id)
-         (source-directory opencode-shell--directory)
+  (unless (and (derived-mode-p 'opencode-shell-mode) opencode-shell--session-id)
+    (user-error "No OpenCode session in this buffer"))
+  (let* ((source-directory opencode-shell--directory)
          (profile opencode-shell--profile)
          (client-directory (opencode-shell--client-directory source-directory profile))
          (selected (read-directory-name "Move session to project: "
@@ -1057,30 +1037,9 @@ delete the source only after that copy succeeds."
     (when (equal (opencode-shell--canonical-directory source-directory)
                  (opencode-shell--canonical-directory destination))
       (user-error "Session is already in that project directory"))
-    (when (yes-or-no-p
-           (format "Move session from %s to %s? " source-directory destination))
-      (setq opencode-shell--session-operation-in-flight 'move)
-      (opencode-shell--fork-request
-       nil destination
-       (lambda (session)
-         (let ((new-id (opencode-shell--get session 'id))
-               (new-directory (or (opencode-shell--get session 'directory)
-                                  destination)))
-           (unless new-id (user-error "Move response has no session ID"))
-           (opencode-shell--request
-            "DELETE" (format "/session/%s" source-id)
-            (lambda (_)
-              (setq opencode-shell--session-operation-in-flight nil)
-              (opencode-shell-open-session new-id new-directory profile)
-              (when (buffer-live-p source-buffer) (kill-buffer source-buffer)))
-            nil `((directory . ,source-directory))
-            (lambda ()
-              (setq opencode-shell--session-operation-in-flight nil)
-              (opencode-shell-open-session new-id new-directory profile)
-              (message "OpenCode session copied, but source deletion failed")))))
-       (lambda ()
-         (setq opencode-shell--session-operation-in-flight nil)
-         (message "OpenCode session move failed before copying history"))))))
+    (setq-local opencode-shell--directory destination
+                default-directory
+                (opencode-shell--client-directory destination profile))))
 
 (defun opencode-shell--initialize-server-defaults ()
   "Initialize unset selections from OpenCode's build agent."
@@ -1233,7 +1192,6 @@ delete the source only after that copy succeeds."
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
               opencode-shell--permissions nil
-              opencode-shell--session-operation-in-flight nil
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t)
         (buffer-undo-list t))
@@ -2351,8 +2309,6 @@ request settles."
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
   (let ((text (opencode-shell--composer-text)))
-    (when opencode-shell--session-operation-in-flight
-      (user-error "A session operation is already in progress"))
     (when opencode-shell--submit-in-flight
       (user-error "A prompt delivery is already being reconciled"))
     (when (string-blank-p text) (user-error "Prompt is blank"))

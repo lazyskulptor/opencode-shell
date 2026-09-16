@@ -18,6 +18,6 @@
 - Group browser and new-session launches at the Projectile, project.el, or Git
   project root, with current-directory fallback and existing profile mapping.
 - Add an unbound interactive session-fork function with minibuffer selection of
-  an exclusive prompt boundary or complete-history copy.
-- Add a separate unbound session-directory move function that copies complete
-  history to a project root before guarded source deletion.
+  an exclusive prompt boundary.
+- Add a separate unbound directory-scope function that updates the current
+  transcript buffer in place without reopening or migrating the server session.

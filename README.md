@@ -119,14 +119,14 @@ bindings when Evil is available.
 
 `M-x opencode-shell-fork-session` is available in an idle transcript without a
 dedicated keybinding. Its minibuffer lists user prompts in chronological order;
-choosing one forks immediately before that prompt, while the final candidate
-copies the complete history. The returned session opens in its reported directory.
+choosing one forks immediately before that prompt. The returned session opens in
+its reported directory.
 
 `M-x opencode-shell-move-session-directory` is a separate unbound function for
-an idle transcript. It reads a destination directory, normalizes it to that
-project's root, copies the complete history there, and asks before deleting the
-source. Copy always happens first. If source deletion fails, the destination is
-opened and the original is retained with an explicit partial-move warning.
+a transcript. It reads a destination, normalizes it to that project's root, and
+updates the same buffer's server request scope and Emacs `default-directory`.
+The session ID, visible history, composer, and polling state stay in that buffer.
+This is a client-side scope change; it does not mutate persisted server metadata.
 
 Use `?` in either the browser or transcript for its context-specific Transient
 menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
