@@ -79,10 +79,16 @@ or error state and never replaces an already completed response with stale data.
 Pending status cycles `·`, `··`, `···` once per message-history poll. Reasoning-only
 updates show `Thinking`; text or tool activity shows `Receiving`. The dots indicate
 polling activity, not estimated progress.
-Assistant completion comes from the matching message's `finish` and
-`time.completed` metadata, with `step-finish` retained for compatible server
-payloads. A completed tool or idle session status does not complete the whole
-assistant turn; running tools keep the response active.
+Assistant completion comes from the matching message's `time.completed`
+metadata together with either a genuinely terminal `finish` value or a
+terminal `error`; `step-finish` is retained only as compatible evidence when
+`finish` is absent. A `finish` of `tool-calls` means another step is coming
+and is never treated as completion, and a completed tool or idle session
+status does not complete the whole assistant turn; running tools keep the
+response active. When a turn ends via a terminal error — auth failure, a
+token/output-length or context limit, a content filter, a provider/API error,
+or an abort — the transcript shows a bounded `[name: message]` reason line
+after the response instead of silently rendering a blank one.
 
 Completed assistant pipe tables fit the selected transcript window by wrapping
 long cells. Resizing recalculates conventional tables outside fenced code; all

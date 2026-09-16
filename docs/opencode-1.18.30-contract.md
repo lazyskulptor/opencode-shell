@@ -59,12 +59,15 @@ A session may be absent from `/session/status` while its history still contains 
 assistant message with a running tool and no `step-finish`. This is not completion:
 the client keeps the turn active and exposes the authoritative reasoning/tool phase.
 
-For an assistant envelope attached to the active user message, `info.finish` plus
-`info.time.completed` is the primary message-level completion evidence.
-`step-finish` remains compatible explicit evidence. Neither a completed/error tool
-part nor `/session/status` idle completes the turn by itself, and any running or
-pending tool part blocks readiness. `Prompt>` is restored and polling stops only
-after that message evidence is present and pending permission work is settled.
+For an assistant envelope attached to the active user message, `info.finish`
+(excluding the non-terminal `"tool-calls"` value, which means another step of
+the same turn is coming) or `info.error`, plus `info.time.completed`, is the
+primary message-level completion evidence. `step-finish` is compatible
+fallback evidence only when `info.finish` is entirely absent. Neither a
+completed/error tool part nor `/session/status` idle completes the turn by
+itself, and any running or pending tool part blocks readiness regardless of
+`info.error`. `Prompt>` is restored and polling stops only after that message
+evidence is present and pending permission work is settled.
 These invariants are exercised by the metadata-only
 `test/fixtures/completion-polling-regression.el` sequence; it intentionally
 contains no conversation, reasoning, tool payload, path, or credential data.
