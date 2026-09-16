@@ -53,6 +53,10 @@ headers and the canonical newest-first session selector.
 Fork requests inherit the current directory query unless an explicit destination
 is supplied. A `messageID` boundary is exclusive: the named message and every
 later message are omitted. An empty request body copies the complete history.
+The client's directory-move function uses that empty-body form with an explicit
+destination, then deletes the source only after the copy succeeds. The two calls
+are not atomic; a failed delete leaves both sessions and is reported as partial
+success rather than risking history loss.
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 

@@ -1023,6 +1023,55 @@ Selecting the end-of-session candidate copies all current history."
          (opencode-shell-open-session id fork-directory profile)))
      (lambda () (message "OpenCode session fork failed")))))
 
+(defun opencode-shell--destination-server-directory (directory profile)
+  "Return DIRECTORY's project root in PROFILE server-native form."
+  (let* ((project-directory (opencode-shell--project-directory directory))
+         (server-directory
+          (opencode-shell--server-directory project-directory profile)))
+    (unless (and (stringp server-directory)
+                 (file-name-absolute-p server-directory))
+      (user-error "Destination cannot be mapped to the OpenCode server"))
+    (file-name-as-directory server-directory)))
+
+;;;###autoload
+(defun opencode-shell-move-session-directory ()
+  "Move this session and its complete history to another project directory.
+The server has no directory mutation endpoint, so copy the history first and
+delete the source only after that copy succeeds."
+  (interactive)
+  (opencode-shell--assert-session-operation-ready)
+  (let* ((source-buffer (current-buffer))
+         (source-id opencode-shell--session-id)
+         (source-directory opencode-shell--directory)
+         (profile opencode-shell--profile)
+         (client-directory (opencode-shell--client-directory source-directory profile))
+         (selected (read-directory-name "Move session to project: "
+                                        client-directory nil t))
+         (destination
+          (opencode-shell--destination-server-directory selected profile)))
+    (when (equal (opencode-shell--canonical-directory source-directory)
+                 (opencode-shell--canonical-directory destination))
+      (user-error "Session is already in that project directory"))
+    (when (yes-or-no-p
+           (format "Move session from %s to %s? " source-directory destination))
+      (opencode-shell--fork-request
+       nil destination
+       (lambda (session)
+         (let ((new-id (opencode-shell--get session 'id))
+               (new-directory (or (opencode-shell--get session 'directory)
+                                  destination)))
+           (unless new-id (user-error "Move response has no session ID"))
+           (opencode-shell--request
+            "DELETE" (format "/session/%s" source-id)
+            (lambda (_)
+              (opencode-shell-open-session new-id new-directory profile)
+              (when (buffer-live-p source-buffer) (kill-buffer source-buffer)))
+            nil `((directory . ,source-directory))
+            (lambda ()
+              (opencode-shell-open-session new-id new-directory profile)
+              (message "OpenCode session copied, but source deletion failed")))))
+       (lambda () (message "OpenCode session move failed before copying history"))))))
+
 (defun opencode-shell--initialize-server-defaults ()
   "Initialize unset selections from OpenCode's build agent."
   (when-let* ((build (cdr (assoc "build" opencode-shell--agents)))

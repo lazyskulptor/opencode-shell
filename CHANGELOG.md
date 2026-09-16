@@ -19,3 +19,5 @@
   project root, with current-directory fallback and existing profile mapping.
 - Add an unbound interactive session-fork function with minibuffer selection of
   an exclusive prompt boundary or complete-history copy.
+- Add a separate unbound session-directory move function that copies complete
+  history to a project root before guarded source deletion.

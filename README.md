@@ -122,6 +122,12 @@ dedicated keybinding. Its minibuffer lists user prompts in chronological order;
 choosing one forks immediately before that prompt, while the final candidate
 copies the complete history. The returned session opens in its reported directory.
 
+`M-x opencode-shell-move-session-directory` is a separate unbound function for
+an idle transcript. It reads a destination directory, normalizes it to that
+project's root, copies the complete history there, and asks before deleting the
+source. Copy always happens first. If source deletion fails, the destination is
+opened and the original is retained with an explicit partial-move warning.
+
 Use `?` in either the browser or transcript for its context-specific Transient
 menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
 selects only live transcript buffers, and `C-c o f` selects a canonical
