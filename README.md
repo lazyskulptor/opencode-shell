@@ -141,6 +141,9 @@ bottom composer is writable; each submitted user prompt and its response are
 separate read-only regions owned by a buffer-local turn record. Poll updates
 replace turn regions without changing composer text or point. Evil's ordinary
 insert commands are left intact and entering insert state focuses the composer.
+Transcript, status, and interaction-card updates do not enter undo history.
+Submitting starts a fresh composer undo history, so undo cannot restore a sent
+draft; edits to the current draft remain normally undoable.
 An ambiguous `prompt_async` failure keeps the attempted turn visible and polls
 history for its stable ID instead of automatically submitting it again.
 

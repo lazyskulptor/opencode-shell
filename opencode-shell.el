@@ -1016,6 +1016,61 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                  (< end opencode-shell--composer-start)))
     (signal 'text-read-only (list "OpenCode transcript is read-only"))))
 
+(defun opencode-shell--shift-undo-position (position threshold delta)
+  "Shift signed undo POSITION at or after THRESHOLD by DELTA."
+  (let ((sign (if (< position 0) -1 1))
+        (absolute (abs position)))
+    (* sign (if (>= absolute threshold) (+ absolute delta) absolute))))
+
+(defun opencode-shell--shift-undo-entry (entry threshold delta)
+  "Shift composer positions in undo ENTRY by DELTA after THRESHOLD."
+  (cond
+   ((and (consp entry) (integerp (car entry)) (integerp (cdr entry)))
+    (cons (opencode-shell--shift-undo-position (car entry) threshold delta)
+          (opencode-shell--shift-undo-position (cdr entry) threshold delta)))
+   ((and (consp entry) (stringp (car entry)) (integerp (cdr entry)))
+    (cons (car entry)
+          (opencode-shell--shift-undo-position (cdr entry) threshold delta)))
+   ((and (listp entry) (null (car entry)) (>= (length entry) 5))
+    (let ((copy (copy-sequence entry)))
+      (setf (nth 3 copy) (opencode-shell--shift-undo-position
+                          (nth 3 copy) threshold delta)
+            (nth 4 copy) (opencode-shell--shift-undo-position
+                          (nth 4 copy) threshold delta))
+      copy))
+   ((and (listp entry) (eq (car entry) 'apply) (>= (length entry) 4)
+         (integerp (nth 2 entry)) (integerp (nth 3 entry)))
+    (let ((copy (copy-sequence entry)))
+      (setf (nth 2 copy) (opencode-shell--shift-undo-position
+                          (nth 2 copy) threshold delta)
+            (nth 3 copy) (opencode-shell--shift-undo-position
+                          (nth 3 copy) threshold delta))
+      copy))
+   (t entry)))
+
+(defmacro opencode-shell--without-user-undo (&rest body)
+  "Run BODY without adding package edits to the user's undo history."
+  (declare (indent 0) (debug t))
+  `(if (eq buffer-undo-list t)
+       (progn ,@body)
+     (let ((saved-undo buffer-undo-list)
+           (old-composer-start (and (markerp opencode-shell--composer-start)
+                                    (marker-position opencode-shell--composer-start)))
+           result)
+       (let ((buffer-undo-list t))
+         (setq result (progn ,@body)))
+       (when (and old-composer-start
+                  (marker-position opencode-shell--composer-start))
+         (let ((delta (- (marker-position opencode-shell--composer-start)
+                         old-composer-start)))
+           (setq saved-undo
+                 (mapcar (lambda (entry)
+                           (opencode-shell--shift-undo-entry
+                            entry old-composer-start delta))
+                         saved-undo))))
+       (setq buffer-undo-list saved-undo)
+       result)))
+
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
@@ -1531,9 +1586,10 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
 
 (defun opencode-shell--commit-permission-result (record)
   "Replace the active permission card with a fixed transcript RECORD."
-  (let ((inhibit-read-only t)
-        (composer-gap (- opencode-shell--composer-start
-                         opencode-shell--permission-end)))
+  (opencode-shell--without-user-undo
+   (let ((inhibit-read-only t)
+         (composer-gap (- opencode-shell--composer-start
+                          opencode-shell--permission-end)))
     (save-excursion
       (goto-char opencode-shell--permission-begin)
       (delete-region opencode-shell--permission-begin opencode-shell--permission-end)
@@ -1543,7 +1599,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
       (set-marker opencode-shell--transcript-end (point))
       (set-marker opencode-shell--permission-begin (point))
       (set-marker opencode-shell--permission-end (point))
-      (set-marker opencode-shell--composer-start (+ (point) composer-gap)))))
+      (set-marker opencode-shell--composer-start (+ (point) composer-gap))))))
 
 (defun opencode-shell--permission-at-point ()
   "Return the permission object at point, or the first pending request."
@@ -1553,10 +1609,11 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
 
 (defun opencode-shell--render-permissions ()
   "Render pending permissions as one boxed read-only region before composer."
-  (let* ((draft (opencode-shell--composer-text))
+  (opencode-shell--without-user-undo
+   (let* ((draft (opencode-shell--composer-text))
          (offset (and (opencode-shell--in-composer-p)
                       (- (point) opencode-shell--composer-start)))
-         (inhibit-read-only t))
+          (inhibit-read-only t))
     (save-excursion
       (when-let ((label-pos (text-property-any
                             (point-min) opencode-shell--composer-start
@@ -1626,7 +1683,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
     (when offset
       (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
     (unless (equal draft (opencode-shell--composer-text))
-      (error "Permission rendering changed composer text"))))
+      (error "Permission rendering changed composer text")))))
 
 (defun opencode-shell--refresh-permissions ()
   "Fetch the current `/permission' snapshot outside the normal poll cadence.
@@ -1665,11 +1722,12 @@ request settles."
 
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
-  (let ((inhibit-read-only t))
+  (opencode-shell--without-user-undo
+   (let ((inhibit-read-only t))
     (delete-region opencode-shell--composer-start (point-max))
     (goto-char opencode-shell--composer-start)
     (insert text)
-     (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
+     (goto-char (+ opencode-shell--composer-start (or offset (length text)))))))
 
 (defun opencode-shell--discard-turn-markers (turn)
   "Detach all rendered region markers owned by TURN."
@@ -1820,11 +1878,12 @@ request settles."
 
 (defun opencode-shell--render-turns ()
   "Render immutable turn blocks without changing composer bytes or point."
-  (let* ((composer-offset (and (opencode-shell--in-composer-p)
+  (opencode-shell--without-user-undo
+   (let* ((composer-offset (and (opencode-shell--in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
          (composer-text (opencode-shell--composer-text))
          (old-point (point))
-         (inhibit-read-only t))
+          (inhibit-read-only t))
     (let* ((known-count (length opencode-shell--rendered-turns))
            (rendered-valid
             (seq-every-p #'opencode-shell--turn-rendered-p
@@ -1887,7 +1946,7 @@ request settles."
     (opencode-shell--render-permissions)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
-      (goto-char (min old-point opencode-shell--transcript-end)))))
+      (goto-char (min old-point opencode-shell--transcript-end))))))
 
 (defun opencode-shell--render-messages (messages &optional sequence)
   "Reconcile and render chronological message envelopes from MESSAGES."
@@ -2085,9 +2144,11 @@ request settles."
             opencode-shell--composer-visible nil
             opencode-shell--idle-completion-count 0
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
-      (opencode-shell--replace-composer "")
-      (opencode-shell--render-turns)
-      (opencode-shell--start-polling)
+       (opencode-shell--replace-composer "")
+       (opencode-shell--render-turns)
+       (setq buffer-undo-list nil)
+       (undo-boundary)
+       (opencode-shell--start-polling)
       (opencode-shell--log-lifecycle "submit" t)
       (force-mode-line-update)
        (opencode-shell--request

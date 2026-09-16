@@ -1710,7 +1710,40 @@
         (should-error (opencode-shell--submit) :type 'user-error)
         (should (equal (opencode-shell--composer-text) "retry"))
         (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'recovering))
-        (should (equal opencode-shell--request-status "recovering"))))))
+         (should (equal opencode-shell--request-status "recovering"))))))
+
+(ert-deftest opencode-shell-transcript-renders-preserve-composer-undo ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (buffer-enable-undo)
+    (insert "draft")
+    (undo-boundary)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+    (opencode-shell--receive-permissions
+     '(((id . "p1") (permission . "bash") (patterns . ("git status")))))
+    (undo-only 1)
+    (should (string-empty-p (opencode-shell--composer-text)))
+    (should (= 1 (how-many "USER>" (point-min) (point-max))))
+    (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
+    (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
+
+(ert-deftest opencode-shell-submit-resets-undo-before-new-composer-edits ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (buffer-enable-undo)
+    (setq opencode-shell--session-id "s")
+    (insert "committed")
+    (cl-letf (((symbol-function 'opencode-shell--request) #'ignore))
+      (opencode-shell--submit))
+    (should-error (undo-only 1) :type 'user-error)
+    (insert "new draft")
+    (undo-boundary)
+    (undo-only 1)
+    (should (string-empty-p (opencode-shell--composer-text)))
+    (should (= 1 (how-many "committed" (point-min) (point-max))))
+    (should (= 1 (how-many "USER>" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-failure-does-not-overwrite-edited-composer ()
   (with-temp-buffer
