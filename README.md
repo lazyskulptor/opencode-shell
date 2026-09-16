@@ -88,7 +88,12 @@ status does not complete the whole assistant turn; running tools keep the
 response active. When a turn ends via a terminal error — auth failure, a
 token/output-length or context limit, a content filter, a provider/API error,
 or an abort — the transcript shows a bounded `[name: message]` reason line
-after the response instead of silently rendering a blank one.
+after the response instead of silently rendering a blank one. Submitting a new
+prompt automatically settles any older nonterminal turn as interrupted; history
+reconciliation applies the same rule to persisted sessions where a later prompt
+already proves an older turn is orphaned. A successful explicit abort likewise
+settles the active turn before resync. These safeguards do not use session idle
+alone as completion evidence.
 
 Completed assistant pipe tables fit the selected transcript window by wrapping
 long cells. Resizing recalculates conventional tables outside fenced code; all

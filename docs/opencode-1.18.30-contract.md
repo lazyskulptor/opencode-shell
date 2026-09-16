@@ -68,6 +68,15 @@ completed/error tool part nor `/session/status` idle completes the turn by
 itself, and any running or pending tool part blocks readiness regardless of
 `info.error`. `Prompt>` is restored and polling stops only after that message
 evidence is present and pending permission work is settled.
+
+A newly submitted prompt is also a deterministic generation boundary: the client
+settles any older nonterminal turn as interrupted before creating the new active
+turn. History reconciliation performs the same repair when persisted history
+already contains a later user turn after an orphaned one. A successful explicit
+abort locally settles the active turn before resync, and stale incomplete history
+cannot reopen either local settlement; later authoritative terminal metadata may
+replace the fallback reason. This orphan repair does not make
+`/session/status` idle sufficient completion evidence for the newest active turn.
 These invariants are exercised by the metadata-only
 `test/fixtures/completion-polling-regression.el` sequence; it intentionally
 contains no conversation, reasoning, tool payload, path, or credential data.
