@@ -21,7 +21,7 @@
     (concat "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/event-stream; charset=utf-8\r\n"
             "Transfer-Encoding: chunked\r\n\r\n"
-            (format "%x;source=test\r\n%s\r\n" (length first) first)
+            (format "%x \t; \tsource \t= \ttest\r\n%s\r\n" (length first) first)
             (format "%x\r\n%s\r\n" (length second) second)
             "0\r\nX-End: yes\r\n\r\n")))
 
@@ -274,6 +274,11 @@
         (should (eq (opencode-shell-sse-connection-state connection) 'closed))
         (should (eq (plist-get (car errors) :type) 'config))
         (should-not made)))))
+
+(ert-deftest opencode-shell-sse-transport-validates-open-callback ()
+  (should-error
+   (opencode-shell-sse-start
+    "http://localhost/event" nil #'ignore #'ignore :on-open 'not-a-function)))
 
 (provide 'opencode-shell-sse-test)
 ;;; opencode-shell-sse-test.el ends here
