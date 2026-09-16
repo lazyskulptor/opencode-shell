@@ -7,6 +7,7 @@
 | `GET` | `/health` | Check server readiness; profiles may override the path |
 | `GET` | `/session` | List sessions for exact `directory`; `limit` overrides the default 100-row truncation |
 | `POST` | `/session` | Create a session |
+| `POST` | `/session/:id/fork` | Fork before optional `messageID`; omit it to copy all history |
 | `GET` | `/session/status` | Read session status |
 | `DELETE` | `/session/:id` | Delete a session |
 | `GET` | `/session/:id/message` | Read transcript messages |
@@ -48,6 +49,10 @@ Session list requests include an absolute server-native `directory` and a high
 `start`, and `search`. Other requests may include `directory` as appropriate.
 The normalized session collection also supplies generated titles for transcript
 headers and the canonical newest-first session selector.
+
+Fork requests inherit the current directory query unless an explicit destination
+is supplied. A `messageID` boundary is exclusive: the named message and every
+later message are omitted. An empty request body copies the complete history.
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 

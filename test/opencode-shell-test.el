@@ -101,6 +101,76 @@
       (should (equal request '("POST" "/session" nil)))
       (should (equal opened (list "new" "/srv/chosen/" profile))))))
 
+(defun opencode-shell-test--complete-user-turn (id text)
+  "Return a completed user turn with server ID ID and TEXT."
+  (opencode-shell--make-turn
+   :id id :server-user-id id :user text :status 'complete :acknowledged t))
+
+(ert-deftest opencode-shell-fork-candidates-are-chronological-and-disambiguated ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--turns
+          (list (opencode-shell-test--complete-user-turn "msg-1" "same\nprompt")
+                (opencode-shell-test--complete-user-turn "msg-2" "same prompt")))
+    (should (equal (opencode-shell--fork-candidates)
+                   '(("Before prompt 1: same prompt" . "msg-1")
+                     ("Before prompt 2: same prompt" . "msg-2")
+                     ("End of session (copy all history)"))))))
+
+(ert-deftest opencode-shell-fork-session-selects-boundary-and-opens-result ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--profile opencode-shell-test--local-profile
+                opencode-shell--directory "/server/project/"
+                opencode-shell--turns
+                (list (opencode-shell-test--complete-user-turn "msg-1" "first")
+                      (opencode-shell-test--complete-user-turn "msg-2" "second")))
+    (let (request opened)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _)
+                   (caar (cdr candidates))))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (method path callback &optional body params _error)
+                   (setq request (list method path body params))
+                   (funcall callback '((id . "ses-fork")
+                                       (directory . "/server/project/")))))
+                ((symbol-function 'opencode-shell-open-session)
+                 (lambda (id directory profile)
+                   (setq opened (list id directory profile)))))
+        (opencode-shell-fork-session))
+      (should (equal request
+                     '("POST" "/session/ses-source/fork"
+                       ((messageID . "msg-2")) nil)))
+      (should (equal opened
+                     (list "ses-fork" "/server/project/"
+                           opencode-shell-test--local-profile))))))
+
+(ert-deftest opencode-shell-fork-session-can-copy-all-history ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--directory "/server/project/"
+                opencode-shell--turns
+                (list (opencode-shell-test--complete-user-turn "msg-1" "first")))
+    (let (body params)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _) (car (car (last candidates)))))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path _callback &optional request-body request-params _error)
+                   (setq body request-body params request-params))))
+        (opencode-shell-fork-session))
+      (should-not body)
+      (should-not params))))
+
+(ert-deftest opencode-shell-fork-session-rejects-active-interaction ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--submit-in-flight t)
+    (should-error (opencode-shell-fork-session) :type 'user-error))
+  (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-f"))))
+
 (ert-deftest opencode-shell-model-agent-normalization ()
   (let* ((models (opencode-shell--normalize-models
                   '((all . (((id . "p") (models . (("m" . ((id . "m")))))))))))

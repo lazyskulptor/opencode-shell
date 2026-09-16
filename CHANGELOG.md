@@ -17,3 +17,5 @@
   `opencode-shell-sessions` while allowing that command to accept a profile.
 - Group browser and new-session launches at the Projectile, project.el, or Git
   project root, with current-directory fallback and existing profile mapping.
+- Add an unbound interactive session-fork function with minibuffer selection of
+  an exclusive prompt boundary or complete-history copy.

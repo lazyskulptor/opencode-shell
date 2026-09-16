@@ -963,6 +963,66 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (kill-new opencode-shell--session-id)
   (message "Copied OpenCode session ID"))
 
+(defun opencode-shell--assert-session-operation-ready ()
+  "Signal a user error unless the current session has stable history."
+  (unless (and (derived-mode-p 'opencode-shell-mode) opencode-shell--session-id)
+    (user-error "No OpenCode session in this buffer"))
+  (when (or opencode-shell--submit-in-flight
+            opencode-shell--permission-sending
+            opencode-shell--question-sending
+            opencode-shell--permissions
+            opencode-shell--questions-pending
+            (seq-some (lambda (turn)
+                        (not (eq (opencode-shell--turn-status turn) 'complete)))
+                      opencode-shell--turns))
+    (user-error "Wait for the current OpenCode interaction to finish")))
+
+(defun opencode-shell--fork-candidates ()
+  "Return chronological minibuffer candidates for the current session."
+  (let ((index 0) candidates)
+    (dolist (turn opencode-shell--turns)
+      (when-let ((id (opencode-shell--turn-server-user-id turn)))
+        (cl-incf index)
+        (let ((text (truncate-string-to-width
+                     (replace-regexp-in-string
+                      "[\n\r\t ]+" " " (or (opencode-shell--turn-user turn) ""))
+                     70 nil nil t)))
+          (push (cons (format "Before prompt %d: %s" index text) id)
+                candidates))))
+    (append (nreverse candidates)
+            (list (cons "End of session (copy all history)" nil)))))
+
+(defun opencode-shell--fork-request (message-id directory callback error-callback)
+  "Fork the current session at MESSAGE-ID into DIRECTORY.
+Call CALLBACK with the new session, or ERROR-CALLBACK on failure."
+  (opencode-shell--request
+   "POST" (format "/session/%s/fork" opencode-shell--session-id)
+   callback
+   (and message-id `((messageID . ,message-id)))
+   (and directory `((directory . ,directory)))
+   error-callback))
+
+;;;###autoload
+(defun opencode-shell-fork-session ()
+  "Fork this session before a minibuffer-selected prompt.
+Selecting the end-of-session candidate copies all current history."
+  (interactive)
+  (opencode-shell--assert-session-operation-ready)
+  (let* ((candidates (opencode-shell--fork-candidates))
+         (choice (completing-read "Fork session: " candidates nil t))
+         (message-id (cdr (assoc choice candidates)))
+         (profile opencode-shell--profile)
+         (directory opencode-shell--directory))
+    (opencode-shell--fork-request
+     message-id nil
+     (lambda (session)
+       (let ((id (opencode-shell--get session 'id))
+             (fork-directory (or (opencode-shell--get session 'directory)
+                                 directory)))
+         (unless id (user-error "Fork response has no session ID"))
+         (opencode-shell-open-session id fork-directory profile)))
+     (lambda () (message "OpenCode session fork failed")))))
+
 (defun opencode-shell--initialize-server-defaults ()
   "Initialize unset selections from OpenCode's build agent."
   (when-let* ((build (cdr (assoc "build" opencode-shell--agents)))

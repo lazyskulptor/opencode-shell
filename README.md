@@ -117,6 +117,11 @@ agent completion shows only server-advertised visible primary agents.
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
 
+`M-x opencode-shell-fork-session` is available in an idle transcript without a
+dedicated keybinding. Its minibuffer lists user prompts in chronological order;
+choosing one forks immediately before that prompt, while the final candidate
+copies the complete history. The returned session opens in its reported directory.
+
 Use `?` in either the browser or transcript for its context-specific Transient
 menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
 selects only live transcript buffers, and `C-c o f` selects a canonical
