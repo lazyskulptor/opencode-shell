@@ -262,6 +262,7 @@
           (should (equal (nth 2 relocated-request) '((directory))))
           (funcall (cadr relocated-request)
                    '((id . "moved") (directory . "/server/project/old/"))))
+        (opencode-shell-async-drain (current-buffer))
         (should (equal (mapcar (lambda (session) (opencode-shell--get session 'id))
                                opencode-shell--sessions)
                        '("moved" "native")))))))
@@ -3355,7 +3356,9 @@
               (with-current-buffer (car request)
                 (funcall (nth 2 request)
                          `(((id . ,(if (eq (car request) one) "one" "two"))
-                            (directory . "/work/")))))))
+                             (directory . "/work/")))))))
+          (dolist (buffer (list one two))
+            (opencode-shell-async-drain buffer))
           (should (equal (with-current-buffer one (opencode-shell--get
                                                    opencode-shell--session-status "one"))
                          '((type . "busy"))))
@@ -3364,6 +3367,26 @@
           (should (equal (with-current-buffer two
                            (opencode-shell--get (car opencode-shell--sessions) 'id)) "two")))
       (kill-buffer one) (kill-buffer two))))
+
+(ert-deftest opencode-shell-hidden-browser-defers-tabulated-render ()
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--profile opencode-shell-test--local-profile
+                opencode-shell--directory "/work/"
+                opencode-shell--generation 4)
+    (let (visible (prints 0))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) visible))
+                ((symbol-function 'tabulated-list-print)
+                 (lambda (&rest _) (cl-incf prints))))
+        (opencode-shell--apply-session-browser-snapshot
+         '(((id . "s") (directory . "/work/"))) nil 4)
+        (should opencode-shell--browser-dirty)
+        (should (zerop prints))
+        (setq visible t)
+        (opencode-shell--render-session-browser-if-visible)
+        (should (= prints 1))
+        (should-not opencode-shell--browser-dirty)))))
 
 (ert-deftest opencode-shell-profile-validation-rejects-duplicate-identities ()
   (let ((opencode-shell-profiles

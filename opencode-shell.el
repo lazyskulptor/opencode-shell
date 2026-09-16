@@ -464,6 +464,7 @@ and lifecycle keys."
 (defvar opencode-shell--transcript-end)
 
 (defvar-local opencode-shell--sessions nil)
+(defvar-local opencode-shell--browser-dirty nil)
 (defvar-local opencode-shell--show-child-sessions nil)
 (defvar-local opencode-shell--session-status nil)
 (defvar-local opencode-shell--directory nil)
@@ -893,6 +894,9 @@ Each retained session keeps its server-reported directory unchanged."
   (setq-local header-line-format nil)
   (setq tabulated-list-padding 2 tabulated-list-sort-key '("Updated" . t))
   (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
+  (add-hook 'window-configuration-change-hook
+            #'opencode-shell--render-session-browser-if-visible nil t)
+  (add-hook 'kill-buffer-hook #'opencode-shell-async-cancel nil t)
   (tabulated-list-init-header))
 
 (defun opencode-shell--setup-sessions-evil-buffer ()
@@ -961,18 +965,36 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
            (lambda (sessions)
              (when (= generation opencode-shell--generation)
                (opencode-shell--fetch-relocated-sessions
-                sessions
-                (lambda (all-sessions)
-                  (when (= generation opencode-shell--generation)
-                    (setq opencode-shell--sessions
-                          (opencode-shell--normalize-sessions
-                           (opencode-shell--sessions-in-directory
-                            all-sessions opencode-shell--profile opencode-shell--directory))
-                          tabulated-list-entries (opencode-shell--session-entries))
-                    (tabulated-list-print t)
-                    (when id (goto-char (point-min)) (search-forward id nil t)))))))
+                 sessions
+                 (lambda (all-sessions)
+                   (when (= generation opencode-shell--generation)
+                     (opencode-shell-async-enqueue
+                      (current-buffer) 'browser-snapshot generation
+                      #'opencode-shell--apply-session-browser-snapshot
+                      all-sessions id generation))))))
           nil
           '((limit . 1000))))))))
+
+(defun opencode-shell--apply-session-browser-snapshot (sessions id generation)
+  "Apply SESSIONS for GENERATION, preserving row ID when visible."
+  (when (= generation opencode-shell--generation)
+    (setq opencode-shell--sessions
+          (opencode-shell--normalize-sessions
+           (opencode-shell--sessions-in-directory
+            sessions opencode-shell--profile opencode-shell--directory))
+          tabulated-list-entries (opencode-shell--session-entries)
+          opencode-shell--browser-dirty t)
+    (when (get-buffer-window (current-buffer) t)
+      (setq opencode-shell--browser-dirty nil)
+      (tabulated-list-print t)
+      (when id (goto-char (point-min)) (search-forward id nil t)))))
+
+(defun opencode-shell--render-session-browser-if-visible ()
+  "Render one pending browser snapshot when this buffer becomes visible."
+  (when (and opencode-shell--browser-dirty
+             (get-buffer-window (current-buffer) t))
+    (setq opencode-shell--browser-dirty nil)
+    (tabulated-list-print t)))
 
 (defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
