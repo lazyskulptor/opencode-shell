@@ -24,5 +24,8 @@
 - Add a server-shared SSE wake-up runtime with nonblocking polling fallback,
   idle-coalesced state delivery, visible-only transcript/browser rendering, and
   deterministic cleanup of queued work, streams, and timers.
+- Isolate HTTP/chunk/SSE parsing and connection races in `opencode-shell-sse.el`,
+  with split-boundary tests, typed failures, bounded reconnect/circuit fallback,
+  strict interval validation, and stale-connection suppression.
 - Document asynchronous runtime invariants that prohibit synchronous I/O and
   callback-driven buffer rendering on interactive hot paths.

@@ -69,6 +69,17 @@ history reconciliation remain authoritative and recover after event loss or
 request interruption. A low-frequency polling fallback preserves the same
 behavior when SSE is unavailable or disconnected.
 
+The `/event` wire path is isolated in `opencode-shell-sse.el`: a process-free
+incremental parser validates the HTTP status and actual `Content-Type` field,
+decodes bounded chunked framing, and emits complete SSE `data` frames regardless
+of network split boundaries. A connection object owns only its process, immutable
+attempt token, parser state, and header deadline. The shared async runtime owns
+reconnect backoff, the bounded circuit breaker, subscriber sharing, and polling.
+Protocol/configuration failure opens fallback immediately; transient closure or
+timeout reconnects until the failure budget is exhausted. No event payload is
+logged or applied directly to transcript, permission, question, or completion
+state.
+
 A session may be absent from `/session/status` while its history still contains an
 assistant message with a running tool and no `step-finish`. This is not completion:
 the client keeps the turn active and exposes the authoritative reasoning/tool phase.

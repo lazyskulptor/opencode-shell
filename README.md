@@ -182,7 +182,8 @@ The network cadence remains controlled independently by
 as polls because they perform no network work.
 
 Async runtime lines report only bounded control state such as
-`transport=sse-connected`, `transport=fallback`, reconnect delay, poll wakeups,
+`transport=sse`, `transport=fallback`, typed failure reason, circuit state,
+reconnect delay, poll wakeups,
 and deferred hidden rendering. They never include SSE payloads, transcript text,
 request bodies, directories, or authorization values. A healthy local runtime
 normally shows one SSE connection regardless of the number of transcript buffers;
@@ -196,6 +197,9 @@ rewrite transcript or browser buffers. UI work is coalesced and applied at idle
 time, and hidden buffers retain dirty state without spending time rendering it.
 OpenCode's `/event` SSE endpoint is the preferred wake-up path, shared per server;
 low-frequency snapshot polling remains the recovery and compatibility path.
+`opencode-shell-sse.el` owns byte-level HTTP, chunked-transfer, and SSE parsing
+plus one connection lifecycle. `opencode-shell-async.el` owns sharing, reconnect,
+fallback polling, and coalescing; neither transport layer edits UI buffers.
 
 These rules apply to all new runtime work. See
 [`docs/async-runtime.md`](docs/async-runtime.md) for the architecture, fallback,
@@ -215,7 +219,12 @@ public configuration.
 
 ## Limitations
 
-This beta polls instead of streaming SSE. It intentionally defers general rich Markdown/tool rendering, folding, retention pruning, partial assistant streaming, pagination, and file/diff review. Permission and question handling is deliberately explicit and never auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require changes for newer releases.
+This beta uses SSE only as a wake-up signal and intentionally does not render
+partial assistant tokens directly from event payloads. It defers general rich
+Markdown/tool rendering, folding, retention pruning, pagination, and file/diff
+review. Permission and question handling is deliberately explicit and never
+auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require
+changes for newer releases.
 
 ## Acceptance check
 

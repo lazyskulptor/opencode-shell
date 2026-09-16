@@ -249,6 +249,21 @@ not mutated; the returned parser is the next state."
         (setq events new-events error body-error)))
     (list :parser next :events events :error error)))
 
+(defun opencode-shell-sse-parser-finish (parser)
+  "Finish PARSER and report an incomplete protocol state without mutating it."
+  (unless (opencode-shell-sse-parser-p parser)
+    (signal 'wrong-type-argument (list 'opencode-shell-sse-parser-p parser)))
+  (let ((next (copy-opencode-shell-sse-parser parser)) error)
+    (pcase (opencode-shell-sse-parser-phase next)
+      ('done nil)
+      ('error
+       (setq error '(:type protocol :reason prior-error)))
+      ('headers
+       (setq error (opencode-shell-sse--error next 'incomplete-headers)))
+      ('body
+       (setq error (opencode-shell-sse--error next 'unexpected-eof))))
+    (list :parser next :events nil :error error)))
+
 (cl-defstruct (opencode-shell-sse-connection
                (:constructor opencode-shell-sse--make-connection))
   token state process parser header-timer on-event on-error)

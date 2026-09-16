@@ -22,14 +22,26 @@ composer noticeably pause.
    reconciliation are authoritative for completion, permissions, questions,
    and transcript content.
 7. SSE failure never disables progress. Nonblocking polling takes over and a
-   bounded timer-based reconnect policy restores the stream when possible.
+   bounded timer-based reconnect policy restores transiently failed streams.
+   Protocol/configuration failures and repeated transport failures open the SSE
+   circuit for that runtime while polling remains active.
 8. Buffer text and markers are changed only on Emacs's main thread. The runtime
    minimizes that work instead of attempting unsafe worker-thread rendering.
 
 ## Runtime layers
 
-- **Transport:** asynchronous HTTP, shared SSE lifecycle, reconnect, and polling
-  fallback. It emits privacy-safe state-change signals only.
+- **Protocol parser:** `opencode-shell-sse.el` incrementally converts binary HTTP
+  headers, chunked transfer framing, and SSE fields into event/error values. Its
+  feed operation is independent of input boundaries and has no process, timer,
+  buffer, logging, or runtime-registry access.
+- **Connection transport:** the same module owns one process, immutable attempt
+  token, parser state, and header deadline. Its public boundary is start, stop,
+  parsed-event callback, typed-error callback, and connection-state inspection.
+  It does not reconnect, poll, reconcile snapshots, or render.
+- **Async runtime:** `opencode-shell-async.el` shares one connection per server,
+  owns subscriber reference counts, reconnect backoff/circuit policy, fallback
+  and reconciliation polling, and keyed wake coalescing. It never parses wire
+  bytes.
 - **State:** buffer-local snapshot reconciliation, generation checks, request
   deduplication, and dirty flags. It does not modify displayed text.
 - **Presentation:** idle, visible-only, coalesced transcript/browser rendering.
@@ -43,6 +55,12 @@ periodic low-frequency reconciliation covers lost events. The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.
 
+Protocol/configuration errors switch directly to polling. Transport closure and
+header timeout reconnect with exponential backoff until the bounded failure
+budget opens the circuit. A successful parsed event resets that budget. Runtime
+logs include only the error type/reason and circuit state, never event data,
+headers, URLs, directories, credentials, or response bodies.
+
 ## Review checklist
 
 - Does any interactive/timer callback wait for I/O?
@@ -50,6 +68,9 @@ timers, requests where possible, and stream processes.
 - Can a stale generation or killed buffer still be mutated?
 - Does a hidden buffer perform text or marker work?
 - Does another transcript create another server-level stream or cadence timer?
+- Does parser behavior remain identical for arbitrary byte segmentation?
+- Does transport code avoid reconnect/poll/UI policy, and does runtime code avoid
+  HTTP/chunk/SSE parsing?
 - Is snapshot reconciliation still authoritative after disconnect/reconnect?
 - Are payloads, directories, auth values, and response bodies absent from logs?
 - Do source and compiled ERT pass via `make verify`?

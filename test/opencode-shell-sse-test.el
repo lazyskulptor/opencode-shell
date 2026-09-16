@@ -25,6 +25,16 @@
             (format "%x\r\n%s\r\n" (length second) second)
             "0\r\nX-End: yes\r\n\r\n")))
 
+(defun opencode-shell-sse-test--segments (wire seed)
+  "Split WIRE deterministically into multiple chunks using SEED."
+  (let ((offset 0) parts)
+    (while (< offset (length wire))
+      (setq seed (% (+ (* seed 1103515245) 12345) 2147483648))
+      (let ((end (min (length wire) (+ offset 1 (% seed 17)))))
+        (push (substring wire offset end) parts)
+        (setq offset end)))
+    (nreverse parts)))
+
 (ert-deftest opencode-shell-sse-parser-is-independent-of-split-boundary ()
   (let* ((wire (opencode-shell-sse-test--wire))
          (whole (opencode-shell-sse-test--feed (list wire)))
@@ -50,6 +60,36 @@
     (should (string-empty-p (opencode-shell-sse-parser-input parser)))
     (should (equal (opencode-shell-sse-parser-input (plist-get result :parser))
                    "HTTP/1.1 200 OK\r\n"))))
+
+(ert-deftest opencode-shell-sse-parser-fixed-segmentations-match-whole-input ()
+  (let* ((wire (opencode-shell-sse-test--wire))
+         (expected (opencode-shell-sse-test--feed (list wire))))
+    (dolist (seed '(1 7 42 8675309))
+      (let ((actual (opencode-shell-sse-test--feed
+                     (opencode-shell-sse-test--segments wire seed))))
+        (should (equal (plist-get actual :events) (plist-get expected :events)))
+        (should-not (plist-get actual :error))
+        (should (eq (opencode-shell-sse-parser-phase (plist-get actual :parser))
+                    'done))))))
+
+(ert-deftest opencode-shell-sse-parser-finish-reports-incomplete-input ()
+  (let* ((parser (opencode-shell-sse-parser-create))
+         (partial (plist-get
+                   (opencode-shell-sse-parser-feed
+                    parser "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n")
+                   :parser))
+         (result (opencode-shell-sse-parser-finish partial)))
+    (should (eq (plist-get (plist-get result :error) :reason)
+                'incomplete-headers))
+    (should (eq (opencode-shell-sse-parser-phase partial) 'headers))))
+
+(ert-deftest opencode-shell-sse-parser-ignores-prefix-lookalike-fields ()
+  (let ((result
+         (opencode-shell-sse-test--feed
+          '("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndatabase: no\ndata: yes\n\n"))))
+    (should (equal (mapcar (lambda (event) (plist-get event :data))
+                           (plist-get result :events))
+                   '("yes")))))
 
 (ert-deftest opencode-shell-sse-parser-bounds-header-not-coalesced-body ()
   (let* ((data (make-string 256 ?x))
