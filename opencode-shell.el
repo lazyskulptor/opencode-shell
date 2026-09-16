@@ -2106,17 +2106,20 @@ request settles."
   "Select a server-advertised model for subsequent prompts."
   (interactive)
   (unless opencode-shell--models (user-error "No models loaded; resync first"))
-  (setq opencode-shell--selected-model
-        (cdr (assoc (completing-read "Model: " opencode-shell--models nil t)
-                    opencode-shell--models)))
+  (let* ((choice (completing-read "Model: " opencode-shell--models nil t))
+         (entry (assoc choice opencode-shell--models)))
+    (unless entry (user-error "Model is no longer available: %s" choice))
+    (setq opencode-shell--selected-model (cdr entry)))
   (force-mode-line-update))
 
 (defun opencode-shell--select-agent ()
   "Select a server-advertised agent name for subsequent prompts."
   (interactive)
   (unless opencode-shell--agents (user-error "No agents loaded; resync first"))
-  (setq opencode-shell--selected-agent
-        (completing-read "Agent: " opencode-shell--agents nil t))
+  (let* ((choice (completing-read "Agent: " opencode-shell--agents nil t))
+         (entry (assoc choice opencode-shell--agents)))
+    (unless entry (user-error "Agent is no longer available: %s" choice))
+    (setq opencode-shell--selected-agent (car entry)))
   (force-mode-line-update))
 
 (defun opencode-shell--prompt-body (text)

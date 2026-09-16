@@ -974,6 +974,72 @@
                                (should-not opencode-shell--selected-agent)))
       (kill-buffer a) (kill-buffer b))))
 
+(ert-deftest opencode-shell-selection-persists-from-ui-through-next-request ()
+  (let ((a (generate-new-buffer " *oc-selection-a*"))
+        (b (generate-new-buffer " *oc-selection-b*"))
+        (provider-response
+         '((connected . ("p"))
+           (all . (((id . "p")
+                    (models . (("one" . ((id . "one")))
+                               ("two" . ((id . "two"))))))))))
+        (agent-response
+         '(((name . "build") (mode . "primary")
+            (model . ((providerID . "p") (modelID . "one"))))
+           ((name . "plan") (mode . "primary")))))
+    (unwind-protect
+        (progn
+          (with-current-buffer b (opencode-shell-mode))
+          (with-current-buffer a
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "s"
+                  opencode-shell--models
+                  (opencode-shell--normalize-models provider-response)
+                  opencode-shell--agents
+                  (opencode-shell--normalize-agents agent-response))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt &rest _)
+                         (if (string-prefix-p "Agent" prompt) "plan" "p/two"))))
+              (opencode-shell--select-agent)
+              (opencode-shell--select-model))
+            (should (string-match-p "agent:plan" (opencode-shell--header)))
+            (should (string-match-p "model:p/two" (opencode-shell--header)))
+            (let (requests payload)
+              (cl-letf (((symbol-function 'opencode-shell--request)
+                         (lambda (method path callback &optional body _params error-callback)
+                           (if (equal method "POST")
+                               (setq payload body)
+                             (push (list path callback error-callback) requests)))))
+                (opencode-shell--resync t)
+                (funcall (cadr (assoc "/agent" requests)) agent-response)
+                (funcall (cadr (assoc "/provider" requests)) provider-response)
+                (should (equal opencode-shell--selected-agent "plan"))
+                (should (equal opencode-shell--selected-model
+                               '((providerID . "p") (modelID . "two"))))
+                (insert "hello")
+                (opencode-shell--submit)
+                (should (equal (alist-get 'agent payload) "plan"))
+                (should (equal (alist-get 'model payload)
+                               '((providerID . "p") (modelID . "two")))))))
+          (with-current-buffer b
+            (should-not opencode-shell--selected-agent)
+            (should-not opencode-shell--selected-model)))
+      (kill-buffer a)
+      (kill-buffer b))))
+
+(ert-deftest opencode-shell-selection-rejects-unavailable-completion-value ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--models
+          (opencode-shell--normalize-models
+           '((all . (((id . "p") (models . (("one" . ((id . "one"))))))))))
+          opencode-shell--agents
+          (opencode-shell--normalize-agents '(((name . "build")))))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "stale")))
+      (should-error (opencode-shell--select-model) :type 'user-error)
+      (should-error (opencode-shell--select-agent) :type 'user-error))
+    (should-not opencode-shell--selected-model)
+    (should-not opencode-shell--selected-agent)))
+
 (ert-deftest opencode-shell-markdown-preserves-raw-unicode-and-fences ()
   (with-temp-buffer
     (setq font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
