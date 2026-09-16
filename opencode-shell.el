@@ -1451,7 +1451,10 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                key buffer (concat base "/event") (and auth (list auth))
                (not (opencode-shell--profile-remote-p profile))
                opencode-shell-poll-interval
-               (lambda () (opencode-shell--resync nil)))))
+               (lambda () (opencode-shell--resync nil))
+               (lambda (event)
+                 (when opencode-shell-log-requests
+                   (opencode-shell--log "OpenCode async %s" event))))))
         (setq opencode-shell--runtime-key key
               opencode-shell--poll-timer (plist-get runtime :poll-timer)
               opencode-shell--animation-timer
@@ -2369,7 +2372,9 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
   (when (get-buffer-window (current-buffer) t)
     (opencode-shell-async-enqueue
      (current-buffer) 'render opencode-shell--generation
-     #'opencode-shell--flush-render)))
+     #'opencode-shell--flush-render))
+  (unless (get-buffer-window (current-buffer) t)
+    (opencode-shell--log-lifecycle "render-deferred:hidden")))
 
 (defun opencode-shell--render-if-visible ()
   "Schedule one render when a dirty transcript becomes visible."

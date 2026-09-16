@@ -57,6 +57,11 @@
           buffer (list 'runtime reason) opencode-shell--generation callback))))
    (plist-get runtime :subscribers)))
 
+(defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)
+  "Emit a privacy-safe runtime message for RUNTIME."
+  (when-let ((logger (plist-get runtime :logger)))
+    (funcall logger (apply #'format format-string arguments))))
+
 (defun opencode-shell-async--poll-runtime (key)
   "Poll subscribers for KEY at fallback or reconciliation cadence."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
@@ -67,6 +72,9 @@
                                       interval))))
       (setf (plist-get runtime :ticks) ticks)
       (when (or (not connected) (zerop (% ticks reconcile-ticks)))
+        (opencode-shell-async--runtime-log
+         runtime "transport=%s wake=poll"
+         (if connected "sse" "fallback"))
         (opencode-shell-async--deliver-runtime runtime 'poll)))))
 
 (defun opencode-shell-async--parse-sse (runtime text)
@@ -111,6 +119,9 @@
                 (plist-get runtime :connected)
                 (string-match-p "\\`HTTP/[0-9.]+ 2[0-9][0-9]" headers)
                 (plist-get runtime :backoff) 1)
+          (opencode-shell-async--runtime-log
+           runtime "transport=%s"
+           (if (plist-get runtime :connected) "sse-connected" "fallback-http"))
           (unless (plist-get runtime :connected)
             (delete-process (plist-get runtime :process))))))
     (when (plist-get runtime :headers-done)
@@ -126,6 +137,7 @@
     (unless (or (zerop (hash-table-count (plist-get runtime :subscribers)))
                 (timerp (plist-get runtime :reconnect-timer)))
       (let ((delay (min 30 (or (plist-get runtime :backoff) 1))))
+        (opencode-shell-async--runtime-log runtime "transport=fallback reconnect=%ss" delay)
         (setf (plist-get runtime :backoff) (min 30 (* 2 delay))
               (plist-get runtime :reconnect-timer)
               (run-at-time delay nil #'opencode-shell-async--connect key))))))
@@ -139,6 +151,7 @@
             (plist-get runtime :headers-done) nil
             (plist-get runtime :input) ""
             (plist-get runtime :sse-input) "")
+      (opencode-shell-async--runtime-log runtime "transport=fallback stream=closed")
       (opencode-shell-async--schedule-reconnect key))))
 
 (defun opencode-shell-async--connect (key)
@@ -161,6 +174,7 @@
                              (opencode-shell-async--stream-filter key process chunk))
                    :sentinel (lambda (process event)
                                (opencode-shell-async--stream-sentinel key process event)))))
+            (opencode-shell-async--runtime-log runtime "transport=sse state=connecting")
             (set-process-query-on-exit-flag process nil)
             (setf (plist-get runtime :process) process
                   (plist-get runtime :input) ""
@@ -176,12 +190,13 @@
         (error (opencode-shell-async--schedule-reconnect key))))))
 
 (defun opencode-shell-async-subscribe-runtime
-    (key buffer url headers sse-enabled poll-interval callback)
+    (key buffer url headers sse-enabled poll-interval callback &optional logger)
   "Subscribe BUFFER to KEY runtime and invoke CALLBACK on event/poll wakes."
   (let ((runtime (or (gethash key opencode-shell-async--runtimes)
                      (list :subscribers (make-hash-table :test #'eq :weakness 'key)
                            :url url :headers headers :sse-enabled sse-enabled
                            :poll-interval poll-interval
+                           :logger logger
                            :backoff 1 :ticks 0 :poll-timer nil
                            :reconnect-timer nil :process nil :connected nil
                            :headers-done nil :chunked nil :input ""

@@ -21,3 +21,8 @@
   an exclusive prompt boundary.
 - Add a separate unbound directory-scope function that updates the current
   transcript buffer in place without reopening or migrating the server session.
+- Add a server-shared SSE wake-up runtime with nonblocking polling fallback,
+  idle-coalesced state delivery, visible-only transcript/browser rendering, and
+  deterministic cleanup of queued work, streams, and timers.
+- Document asynchronous runtime invariants that prohibit synchronous I/O and
+  callback-driven buffer rendering on interactive hot paths.

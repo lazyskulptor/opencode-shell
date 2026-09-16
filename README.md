@@ -181,6 +181,13 @@ The network cadence remains controlled independently by
 `opencode-shell-poll-interval` (2 seconds by default); spinner ticks are not logged
 as polls because they perform no network work.
 
+Async runtime lines report only bounded control state such as
+`transport=sse-connected`, `transport=fallback`, reconnect delay, poll wakeups,
+and deferred hidden rendering. They never include SSE payloads, transcript text,
+request bodies, directories, or authorization values. A healthy local runtime
+normally shows one SSE connection regardless of the number of transcript buffers;
+fallback lines followed by reconnect lines indicate automatic recovery.
+
 ## Asynchronous runtime principles
 
 Interactive commands never wait synchronously for network or process I/O.

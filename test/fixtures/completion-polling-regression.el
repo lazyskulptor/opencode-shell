@@ -16,5 +16,11 @@
                  (state . ((status . "completed")))))))))
   "Metadata-only history snapshots for completion polling regression tests.")
 
+(defconst opencode-shell-test--sse-wake-burst
+  '("data: {\"type\":\"session.updated\"}\n\n"
+    "data: {\"type\":\"message.updated\"}\n\n"
+    "data: {\"type\":\"session.idle\"}\n\n")
+  "Payload-free event burst used to verify wake-up coalescing.")
+
 (provide 'completion-polling-regression)
 ;;; completion-polling-regression.el ends here
