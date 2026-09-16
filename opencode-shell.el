@@ -473,6 +473,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--poll-timer nil)
+(defvar-local opencode-shell--runtime-key nil)
 (defvar-local opencode-shell--animation-timer nil)
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--render-dirty nil)
@@ -1371,14 +1372,20 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                #'opencode-shell--refresh-table-layout t)
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--render-if-visible t)
-  (when (timerp opencode-shell--poll-timer) (cancel-timer opencode-shell--poll-timer))
+  (when (and (timerp opencode-shell--poll-timer)
+             (null opencode-shell--runtime-key))
+    (cancel-timer opencode-shell--poll-timer))
+  (when opencode-shell--runtime-key
+    (opencode-shell-async-unsubscribe-runtime
+     opencode-shell--runtime-key (current-buffer)))
   (when (and (timerp opencode-shell--animation-timer)
              (not (eq opencode-shell--animation-timer
                       opencode-shell-async--animation-timer)))
     (cancel-timer opencode-shell--animation-timer))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (setq opencode-shell--poll-timer nil
-        opencode-shell--animation-timer nil)
+        opencode-shell--animation-timer nil
+        opencode-shell--runtime-key nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
   (when opencode-shell--session-id
@@ -1389,33 +1396,46 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 (defun opencode-shell--stop-polling ()
   "Stop periodic network polling and UI animation in the current buffer."
   (opencode-shell-async-cancel)
-  (when (timerp opencode-shell--poll-timer)
+  (when (and (timerp opencode-shell--poll-timer)
+             (null opencode-shell--runtime-key))
     (cancel-timer opencode-shell--poll-timer))
+  (when opencode-shell--runtime-key
+    (opencode-shell-async-unsubscribe-runtime
+     opencode-shell--runtime-key (current-buffer)))
   (when (and (timerp opencode-shell--animation-timer)
              (not (eq opencode-shell--animation-timer
                       opencode-shell-async--animation-timer)))
     (cancel-timer opencode-shell--animation-timer))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (setq opencode-shell--poll-timer nil
-        opencode-shell--animation-timer nil)
+        opencode-shell--animation-timer nil
+        opencode-shell--runtime-key nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
 (defun opencode-shell--start-polling ()
   "Start periodic network polling and UI animation if needed."
-  (unless (timerp opencode-shell--poll-timer)
+  (unless opencode-shell--runtime-key
     (let ((buffer (current-buffer)))
       (setq opencode-shell--animation-frame 0)
       (opencode-shell--render-status-animation)
-      (setq opencode-shell--poll-timer
-            (run-at-time opencode-shell-poll-interval opencode-shell-poll-interval
-                         (lambda (target)
-                           (when (buffer-live-p target)
-                              (with-current-buffer target (opencode-shell--resync nil))))
-                          buffer)
-            opencode-shell--animation-timer
+      (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
+             (key (opencode-shell--server-key profile))
+             (base (string-remove-suffix
+                    "/" (or opencode-shell--base-url
+                            (plist-get profile :base-url) opencode-shell-base-url)))
+             (auth (opencode-shell--auth-header profile))
+             (runtime
+              (opencode-shell-async-subscribe-runtime
+               key buffer (concat base "/event") (and auth (list auth))
+               (not (opencode-shell--profile-remote-p profile))
+               opencode-shell-poll-interval
+               (lambda () (opencode-shell--resync nil)))))
+        (setq opencode-shell--runtime-key key
+              opencode-shell--poll-timer (plist-get runtime :poll-timer)
+              opencode-shell--animation-timer
             (opencode-shell-async-subscribe-animation
              buffer opencode-shell-animation-interval
-             #'opencode-shell--animation-tick))
+             #'opencode-shell--animation-tick)))
       (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload

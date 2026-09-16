@@ -1097,10 +1097,15 @@
       (should-not called))))
 
 (ert-deftest opencode-shell-reopen-keeps-one-timer ()
-  (let (timers cancelled opened)
+  (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+        (opencode-shell-async--animation-subscribers
+         (make-hash-table :test #'eq :weakness 'key))
+        (opencode-shell-async--animation-timer nil)
+        timers cancelled opened)
     (cl-letf (((symbol-function 'pop-to-buffer)
                (lambda (buffer &rest _) (setq opened buffer)))
               ((symbol-function 'opencode-shell--resync) #'ignore)
+              ((symbol-function 'opencode-shell-async--connect) #'ignore)
               ((symbol-function 'run-at-time)
                (lambda (&rest _) (let ((timer (list 'timer))) (push timer timers) timer)))
               ((symbol-function 'timerp) (lambda (value) (eq (car-safe value) 'timer)))
@@ -1109,16 +1114,20 @@
           (progn
              (opencode-shell-open-session "timer-test")
              (opencode-shell-open-session "timer-test")
-             ;; Reopening replaces the buffer poll timer while retaining the
-             ;; single package-wide animation timer.
-             (should (= (length timers) 3))
-             (should (= (length cancelled) 1)))
+             ;; Reopening tears down the last subscription and recreates the
+             ;; shared runtime timers without leaving duplicates active.
+             (should (= (length timers) 4))
+             (should (= (length cancelled) 2)))
         (when (buffer-live-p opened) (kill-buffer opened))))))
 
 (ert-deftest opencode-shell-animation-is-ui-only-resettable-and-deduplicated ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting))
+          (opencode-shell-async--runtimes (make-hash-table :test #'equal))
+          (opencode-shell-async--animation-subscribers
+           (make-hash-table :test #'eq :weakness 'key))
+          (opencode-shell-async--animation-timer nil)
           timers cancelled network-calls)
       (setq opencode-shell--turns (list turn)
             opencode-shell--animation-frame 7)
@@ -1134,7 +1143,8 @@
                  (lambda (timer) (push timer cancelled)))
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) t))
                 ((symbol-function 'opencode-shell--resync)
-                 (lambda (&rest _) (cl-incf network-calls))))
+                 (lambda (&rest _) (cl-incf network-calls)))
+                ((symbol-function 'opencode-shell-async--connect) #'ignore))
         (opencode-shell--start-polling)
         (should (= opencode-shell--animation-frame 0))
         (should (= 2 (length timers)))
@@ -2339,9 +2349,62 @@
                            opencode-shell--turns)
                    '("u1" "u2")))))
 
-(ert-deftest opencode-shell-does-not-define-sse-transport ()
-  (should-not (fboundp 'opencode-shell--event-connect))
-  (should-not (boundp 'opencode-shell--event-process)))
+(ert-deftest opencode-shell-sse-bursts-coalesce-runtime-wakes ()
+  (let ((first (generate-new-buffer " *sse-first*"))
+        (second (generate-new-buffer " *sse-second*"))
+        (runtime (list :subscribers (make-hash-table :test #'eq)
+                       :sse-input "")))
+    (unwind-protect
+        (progn
+          (puthash first #'ignore (plist-get runtime :subscribers))
+          (puthash second #'ignore (plist-get runtime :subscribers))
+          (dolist (buffer (list first second))
+            (with-current-buffer buffer
+              (setq-local opencode-shell--generation 1)))
+          (cl-letf (((symbol-function 'run-with-idle-timer)
+                     (lambda (&rest _) 'timer))
+                    ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+            (opencode-shell-async--parse-sse
+             runtime "data: {\"type\":\"session.updated\"}\n\n")
+            (opencode-shell-async--parse-sse
+             runtime "data: {\"type\":\"session.updated\"}\n\n")
+            (dolist (buffer (list first second))
+              (with-current-buffer buffer
+                (should (= (length opencode-shell-async--queue) 1))))))
+      (kill-buffer first)
+      (kill-buffer second))))
+
+(ert-deftest opencode-shell-runtime-shares-one-stream-cadence-and-cleans-up ()
+  (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+        (first (generate-new-buffer " *runtime-first*"))
+        (second (generate-new-buffer " *runtime-second*"))
+        timers cancelled)
+    (unwind-protect
+        (cl-letf (((symbol-function 'opencode-shell-async--connect) #'ignore)
+                  ((symbol-function 'run-at-time)
+                   (lambda (&rest args)
+                     (let ((timer (cons 'timer args)))
+                       (push timer timers)
+                       timer)))
+                  ((symbol-function 'timerp)
+                   (lambda (value) (eq (car-safe value) 'timer)))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer) (push timer cancelled))))
+          (opencode-shell-async-subscribe-runtime
+           'server first "http://localhost:4199/event" nil t 2 #'ignore)
+          (opencode-shell-async-subscribe-runtime
+           'server second "http://localhost:4199/event" nil t 2 #'ignore)
+          (let ((runtime (opencode-shell-async-runtime-get 'server)))
+            (should runtime)
+            (should (= (hash-table-count (plist-get runtime :subscribers)) 2))
+            (should (= (length timers) 1)))
+          (opencode-shell-async-unsubscribe-runtime 'server first)
+          (should (opencode-shell-async-runtime-get 'server))
+          (opencode-shell-async-unsubscribe-runtime 'server second)
+          (should-not (opencode-shell-async-runtime-get 'server))
+          (should (= (length cancelled) 1)))
+      (kill-buffer first)
+      (kill-buffer second))))
 
 (ert-deftest opencode-shell-submit-includes-stable-message-id ()
   (with-temp-buffer

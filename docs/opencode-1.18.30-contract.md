@@ -5,6 +5,7 @@
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Check server readiness; profiles may override the path |
+| `GET` | `/event` | Shared `text/event-stream` wake-up channel; snapshots remain authoritative |
 | `GET` | `/session` | List sessions for exact `directory`; `limit` overrides the default 100-row truncation |
 | `POST` | `/session` | Create a session |
 | `POST` | `/session/:id/fork` | Fork before optional `messageID`; omit it to copy all history |
