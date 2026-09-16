@@ -1166,6 +1166,64 @@
                        ((id . "p2") (type . "step-finish")))))))
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
 
+(ert-deftest opencode-shell-tool-calls-finish-step-does-not-complete-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                      (finish . "tool-calls") (time . ((created . 1) (completed . 2)))))
+             (parts . (((id . "p1") (type . "tool") (tool . "read")
+                        (state . ((status . "completed"))))
+                       ((id . "p2") (type . "step-finish")))))))
+    (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
+
+(ert-deftest opencode-shell-multi-step-turn-completes-only-at-final-stop-step ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user (opencode-shell-test--message "u1" "user" "question"))
+          (step1 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                            (finish . "tool-calls") (time . ((created . 1) (completed . 2)))))
+                   (parts . (((id . "p1") (type . "tool") (tool . "read")
+                              (state . ((status . "completed"))))
+                             ((id . "p2") (type . "step-finish"))))))
+          (step2 '((info . ((id . "a2") (role . "assistant") (parentID . "u1")
+                            (finish . "stop") (time . ((created . 3) (completed . 4)))))
+                   (parts . (((id . "p3") (type . "text") (text . "answer"))
+                             ((id . "p4") (type . "step-finish")))))))
+      (opencode-shell--render-messages (list user step1))
+      (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (opencode-shell--render-messages (list user step1 step2))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer")))))
+
+(ert-deftest opencode-shell-error-terminated-message-completes-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                      (time . ((created . 1) (completed . 2)))
+                      (error . ((name . "MessageAbortedError")
+                                (data . ((message . "Aborted")))))))
+             (parts . nil))))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+    (should (equal (opencode-shell--turn-terminal-error (car opencode-shell--turns))
+                   "MessageAbortedError: Aborted"))))
+
+(ert-deftest opencode-shell-running-tool-blocks-error-completion ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                      (time . ((created . 1) (completed . 2)))
+                      (error . ((name . "MessageAbortedError")
+                                (data . ((message . "Aborted")))))))
+             (parts . (((id . "p1") (type . "tool") (tool . "read")
+                        (state . ((status . "running")))))))))
+    (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))))
+
 (ert-deftest opencode-shell-sanitized-polling-fixture-completes-authoritatively ()
   (with-temp-buffer
     (opencode-shell-mode)

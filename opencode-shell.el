@@ -497,7 +497,7 @@ and lifecycle keys."
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
   id server-user-id user assistant parts assistant-messages status acknowledged user-begin user-end
-  response-begin response-end)
+  response-begin response-end terminal-error)
 
 (defun opencode-shell--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -1164,15 +1164,31 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (and (member type '("tool" "tool_use" "tool-result"))
          (not (member status '("completed" "error"))))))
 
+(defun opencode-shell--continuation-finish-p (finish)
+  "Return non-nil when FINISH indicates more assistant steps will follow.
+On OpenCode 1.18.30, \"tool-calls\" is the only observed non-terminal value;
+every other populated value (observed: \"stop\") is terminal."
+  (equal (format "%s" finish) "tool-calls"))
+
+(defun opencode-shell--message-error-label (info)
+  "Return a bounded human-readable label for INFO's terminal error, or nil."
+  (when-let ((err (opencode-shell--get info 'error)))
+    (let* ((name (format "%s" (or (opencode-shell--get err 'name) "Error")))
+           (message (opencode-shell--get (opencode-shell--get err 'data) 'message)))
+      (truncate-string-to-width
+       (if message (format "%s: %s" name message) name)
+       200 nil nil t))))
+
 (defun opencode-shell--assistant-envelope-complete-p (envelope)
   "Return non-nil when ENVELOPE contains authoritative completion evidence."
-  (let ((info (opencode-shell--get envelope 'info))
-        (parts (opencode-shell--get envelope 'parts)))
+  (let* ((info (opencode-shell--get envelope 'info))
+         (parts (opencode-shell--get envelope 'parts))
+         (finish (opencode-shell--get info 'finish)))
     (and (not (seq-some #'opencode-shell--running-tool-part-p parts))
-         (or (seq-some #'opencode-shell--terminal-part-p parts)
-             (and (opencode-shell--get info 'finish)
-                  (opencode-shell--get (opencode-shell--get info 'time)
-                                        'completed))))))
+         (not (opencode-shell--continuation-finish-p finish))
+         (or (and (opencode-shell--get (opencode-shell--get info 'time) 'completed)
+                  (or finish (opencode-shell--get info 'error)))
+             (and (null finish) (seq-some #'opencode-shell--terminal-part-p parts))))))
 
 (defun opencode-shell--lifecycle-id (value)
   "Return VALUE as bounded operational metadata."
@@ -1327,6 +1343,13 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                       (opencode-shell--turn-assistant turn)
                       (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
                                  messages "")
+                      (opencode-shell--turn-terminal-error turn)
+                      (and (opencode-shell--assistant-envelope-complete-p
+                            (cdar (last messages)))
+                           (not (seq-some #'opencode-shell--running-tool-part-p
+                                          (opencode-shell--turn-parts turn)))
+                           (opencode-shell--message-error-label
+                            (opencode-shell--get (cdar (last messages)) 'info)))
                       (opencode-shell--turn-status turn)
                        (if (and (opencode-shell--assistant-envelope-complete-p
                                  (cdar (last messages)))
