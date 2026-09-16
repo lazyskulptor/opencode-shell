@@ -613,14 +613,31 @@
             (list (opencode-shell--make-turn :id "not-a-prefix")))
       (opencode-shell--render-turns)
       (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
-      (should (< (save-excursion
-                   (goto-char (point-min))
-                   (search-forward "Waiting for response")
-                   (point))
-                 (save-excursion
-                   (goto-char (point-min))
-                   (search-forward "PERMISSION ALWAYS")
-                   (point))))
+       (should (< (save-excursion
+                    (goto-char (point-min))
+                    (search-forward "PERMISSION ALWAYS")
+                    (point))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (search-forward "Waiting for response")
+                    (point))))
+       (setf (opencode-shell--turn-assistant turn) "finished"
+             (opencode-shell--turn-status turn) 'complete)
+       (dotimes (_ 2)
+         (setq opencode-shell--rendered-turns
+               (list (opencode-shell--make-turn :id "not-a-prefix")))
+         (opencode-shell--render-turns))
+       (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
+       (should (< (save-excursion
+                    (goto-char (point-min))
+                    (search-forward "PERMISSION ALWAYS")
+                    (point))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (search-forward "finished")
+                    (point))))
+       (should (< (opencode-shell--turn-user-end turn)
+                  (opencode-shell--turn-response-begin turn)))
       (goto-char opencode-shell--composer-start)
       (insert "draft")
       (goto-char (+ opencode-shell--composer-start 2))

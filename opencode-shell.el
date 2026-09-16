@@ -1685,8 +1685,10 @@ request settles."
     (insert (propertize "USER>\n" 'font-lock-face 'opencode-shell-user-face
                         'rear-nonsticky '(font-lock-face))
             (or (opencode-shell--turn-user turn) "") "\n\n")
-    (let ((user-end (point))
-          (response-begin (point)))
+    (let ((user-end (point)))
+      (opencode-shell--insert-permission-results
+       (opencode-shell--turn-id turn))
+      (let ((response-begin (point)))
       (if (eq (opencode-shell--turn-status turn) 'complete)
           (let ((answer (opencode-shell--assistant-display-text turn)))
           (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
@@ -1711,8 +1713,8 @@ request settles."
                              '(read-only t rear-nonsticky (read-only face)))
         (setf (opencode-shell--turn-user-begin turn) (copy-marker user-begin)
               (opencode-shell--turn-user-end turn) (copy-marker user-end)
-              (opencode-shell--turn-response-begin turn) (copy-marker response-begin)
-              (opencode-shell--turn-response-end turn) (copy-marker response-end))))))
+               (opencode-shell--turn-response-begin turn) (copy-marker response-begin)
+               (opencode-shell--turn-response-end turn) (copy-marker response-end)))))))
 
 (defun opencode-shell--turn-rendered-p (turn)
   "Return non-nil when TURN owns valid rendered markers in this buffer."
@@ -1851,9 +1853,7 @@ request settles."
         (opencode-shell--insert-permission-results nil)
         (opencode-shell--insert-unanchored-permission-results)
         (dolist (turn opencode-shell--turns)
-          (opencode-shell--insert-turn-blocks turn)
-          (opencode-shell--insert-permission-results
-           (opencode-shell--turn-id turn)))
+          (opencode-shell--insert-turn-blocks turn))
         (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
