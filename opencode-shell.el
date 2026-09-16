@@ -1696,7 +1696,7 @@ request settles."
               (opencode-shell--turn-response-end turn) (copy-marker response-end))))))
 
 (defun opencode-shell--turn-rendered-p (turn)
-  "Return non-nil when TURN owns live rendered markers in this buffer."
+  "Return non-nil when TURN owns valid rendered markers in this buffer."
   (let ((markers (list (opencode-shell--turn-user-begin turn)
                        (opencode-shell--turn-user-end turn)
                        (opencode-shell--turn-response-begin turn)
@@ -1704,7 +1704,8 @@ request settles."
     (and (seq-every-p (lambda (marker)
                         (and (markerp marker)
                              (marker-position marker)
-                             (eq (marker-buffer marker) (current-buffer))))
+                             (eq (marker-buffer marker) (current-buffer))
+                             (<= (point-min) (marker-position marker) (point-max))))
                       markers)
          (apply #'<= (mapcar #'marker-position markers)))))
 
@@ -1803,16 +1804,18 @@ request settles."
          (composer-text (opencode-shell--composer-text))
          (old-point (point))
          (inhibit-read-only t))
-    (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
-    (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
-    (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
     (let* ((known-count (length opencode-shell--rendered-turns))
+           (rendered-valid
+            (seq-every-p #'opencode-shell--turn-rendered-p
+                         opencode-shell--rendered-turns))
            (append-only
-             (and (<= known-count (length opencode-shell--turns))
-                 (cl-every #'eq opencode-shell--rendered-turns
-                           (seq-take opencode-shell--turns known-count))
-                 (seq-every-p #'opencode-shell--turn-rendered-p
-                              opencode-shell--rendered-turns))))
+            (and rendered-valid
+                 (<= known-count (length opencode-shell--turns))
+                  (cl-every #'eq opencode-shell--rendered-turns
+                           (seq-take opencode-shell--turns known-count)))))
+      (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
+      (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
+      (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
       (when append-only
         (dolist (turn opencode-shell--rendered-turns)
           (save-excursion (opencode-shell--update-turn-response turn))))
@@ -1825,6 +1828,9 @@ request settles."
         (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
         (delete-region opencode-shell--transcript-end opencode-shell--composer-start)
         (delete-region (point-min) opencode-shell--transcript-end)
+        (when (and (not rendered-valid)
+                   (< opencode-shell--composer-start (point-max)))
+          (delete-region opencode-shell--composer-start (point-max)))
         (goto-char (point-min))
         (opencode-shell--insert-permission-results nil)
         (opencode-shell--insert-unanchored-permission-results)

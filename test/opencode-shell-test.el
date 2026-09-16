@@ -1470,6 +1470,20 @@
     (opencode-shell--render-turns)
     (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
 
+(ert-deftest opencode-shell-stale-response-marker-triggers-full-rerender ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-test--message "u1" "user" "question")
+           (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
+    (let* ((turn (car opencode-shell--turns))
+           (stale-end (copy-marker (1+ (point-max)))))
+      (setf (opencode-shell--turn-response-end turn) stale-end)
+      (opencode-shell--render-turns)
+      (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
+      (should (string-match-p "answer" (buffer-string)))
+      (should (opencode-shell--turn-rendered-p turn)))))
+
 (ert-deftest opencode-shell-hides-composer-label-until-response-completes ()
   (with-temp-buffer
     (opencode-shell-mode)
