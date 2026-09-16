@@ -1449,7 +1449,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (unless opencode-shell--runtime-key
     (let ((buffer (current-buffer)))
       (setq opencode-shell--animation-frame 0)
-      (opencode-shell--render-status-animation)
+      (opencode-shell--schedule-render "poll-start")
       (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
              (key (opencode-shell--server-key profile))
              (base (string-remove-suffix
@@ -2796,7 +2796,7 @@ Render immediately unless DEFER-RENDER is non-nil."
                (seq-remove (lambda (entry)
                             (equal id (opencode-shell--question-id entry)))
                            opencode-shell--questions-pending))
-         (opencode-shell--render-permissions)
+         (opencode-shell--schedule-render "question-reply")
          (opencode-shell--resync nil)
          (message "Question reply sent"))
        `((answers . ,answers)) nil
@@ -2823,7 +2823,7 @@ Render immediately unless DEFER-RENDER is non-nil."
              (seq-remove (lambda (entry)
                          (equal id (opencode-shell--question-id entry)))
                         opencode-shell--questions-pending))
-       (opencode-shell--render-permissions)
+       (opencode-shell--schedule-render "question-reject")
        (opencode-shell--resync nil)
        (message "Question rejected"))
      '() nil

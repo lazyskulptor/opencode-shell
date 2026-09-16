@@ -77,6 +77,8 @@
     (unwind-protect
         (cl-letf (((symbol-function 'run-with-idle-timer)
                    (lambda (&rest _) 'idle-timer))
+                  ((symbol-function 'run-at-time)
+                   (lambda (&rest _) 'idle-timer))
                   ((symbol-function 'timerp)
                    (lambda (value) (eq value 'idle-timer)))
                   ((symbol-function 'cancel-timer) #'ignore))

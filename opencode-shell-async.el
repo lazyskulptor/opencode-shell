@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'url-parse)
 
 (defvar opencode-shell-async--runtimes (make-hash-table :test #'equal)
@@ -24,13 +25,24 @@
 (defvar opencode-shell-async--animation-timer nil
   "Single timer serving all visible transcript animations.")
 
+(defvar opencode-shell-async--animation-interval nil
+  "Current cadence of the shared animation timer.")
+
 (defconst opencode-shell-async--reconcile-interval 15)
+(defconst opencode-shell-async--max-header-bytes 65536)
+(defconst opencode-shell-async--max-chunk-bytes (* 4 1024 1024))
+(defconst opencode-shell-async--max-sse-frame-bytes (* 1024 1024))
+(defconst opencode-shell-async--header-timeout 10)
+(defconst opencode-shell-async--delivery-timeout 0.25)
 
 (defvar-local opencode-shell-async--queue nil
   "Latest queued callback for each key in the current buffer.")
 
 (defvar-local opencode-shell-async--idle-timer nil
   "Idle timer draining `opencode-shell-async--queue'.")
+
+(defvar-local opencode-shell-async--delivery-timer nil
+  "Bounded non-idle fallback timer for queued callback delivery.")
 
 (defun opencode-shell-async-runtime-get (key)
   "Return shared runtime registered under KEY."
@@ -86,6 +98,10 @@
         (setq input (substring input (match-end 0)))
         (when (string-match-p "\\(?:^\\|\n\\)data:" frame)
           (opencode-shell-async--deliver-runtime runtime 'event))))
+    (when (> (length input) opencode-shell-async--max-sse-frame-bytes)
+      (setq input "")
+      (when (process-live-p (plist-get runtime :process))
+        (delete-process (plist-get runtime :process))))
     (setf (plist-get runtime :sse-input) input)))
 
 (defun opencode-shell-async--parse-chunks (runtime)
@@ -102,6 +118,10 @@
                  (start (+ (length line) 2))
                  (end (+ start size)))
             (cond
+             ((> size opencode-shell-async--max-chunk-bytes)
+              (setq input "" done t)
+              (when (process-live-p (plist-get runtime :process))
+                (delete-process (plist-get runtime :process))))
              ((> (+ end 2) (length input)) (setq done t))
              ((not (equal (substring input end (+ end 2)) "\r\n"))
               (setq input "" done t)
@@ -120,11 +140,28 @@
         (delete-process (plist-get runtime :process))))
     (setf (plist-get runtime :input) input)))
 
-(defun opencode-shell-async--stream-filter (key _process chunk)
-  "Consume an HTTP SSE CHUNK for runtime KEY."
+(defun opencode-shell-async--cancel-header-timer (runtime)
+  "Cancel RUNTIME's connection/header deadline."
+  (when (timerp (plist-get runtime :header-timer))
+    (cancel-timer (plist-get runtime :header-timer)))
+  (setf (plist-get runtime :header-timer) nil))
+
+(defun opencode-shell-async--stream-filter (key token process chunk)
+  "Consume an HTTP SSE CHUNK for runtime KEY and connection TOKEN."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (setf (plist-get runtime :input)
-          (concat (or (plist-get runtime :input) "") chunk))
+    (when (and (eq token (plist-get runtime :connect-token))
+               (or (eq process (plist-get runtime :process))
+                   (and (plist-get runtime :connecting)
+                        (null (plist-get runtime :process)))))
+      (when (null (plist-get runtime :process))
+        (setf (plist-get runtime :process) process
+              (plist-get runtime :connecting) nil))
+      (setf (plist-get runtime :input)
+            (concat (or (plist-get runtime :input) "") chunk))
+      (when (and (not (plist-get runtime :headers-done))
+                 (> (length (plist-get runtime :input))
+                    opencode-shell-async--max-header-bytes))
+        (delete-process process))
     (unless (plist-get runtime :headers-done)
       (when (string-match "\r\n\r\n" (plist-get runtime :input))
         (let* ((input (plist-get runtime :input))
@@ -134,10 +171,13 @@
                 (plist-get runtime :chunked)
                 (string-match-p "transfer-encoding:[ \t]*chunked" (downcase headers))
                 (plist-get runtime :connected)
-                (and (string-match-p "\\`HTTP/[0-9.]+ 2[0-9][0-9]" headers)
+                (and (string-match-p
+                      "\\`HTTP/[0-9]+\\.[0-9]+ 2[0-9][0-9]\\(?: [^\r\n]*\\)?\r\n"
+                      headers)
                      (string-match-p
                       "\\(?:\\`\\|\r\n\\)content-type:[ \t]*text/event-stream[ \t]*\\(?:;[^\r\n]*\\)?\\(?:\r\n\\|\\'\\)"
                       (downcase headers))))
+          (opencode-shell-async--cancel-header-timer runtime)
           (when (plist-get runtime :connected)
             (setf (plist-get runtime :backoff) 1))
           (opencode-shell-async--runtime-log
@@ -150,7 +190,7 @@
           (opencode-shell-async--parse-chunks runtime)
         (let ((body (plist-get runtime :input)))
           (setf (plist-get runtime :input) "")
-          (opencode-shell-async--parse-sse runtime body))))))
+          (opencode-shell-async--parse-sse runtime body)))))))
 
 (defun opencode-shell-async--schedule-reconnect (key)
   "Schedule a bounded asynchronous reconnect for runtime KEY."
@@ -163,17 +203,42 @@
               (plist-get runtime :reconnect-timer)
               (run-at-time delay nil #'opencode-shell-async--connect key))))))
 
-(defun opencode-shell-async--stream-sentinel (key process _event)
-  "Handle PROCESS closure for runtime KEY without blocking."
+(defun opencode-shell-async--stream-sentinel (key token process _event)
+  "Handle PROCESS closure for runtime KEY and connection TOKEN."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (when (eq process (plist-get runtime :process))
+    (when (and (eq token (plist-get runtime :connect-token))
+               (or (eq process (plist-get runtime :process))
+                   (and (plist-get runtime :connecting)
+                        (null (plist-get runtime :process)))))
+      (opencode-shell-async--cancel-header-timer runtime)
       (setf (plist-get runtime :process) nil
+            (plist-get runtime :connecting) nil
             (plist-get runtime :connected) nil
             (plist-get runtime :headers-done) nil
             (plist-get runtime :input) ""
             (plist-get runtime :sse-input) "")
       (opencode-shell-async--runtime-log runtime "transport=fallback stream=closed")
       (opencode-shell-async--schedule-reconnect key))))
+
+(defun opencode-shell-async--header-timeout (key token)
+  "Close KEY's connection TOKEN if SSE headers did not complete."
+  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+    (when (and (eq token (plist-get runtime :connect-token))
+               (not (plist-get runtime :headers-done)))
+      (setf (plist-get runtime :header-timer) nil)
+      (when (process-live-p (plist-get runtime :process))
+        (delete-process (plist-get runtime :process))))))
+
+(defun opencode-shell-async--valid-request-p (host path headers)
+  "Return non-nil when HOST, PATH, and HEADERS are safe for raw HTTP."
+  (and (stringp host) (not (string-match-p "[\r\n]" host))
+       (stringp path) (not (string-match-p "[\r\n]" path))
+       (seq-every-p
+        (lambda (header)
+          (and (string-match-p "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'"
+                               (format "%s" (car header)))
+               (not (string-match-p "[\r\n]" (format "%s" (cdr header))))))
+        headers)))
 
 (defun opencode-shell-async--connect (key)
   "Open the direct HTTP SSE stream for runtime KEY."
@@ -187,39 +252,76 @@
                  (host (url-host url))
                  (port (or (url-port url) 80))
                  (path (or (url-filename url) "/event"))
+                 (token (cons key (float-time)))
+                 (_valid
+                  (unless (opencode-shell-async--valid-request-p
+                           host path (plist-get runtime :headers))
+                    (setf (plist-get runtime :sse-enabled) nil)
+                    (error "Unsafe SSE request metadata")))
                  (process
-                  (make-network-process
-                   :name (format "opencode-sse-%s" (sxhash-equal key))
-                   :host host :service port :coding 'binary :noquery t
-                   :filter (lambda (process chunk)
-                             (opencode-shell-async--stream-filter key process chunk))
-                   :sentinel (lambda (process event)
-                               (opencode-shell-async--stream-sentinel key process event)))))
+                  (progn
+                    (setf (plist-get runtime :connect-token) token
+                          (plist-get runtime :connecting) t
+                          (plist-get runtime :process) nil)
+                   (make-network-process
+                    :name (format "opencode-sse-%s" (sxhash-equal key))
+                    :host host :service port :coding 'binary :noquery t
+                    :filter (lambda (process chunk)
+                              (opencode-shell-async--stream-filter
+                               key token process chunk))
+                    :sentinel (lambda (process event)
+                                (opencode-shell-async--stream-sentinel
+                                 key token process event))))))
             (opencode-shell-async--runtime-log runtime "transport=sse state=connecting")
             (set-process-query-on-exit-flag process nil)
-            (setf (plist-get runtime :process) process
+            (when (null (plist-get runtime :process))
+              (setf (plist-get runtime :process) process))
+            (setf (plist-get runtime :connecting) nil
                   (plist-get runtime :input) ""
-                  (plist-get runtime :sse-input) "")
-            (process-send-string
-             process
-             (concat "GET " path " HTTP/1.1\r\nHost: " host ":" (number-to-string port)
-                     "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n"
-                     (mapconcat (lambda (header)
-                                  (format "%s: %s\r\n" (car header) (cdr header)))
-                                (plist-get runtime :headers) "")
-                     "Connection: keep-alive\r\n\r\n")))
-        (error (opencode-shell-async--schedule-reconnect key))))))
+                  (plist-get runtime :sse-input) ""
+                  (plist-get runtime :header-timer)
+                  (run-at-time opencode-shell-async--header-timeout nil
+                               #'opencode-shell-async--header-timeout key token))
+            (if (not (process-live-p process))
+                (progn
+                  (setf (plist-get runtime :process) nil)
+                  (opencode-shell-async--cancel-header-timer runtime)
+                  (opencode-shell-async--schedule-reconnect key))
+              (process-send-string
+               process
+               (concat "GET " path " HTTP/1.1\r\nHost: " host ":" (number-to-string port)
+                       "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n"
+                       (mapconcat (lambda (header)
+                                    (format "%s: %s\r\n" (car header) (cdr header)))
+                                  (plist-get runtime :headers) "")
+                       "Connection: keep-alive\r\n\r\n"))))
+        (error
+         (unless (plist-get runtime :sse-enabled)
+           (opencode-shell-async--runtime-log runtime "transport=fallback unsafe-config"))
+         (when (plist-get runtime :sse-enabled)
+           (opencode-shell-async--schedule-reconnect key)))))))
 
 (defun opencode-shell-async-subscribe-runtime
     (key buffer url headers sse-enabled poll-interval callback &optional logger)
   "Subscribe BUFFER to KEY runtime and invoke CALLBACK on event/poll wakes."
-  (let ((runtime (or (gethash key opencode-shell-async--runtimes)
-                     (list :subscribers (make-hash-table :test #'eq :weakness 'key)
+  (let* ((existing (gethash key opencode-shell-async--runtimes))
+         (_compatible
+          (when (and existing
+                     (not (and (equal url (plist-get existing :url))
+                               (equal headers (plist-get existing :headers))
+                               (eq (not (null sse-enabled))
+                                   (not (null (plist-get existing :sse-enabled))))
+                               (= poll-interval (plist-get existing :poll-interval)))))
+            (error "Conflicting asynchronous runtime configuration")))
+         (runtime (or existing
+                      (list :subscribers (make-hash-table :test #'eq :weakness 'key)
                            :url url :headers headers :sse-enabled sse-enabled
                            :poll-interval poll-interval
                            :logger logger
-                           :backoff 1 :ticks 0 :poll-timer nil
-                           :reconnect-timer nil :process nil :connected nil
+                            :backoff 1 :ticks 0 :poll-timer nil
+                            :reconnect-timer nil :header-timer nil
+                            :process nil :connected nil :connecting nil
+                            :connect-token nil
                            :headers-done nil :chunked nil :input ""
                            :sse-input ""))))
     (puthash buffer callback (plist-get runtime :subscribers))
@@ -239,7 +341,8 @@
     (remhash buffer (plist-get runtime :subscribers))
     (when (zerop (hash-table-count (plist-get runtime :subscribers)))
       (dolist (timer (list (plist-get runtime :poll-timer)
-                           (plist-get runtime :reconnect-timer)))
+                           (plist-get runtime :reconnect-timer)
+                           (plist-get runtime :header-timer)))
         (when (timerp timer) (cancel-timer timer)))
       (when (process-live-p (plist-get runtime :process))
         (delete-process (plist-get runtime :process)))
@@ -251,7 +354,10 @@
     (with-current-buffer buffer
       (when (timerp opencode-shell-async--idle-timer)
         (cancel-timer opencode-shell-async--idle-timer))
-      (setq opencode-shell-async--idle-timer nil)
+      (when (timerp opencode-shell-async--delivery-timer)
+        (cancel-timer opencode-shell-async--delivery-timer))
+      (setq opencode-shell-async--idle-timer nil
+            opencode-shell-async--delivery-timer nil)
       (let ((queue (prog1 (nreverse opencode-shell-async--queue)
                      (setq opencode-shell-async--queue nil))))
         (dolist (entry queue)
@@ -272,41 +378,81 @@ Only the latest pending value for KEY and GENERATION is retained."
             (cons generation (cons function arguments)))
       (unless (timerp opencode-shell-async--idle-timer)
         (setq opencode-shell-async--idle-timer
-              (run-with-idle-timer 0 nil #'opencode-shell-async-drain buffer))))))
+              (run-with-idle-timer 0 nil #'opencode-shell-async-drain buffer)))
+      (unless (timerp opencode-shell-async--delivery-timer)
+        (setq opencode-shell-async--delivery-timer
+              (run-at-time opencode-shell-async--delivery-timeout nil
+                           #'opencode-shell-async-drain buffer))))))
 
 (defun opencode-shell-async-cancel (&optional buffer)
   "Cancel queued work for BUFFER or the current buffer."
   (with-current-buffer (or buffer (current-buffer))
     (when (timerp opencode-shell-async--idle-timer)
       (cancel-timer opencode-shell-async--idle-timer))
+    (when (timerp opencode-shell-async--delivery-timer)
+      (cancel-timer opencode-shell-async--delivery-timer))
     (setq opencode-shell-async--idle-timer nil
+          opencode-shell-async--delivery-timer nil
           opencode-shell-async--queue nil)))
 
 (defun opencode-shell-async--animation-tick ()
   "Run animation callbacks only for live, visible subscribed buffers."
   (maphash
-   (lambda (buffer callback)
-     (if (not (buffer-live-p buffer))
-         (remhash buffer opencode-shell-async--animation-subscribers)
-       (when (get-buffer-window buffer t)
-         (with-current-buffer buffer (funcall callback)))))
-   opencode-shell-async--animation-subscribers))
+   (lambda (buffer subscription)
+      (if (not (buffer-live-p buffer))
+          (remhash buffer opencode-shell-async--animation-subscribers)
+        (when (get-buffer-window buffer t)
+          (with-current-buffer buffer (funcall (cdr subscription))))))
+   opencode-shell-async--animation-subscribers)
+  (when (zerop (hash-table-count opencode-shell-async--animation-subscribers))
+    (when (timerp opencode-shell-async--animation-timer)
+      (cancel-timer opencode-shell-async--animation-timer))
+    (setq opencode-shell-async--animation-timer nil
+          opencode-shell-async--animation-interval nil)))
 
 (defun opencode-shell-async-subscribe-animation (buffer interval callback)
   "Subscribe visible BUFFER to the shared animation CALLBACK at INTERVAL."
-  (puthash buffer callback opencode-shell-async--animation-subscribers)
+  (puthash buffer (cons interval callback)
+           opencode-shell-async--animation-subscribers)
+  (let (minimum)
+    (maphash (lambda (_buffer subscription)
+               (setq minimum (if minimum (min minimum (car subscription))
+                               (car subscription))))
+             opencode-shell-async--animation-subscribers)
+    (when (and (timerp opencode-shell-async--animation-timer)
+               (not (and (numberp opencode-shell-async--animation-interval)
+                         (= minimum opencode-shell-async--animation-interval))))
+      (cancel-timer opencode-shell-async--animation-timer)
+      (setq opencode-shell-async--animation-timer nil))
+    (setq opencode-shell-async--animation-interval minimum))
   (unless (timerp opencode-shell-async--animation-timer)
     (setq opencode-shell-async--animation-timer
-          (run-at-time interval interval #'opencode-shell-async--animation-tick)))
+          (run-at-time opencode-shell-async--animation-interval
+                       opencode-shell-async--animation-interval
+                       #'opencode-shell-async--animation-tick)))
   opencode-shell-async--animation-timer)
 
 (defun opencode-shell-async-unsubscribe-animation (buffer)
   "Remove BUFFER from shared animation delivery."
   (remhash buffer opencode-shell-async--animation-subscribers)
-  (when (and (zerop (hash-table-count opencode-shell-async--animation-subscribers))
-             (timerp opencode-shell-async--animation-timer))
-    (cancel-timer opencode-shell-async--animation-timer)
-    (setq opencode-shell-async--animation-timer nil)))
+  (if (zerop (hash-table-count opencode-shell-async--animation-subscribers))
+      (progn
+        (when (timerp opencode-shell-async--animation-timer)
+          (cancel-timer opencode-shell-async--animation-timer))
+        (setq opencode-shell-async--animation-timer nil
+              opencode-shell-async--animation-interval nil))
+    (let (minimum)
+      (maphash (lambda (_buffer subscription)
+                 (setq minimum (if minimum (min minimum (car subscription))
+                                 (car subscription))))
+               opencode-shell-async--animation-subscribers)
+      (unless (= minimum opencode-shell-async--animation-interval)
+        (when (timerp opencode-shell-async--animation-timer)
+          (cancel-timer opencode-shell-async--animation-timer))
+        (setq opencode-shell-async--animation-interval minimum
+              opencode-shell-async--animation-timer
+              (run-at-time minimum minimum
+                           #'opencode-shell-async--animation-tick))))))
 
 (defun opencode-shell-async-reset ()
   "Cancel queued work in package buffers and clear shared runtimes."
@@ -316,11 +462,13 @@ Only the latest pending value for KEY and GENERATION is retained."
   (clrhash opencode-shell-async--animation-subscribers)
   (when (timerp opencode-shell-async--animation-timer)
     (cancel-timer opencode-shell-async--animation-timer))
-  (setq opencode-shell-async--animation-timer nil)
+  (setq opencode-shell-async--animation-timer nil
+        opencode-shell-async--animation-interval nil)
   (maphash
    (lambda (_key runtime)
      (dolist (timer (list (plist-get runtime :poll-timer)
-                          (plist-get runtime :reconnect-timer)))
+                          (plist-get runtime :reconnect-timer)
+                          (plist-get runtime :header-timer)))
        (when (timerp timer) (cancel-timer timer)))
      (when (process-live-p (plist-get runtime :process))
        (delete-process (plist-get runtime :process))))
