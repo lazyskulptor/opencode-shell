@@ -86,5 +86,87 @@
           :max-chunk-bytes 16)))
     (should (eq (plist-get (plist-get result :error) :reason) 'chunk-too-large))))
 
+(ert-deftest opencode-shell-sse-transport-handles-filter-before-return ()
+  (let (events errors sent cancelled)
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'header-timer))
+              ((symbol-function 'timerp) (lambda (timer) (eq timer 'header-timer)))
+              ((symbol-function 'cancel-timer) (lambda (timer) (push timer cancelled)))
+              ((symbol-function 'make-network-process)
+               (lambda (&rest arguments)
+                 (funcall
+                  (plist-get arguments :filter) 'stream
+                  "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: ready\n\n")
+                 'stream))
+              ((symbol-function 'process-live-p) (lambda (process) (eq process 'stream)))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'process-send-string)
+               (lambda (_process request) (setq sent request))))
+      (let ((connection
+             (opencode-shell-sse-start
+              "http://[::1]:4199/event" nil
+              (lambda (event) (push event events))
+              (lambda (error) (push error errors)))))
+        (should (opencode-shell-sse-connected-p connection))
+        (should (equal (plist-get (car events) :data) "ready"))
+        (should-not errors)
+        (should (string-match-p "Host: \\[::1\\]:4199" sent))
+        (should (equal cancelled '(header-timer)))))))
+
+(ert-deftest opencode-shell-sse-transport-handles-sentinel-before-return-once ()
+  (let (errors cancelled)
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'header-timer))
+              ((symbol-function 'timerp) (lambda (timer) (eq timer 'header-timer)))
+              ((symbol-function 'cancel-timer) (lambda (timer) (push timer cancelled)))
+              ((symbol-function 'make-network-process)
+               (lambda (&rest arguments)
+                 (funcall (plist-get arguments :sentinel) 'dead "failed")
+                 'dead))
+              ((symbol-function 'process-live-p) (lambda (_) nil))
+              ((symbol-function 'delete-process) #'ignore))
+      (let ((connection
+             (opencode-shell-sse-start
+              "http://localhost:4199/event" nil #'ignore
+              (lambda (error) (push error errors)))))
+        (should (eq (opencode-shell-sse-connection-state connection) 'disconnected))
+        (should (= (length errors) 1))
+        (should (= (length cancelled) 1))))))
+
+(ert-deftest opencode-shell-sse-transport-stop-and-stale-filter-are-idempotent ()
+  (let (filter errors (deleted 0))
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'header-timer))
+              ((symbol-function 'timerp) (lambda (timer) (eq timer 'header-timer)))
+              ((symbol-function 'cancel-timer) #'ignore)
+              ((symbol-function 'make-network-process)
+               (lambda (&rest arguments)
+                 (setq filter (plist-get arguments :filter))
+                 'stream))
+              ((symbol-function 'process-live-p) (lambda (process) (eq process 'stream)))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'process-send-string) #'ignore)
+              ((symbol-function 'delete-process) (lambda (_) (cl-incf deleted))))
+      (let* ((connection
+              (opencode-shell-sse-start
+               "http://localhost:4199/event" nil #'ignore
+               (lambda (error) (push error errors))))
+             (old-token (opencode-shell-sse-connection-token connection)))
+        (opencode-shell-sse-stop connection)
+        (opencode-shell-sse-stop connection)
+        (funcall filter 'stream "data: stale\n\n")
+        (opencode-shell-sse--filter connection old-token 'stream "data: stale\n\n")
+        (should (eq (opencode-shell-sse-connection-state connection) 'closed))
+        (should (= deleted 1))
+        (should-not errors)))))
+
+(ert-deftest opencode-shell-sse-transport-rejects-unsafe-config-without-process ()
+  (let (errors made)
+    (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) (setq made t))))
+      (let ((connection
+             (opencode-shell-sse-start
+              "https://localhost/event" nil #'ignore
+              (lambda (error) (push error errors)))))
+        (should (eq (opencode-shell-sse-connection-state connection) 'closed))
+        (should (eq (plist-get (car errors) :type) 'config))
+        (should-not made)))))
+
 (provide 'opencode-shell-sse-test)
 ;;; opencode-shell-sse-test.el ends here

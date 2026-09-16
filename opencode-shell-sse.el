@@ -15,6 +15,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'url-parse)
 
 (cl-defstruct (opencode-shell-sse-parser
                (:constructor opencode-shell-sse--make-parser))
@@ -236,6 +237,180 @@ not mutated; the returned parser is the next state."
                        (opencode-shell-sse--consume-frames next body)))))
         (setq events new-events error body-error)))
     (list :parser next :events events :error error)))
+
+(cl-defstruct (opencode-shell-sse-connection
+               (:constructor opencode-shell-sse--make-connection))
+  token state process parser header-timer on-event on-error)
+
+(defun opencode-shell-sse--valid-request-p (host path headers)
+  "Return non-nil when HOST, PATH, and HEADERS are safe for raw HTTP."
+  (and (stringp host)
+       (string-match-p "\\`[][0-9A-Za-z.:-]+\\'" host)
+       (stringp path)
+       (string-prefix-p "/" path)
+       (seq-every-p (lambda (character) (<= 33 character 126)) path)
+       (seq-every-p
+        (lambda (header)
+          (and (consp header)
+               (string-match-p "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'"
+                               (format "%s" (car header)))
+               (seq-every-p
+                (lambda (character)
+                  (or (= character 9) (<= 32 character 126)))
+                (format "%s" (cdr header)))))
+        headers)))
+
+(defun opencode-shell-sse--cancel-header-timer (connection)
+  "Cancel CONNECTION's header deadline."
+  (when (timerp (opencode-shell-sse-connection-header-timer connection))
+    (cancel-timer (opencode-shell-sse-connection-header-timer connection)))
+  (setf (opencode-shell-sse-connection-header-timer connection) nil))
+
+(defun opencode-shell-sse--finish (connection token state &optional error)
+  "Finish CONNECTION identified by TOKEN in STATE and report ERROR once."
+  (when (and (eq token (opencode-shell-sse-connection-token connection))
+             (memq (opencode-shell-sse-connection-state connection)
+                   '(connecting streaming)))
+    (opencode-shell-sse--cancel-header-timer connection)
+    (let ((process (opencode-shell-sse-connection-process connection)))
+      (setf (opencode-shell-sse-connection-process connection) nil
+            (opencode-shell-sse-connection-state connection) state)
+      (when (process-live-p process)
+        (delete-process process)))
+    (when error
+      (funcall (opencode-shell-sse-connection-on-error connection) error))
+    t))
+
+(defun opencode-shell-sse--filter (connection token process bytes)
+  "Feed PROCESS BYTES into CONNECTION when TOKEN is current."
+  (when (and (eq token (opencode-shell-sse-connection-token connection))
+             (memq (opencode-shell-sse-connection-state connection)
+                   '(connecting streaming))
+             (or (null (opencode-shell-sse-connection-process connection))
+                 (eq process (opencode-shell-sse-connection-process connection))))
+    (when (null (opencode-shell-sse-connection-process connection))
+      (setf (opencode-shell-sse-connection-process connection) process))
+    (let* ((before (opencode-shell-sse-parser-phase
+                    (opencode-shell-sse-connection-parser connection)))
+           (result (opencode-shell-sse-parser-feed
+                    (opencode-shell-sse-connection-parser connection) bytes))
+           (parser (plist-get result :parser))
+           (error (plist-get result :error)))
+      (setf (opencode-shell-sse-connection-parser connection) parser)
+      (when (and (eq before 'headers)
+                 (eq (opencode-shell-sse-parser-phase parser) 'body))
+        (opencode-shell-sse--cancel-header-timer connection)
+        (setf (opencode-shell-sse-connection-state connection) 'streaming))
+      (dolist (event (plist-get result :events))
+        (funcall (opencode-shell-sse-connection-on-event connection) event))
+      (cond
+       (error
+        (opencode-shell-sse--finish connection token 'disconnected error))
+       ((eq (opencode-shell-sse-parser-phase parser) 'done)
+        (opencode-shell-sse--finish
+         connection token 'disconnected '(:type transport :reason eof)))))))
+
+(defun opencode-shell-sse--sentinel (connection token process _event)
+  "Handle PROCESS termination for CONNECTION when TOKEN is current."
+  (when (and (eq token (opencode-shell-sse-connection-token connection))
+             (or (null (opencode-shell-sse-connection-process connection))
+                 (eq process (opencode-shell-sse-connection-process connection))))
+    (when (null (opencode-shell-sse-connection-process connection))
+      (setf (opencode-shell-sse-connection-process connection) process))
+    (opencode-shell-sse--finish
+     connection token 'disconnected '(:type transport :reason closed))))
+
+(defun opencode-shell-sse--header-timeout (connection token)
+  "Expire CONNECTION's HTTP header deadline for TOKEN."
+  (when (eq token (opencode-shell-sse-connection-token connection))
+    (setf (opencode-shell-sse-connection-header-timer connection) nil)
+    (opencode-shell-sse--finish
+     connection token 'disconnected '(:type timeout :reason headers))))
+
+(defun opencode-shell-sse--request (host port path headers)
+  "Return a raw HTTP SSE request for HOST, PORT, PATH, and HEADERS."
+  (let ((header-host (if (and (string-match-p ":" host)
+                              (not (string-prefix-p "[" host)))
+                         (format "[%s]" host)
+                       host)))
+    (concat "GET " path " HTTP/1.1\r\nHost: " header-host ":"
+            (number-to-string port)
+            "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n"
+            (mapconcat (lambda (header)
+                         (format "%s: %s\r\n" (car header) (cdr header)))
+                       headers "")
+            "Connection: keep-alive\r\n\r\n")))
+
+(cl-defun opencode-shell-sse-start
+    (url headers on-event on-error &key (header-timeout 10))
+  "Open URL as an SSE stream and return its connection object.
+HEADERS is an alist of additional HTTP headers.  ON-EVENT receives parsed
+event plists; ON-ERROR receives typed error plists."
+  (unless (and (functionp on-event) (functionp on-error))
+    (error "SSE callbacks must be functions"))
+  (unless (and (numberp header-timeout) (> header-timeout 0))
+    (error "SSE header timeout must be positive"))
+  (let* ((parsed (url-generic-parse-url url))
+         (scheme (downcase (or (url-type parsed) "")))
+         (host (url-host parsed))
+         (port (or (url-port parsed) 80))
+         (path (or (url-filename parsed) "/"))
+         (token (make-symbol "opencode-sse-connection"))
+         (connection
+          (opencode-shell-sse--make-connection
+           :token token :state 'connecting :process nil
+           :parser (opencode-shell-sse-parser-create)
+           :header-timer nil :on-event on-event :on-error on-error)))
+    (if (not (and (string-equal scheme "http")
+                  (opencode-shell-sse--valid-request-p host path headers)))
+        (progn
+          (setf (opencode-shell-sse-connection-state connection) 'closed)
+          (funcall on-error '(:type config :reason unsupported-or-unsafe))
+          connection)
+      (condition-case condition
+          (let (process)
+            (setf (opencode-shell-sse-connection-header-timer connection)
+                  (run-at-time header-timeout nil
+                               #'opencode-shell-sse--header-timeout
+                               connection token))
+            (setq process
+                  (make-network-process
+                   :name (format "opencode-sse-%s" (sxhash-eq token))
+                   :host host :service port :coding 'binary :noquery t
+                   :filter (lambda (stream bytes)
+                             (opencode-shell-sse--filter
+                              connection token stream bytes))
+                   :sentinel (lambda (stream event)
+                               (opencode-shell-sse--sentinel
+                                connection token stream event))))
+            (when (memq (opencode-shell-sse-connection-state connection)
+                        '(connecting streaming))
+              (unless (opencode-shell-sse-connection-process connection)
+                (setf (opencode-shell-sse-connection-process connection) process))
+              (set-process-query-on-exit-flag process nil)
+              (if (process-live-p process)
+                  (process-send-string
+                   process (opencode-shell-sse--request host port path headers))
+                (opencode-shell-sse--finish
+                 connection token 'disconnected
+                 '(:type transport :reason connect-failed)))))
+        (error
+         (opencode-shell-sse--finish
+          connection token 'disconnected
+          (list :type 'transport :reason 'connect-error
+                :detail (car condition)))))
+      connection)))
+
+(defun opencode-shell-sse-stop (connection)
+  "Close CONNECTION without reporting a transport error."
+  (when (opencode-shell-sse-connection-p connection)
+    (opencode-shell-sse--finish
+     connection (opencode-shell-sse-connection-token connection) 'closed)))
+
+(defun opencode-shell-sse-connected-p (connection)
+  "Return non-nil when CONNECTION completed its SSE handshake."
+  (and (opencode-shell-sse-connection-p connection)
+       (eq (opencode-shell-sse-connection-state connection) 'streaming)))
 
 (provide 'opencode-shell-sse)
 ;;; opencode-shell-sse.el ends here
