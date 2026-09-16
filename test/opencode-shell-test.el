@@ -236,6 +236,36 @@
     (should-not (opencode-shell--sessions-in-directory
                  sessions profile "/server/project/old/"))))
 
+(ert-deftest opencode-shell-session-browser-fetches-relocated-sessions-by-id ()
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--profile opencode-shell-test--local-profile
+                opencode-shell--directory "/server/project/new/")
+    (let ((opencode-shell--session-directory-overrides
+           (list (cons (list (opencode-shell--profile-key opencode-shell-test--local-profile)
+                             "moved")
+                       "/server/project/new/")))
+          requests)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &optional _body params &rest _)
+                   (push (list path callback params) requests))))
+        (opencode-shell--refresh)
+        (funcall (cadr (assoc "/session/status" requests)) nil)
+        (let ((session-query (nth 2 (assoc "/session" requests))))
+          (should (equal session-query '((limit . 1000))))
+          (should (string-match-p
+                   "directory=%2Fserver%2Fproject%2Fnew%2F"
+                   (opencode-shell--url "/session" session-query))))
+        (funcall (cadr (assoc "/session" requests))
+                 '(((id . "native") (directory . "/server/project/new/"))))
+        (let ((relocated-request (assoc "/session/moved" requests)))
+          (should (equal (nth 2 relocated-request) '((directory))))
+          (funcall (cadr relocated-request)
+                   '((id . "moved") (directory . "/server/project/old/"))))
+        (should (equal (mapcar (lambda (session) (opencode-shell--get session 'id))
+                               opencode-shell--sessions)
+                       '("moved" "native")))))))
+
 (ert-deftest opencode-shell-move-directory-rejects-current-project ()
   (with-temp-buffer
     (opencode-shell-mode)

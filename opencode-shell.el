@@ -780,8 +780,36 @@ Each retained session keeps its server-reported directory unchanged."
      (lambda (session)
        (and-let* ((value (opencode-shell--get session 'directory)))
          (equal target (opencode-shell--canonical-directory value))))
-     (mapcar (lambda (session) (opencode-shell--effective-session session profile))
-             sessions))))
+      (mapcar (lambda (session) (opencode-shell--effective-session session profile))
+              sessions))))
+
+(defun opencode-shell--relocated-session-ids (profile directory)
+  "Return PROFILE session IDs relocated to DIRECTORY."
+  (let ((profile-key (opencode-shell--profile-key profile))
+        (target (opencode-shell--canonical-directory directory))
+        result)
+    (dolist (entry opencode-shell--session-directory-overrides (nreverse result))
+      (when (and (equal (caar entry) profile-key)
+                 (equal (opencode-shell--canonical-directory (cdr entry)) target))
+        (push (cadar entry) result)))))
+
+(defun opencode-shell--fetch-relocated-sessions (sessions callback)
+  "Add sessions relocated to the current directory, then call CALLBACK."
+  (let* ((present (mapcar (lambda (session) (opencode-shell--get session 'id)) sessions))
+         (missing (seq-remove (lambda (id) (member id present))
+                              (opencode-shell--relocated-session-ids
+                               opencode-shell--profile opencode-shell--directory))))
+    (if (null missing)
+        (funcall callback sessions)
+      (let ((remaining (length missing))
+            (result sessions))
+        (cl-labels ((finish (&optional session)
+                      (when session (push session result))
+                      (when (= (cl-decf remaining) 0)
+                        (funcall callback result))))
+          (dolist (id missing)
+            (opencode-shell--request
+             "GET" (format "/session/%s" id) #'finish nil '((directory)) #'finish)))))))
 
 (defun opencode-shell--child-session-p (session)
   "Return non-nil when SESSION belongs to a parent session."
@@ -910,19 +938,23 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
      (lambda (statuses)
        (when (= generation opencode-shell--generation)
          (setq opencode-shell--session-status statuses)
-         (opencode-shell--request
-          "GET" "/session"
-          (lambda (sessions)
-            (when (= generation opencode-shell--generation)
-              (setq opencode-shell--sessions
-                    (opencode-shell--normalize-sessions
-                     (opencode-shell--sessions-in-directory
-                      sessions opencode-shell--profile opencode-shell--directory))
-                    tabulated-list-entries (opencode-shell--session-entries))
-               (tabulated-list-print t)
-               (when id (goto-char (point-min)) (search-forward id nil t)))))
+          (opencode-shell--request
+           "GET" "/session"
+           (lambda (sessions)
+             (when (= generation opencode-shell--generation)
+               (opencode-shell--fetch-relocated-sessions
+                sessions
+                (lambda (all-sessions)
+                  (when (= generation opencode-shell--generation)
+                    (setq opencode-shell--sessions
+                          (opencode-shell--normalize-sessions
+                           (opencode-shell--sessions-in-directory
+                            all-sessions opencode-shell--profile opencode-shell--directory))
+                          tabulated-list-entries (opencode-shell--session-entries))
+                    (tabulated-list-print t)
+                    (when id (goto-char (point-min)) (search-forward id nil t)))))))
           nil
-          '((limit . 1000)))))))
+          '((limit . 1000))))))))
 
 (defun opencode-shell--filter (text)
   "Filter the session list by TEXT."
