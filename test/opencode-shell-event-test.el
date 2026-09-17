@@ -229,5 +229,65 @@
           (should-not opencode-shell--message-envelopes))
       (kill-buffer buffer))))
 
+(ert-deftest opencode-shell-event-user-removal-cleans-only-child-message-cache ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (sessionID . "session-a") (role . "user")))
+        (parts . nil))
+       ((info . ((id . "a1") (sessionID . "session-a")
+                  (role . "assistant") (parentID . "u1")))
+        (parts . nil))
+       ((info . ((id . "u2") (sessionID . "session-a") (role . "user")))
+        (parts . nil))
+       ((info . ((id . "a2") (sessionID . "session-a")
+                  (role . "assistant") (parentID . "u2")))
+        (parts . nil))) 1)
+    (opencode-shell--receive-application-event
+     '(:kind message-removed :type "message.removed" :session-id "session-a"
+       :message-id "u1"))
+    (should-not (gethash "u1" opencode-shell--message-envelopes))
+    (should-not (gethash "a1" opencode-shell--message-envelopes))
+    (should (gethash "u2" opencode-shell--message-envelopes))
+    (should (gethash "a2" opencode-shell--message-envelopes))
+    (should (equal opencode-shell--message-order '("u2" "a2")))
+    (should (equal (mapcar #'opencode-shell--turn-server-user-id
+                           opencode-shell--turns)
+                   '("u2")))))
+
+(ert-deftest opencode-shell-event-interleaved-parent-removal-leaves-no-orphan ()
+  (let ((user
+         '(:kind message-updated :type "message.updated" :session-id "s"
+           :message-id "u"
+           :info ((id . "u") (sessionID . "s") (role . "user"))))
+        (child
+         '(:kind message-updated :type "message.updated" :session-id "s"
+           :message-id "a"
+           :info ((id . "a") (sessionID . "s") (role . "assistant")
+                  (parentID . "u"))))
+        (removal
+         '(:kind message-removed :type "message.removed" :session-id "s"
+           :message-id "u")))
+    (dolist (events (list (list user child removal)
+                          (list user removal child)))
+      (with-temp-buffer
+        (opencode-shell-mode)
+        (setq opencode-shell--session-id "s")
+        (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                  ((symbol-function 'timerp) (lambda (value) (eq value 'timer)))
+                  ((symbol-function 'cancel-timer) #'ignore))
+          (dolist (event events)
+            (opencode-shell-async-enqueue
+             (current-buffer) (opencode-shell-event-identity event)
+             opencode-shell--generation
+             #'opencode-shell--receive-application-event event))
+          (opencode-shell-async-drain (current-buffer))
+          (should-not (gethash "u" opencode-shell--message-envelopes))
+          (should-not (gethash "a" opencode-shell--message-envelopes))
+          (should-not opencode-shell--message-order)
+          (should (gethash "u" opencode-shell--removed-message-ids)))))))
+
 (provide 'opencode-shell-event-test)
 ;;; opencode-shell-event-test.el ends here

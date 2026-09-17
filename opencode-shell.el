@@ -497,6 +497,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--message-envelopes nil)
 (defvar-local opencode-shell--message-order nil)
+(defvar-local opencode-shell--removed-message-ids nil)
 (defvar-local opencode-shell--normalized-changed-turns nil)
 (defvar-local opencode-shell--message-state-revision 0)
 (defvar-local opencode-shell--submit-in-flight nil)
@@ -1383,8 +1384,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
-              opencode-shell--message-envelopes (make-hash-table :test #'equal)
-              opencode-shell--message-order nil
+               opencode-shell--message-envelopes (make-hash-table :test #'equal)
+               opencode-shell--message-order nil
+               opencode-shell--removed-message-ids (make-hash-table :test #'equal)
               opencode-shell--normalized-changed-turns nil
               opencode-shell--message-state-revision 0
               opencode-shell--render-dirty-turns nil
@@ -1870,7 +1872,9 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Ensure the current transcript owns an initialized message cache."
   (unless (hash-table-p opencode-shell--message-envelopes)
     (setq opencode-shell--message-envelopes (make-hash-table :test #'equal)
-          opencode-shell--message-order nil)))
+          opencode-shell--message-order nil))
+  (unless (hash-table-p opencode-shell--removed-message-ids)
+    (setq opencode-shell--removed-message-ids (make-hash-table :test #'equal))))
 
 (defun opencode-shell--cache-message-envelope (envelope)
   "Merge ENVELOPE into the buffer-local message index and return the result."
@@ -1892,6 +1896,8 @@ Return a plist containing affected turns and whether a full render is required."
   (opencode-shell--ensure-message-cache)
   (let ((ids (delq nil (mapcar #'opencode-shell--message-envelope-id messages)))
         changed force)
+    (when authoritative
+      (dolist (id ids) (remhash id opencode-shell--removed-message-ids)))
     (when authoritative
       (let ((present (make-hash-table :test #'equal)))
         (dolist (id ids) (puthash id t present))
@@ -1979,22 +1985,26 @@ Return a plist containing affected turns and whether a full render is required."
     (pcase kind
       ('message-updated
        (let* ((info (plist-get event :info))
-              (role (format "%s" (opencode-shell--get info 'role)))
-              (envelope (opencode-shell--cache-message-envelope
-                         `((info . ,info)
-                           (parts . ,(opencode-shell--get known 'parts))))))
-         (if (equal role "user")
-             (progn
-               (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)
-                     before (opencode-shell--turn-state-signature turn))
-               (setq opencode-shell--turns (opencode-shell--normalize-turns (list envelope)))
-               (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)))
-           (setq parent-id (or (opencode-shell--get info 'parentID)
-                               (opencode-shell--get info 'parentId)))
-           (when parent-id
-             (setq turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
-                   before (opencode-shell--turn-state-signature turn))
-             (opencode-shell--rebuild-turn-from-message-cache parent-id)))))
+               (role (format "%s" (opencode-shell--get info 'role)))
+               (parent (or (opencode-shell--get info 'parentID)
+                           (opencode-shell--get info 'parentId))))
+          (unless (and parent (gethash parent opencode-shell--removed-message-ids))
+            (remhash message-id opencode-shell--removed-message-ids)
+            (let ((envelope (opencode-shell--cache-message-envelope
+                             `((info . ,info)
+                               (parts . ,(opencode-shell--get known 'parts))))))
+              (if (equal role "user")
+                  (progn
+                    (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)
+                          before (opencode-shell--turn-state-signature turn))
+                    (setq opencode-shell--turns
+                          (opencode-shell--normalize-turns (list envelope)))
+                    (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)))
+                (setq parent-id parent)
+                (when parent-id
+                  (setq turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
+                        before (opencode-shell--turn-state-signature turn))
+                  (opencode-shell--rebuild-turn-from-message-cache parent-id)))))))
       ('part-updated
        (when known
          (let* ((info (opencode-shell--get known 'info))
@@ -2022,22 +2032,41 @@ Return a plist containing affected turns and whether a full render is required."
            (puthash message-id known opencode-shell--message-envelopes)
            (opencode-shell--rebuild-turn-from-message-cache parent-id))))
       ('message-removed
-       (when known
-         (let* ((info (opencode-shell--get known 'info))
-                (role (format "%s" (opencode-shell--get info 'role))))
-           (remhash message-id opencode-shell--message-envelopes)
-           (setq opencode-shell--message-order
-                 (delete message-id opencode-shell--message-order))
-           (if (equal role "user")
-               (progn
-                 (setq opencode-shell--turns
-                       (seq-remove
-                        (lambda (entry)
-                          (equal message-id
-                                 (opencode-shell--turn-server-user-id entry)))
-                        opencode-shell--turns)
-                       force t)
-                 (setq turn t before nil))
+       (let* ((info (opencode-shell--get known 'info))
+              (role (and known (format "%s" (opencode-shell--get info 'role))))
+              (user-turn (opencode-shell--turn-by-id message-id opencode-shell--turns))
+              (children (make-hash-table :test #'equal)))
+         (puthash message-id t opencode-shell--removed-message-ids)
+         (remhash message-id opencode-shell--message-envelopes)
+         (setq opencode-shell--message-order
+               (delete message-id opencode-shell--message-order))
+         (maphash
+          (lambda (id envelope)
+            (let ((child-info (opencode-shell--get envelope 'info)))
+              (when (equal message-id
+                           (or (opencode-shell--get child-info 'parentID)
+                               (opencode-shell--get child-info 'parentId)))
+                (puthash id t children))))
+          opencode-shell--message-envelopes)
+         (if (or (equal role "user") user-turn (> (hash-table-count children) 0))
+             (progn
+               (maphash
+                (lambda (id _)
+                  (remhash id opencode-shell--message-envelopes))
+                children)
+               (setq opencode-shell--message-order
+                     (seq-remove (lambda (id) (gethash id children))
+                                 opencode-shell--message-order)
+                     opencode-shell--turns
+                     (seq-remove
+                      (lambda (entry)
+                        (equal message-id
+                               (opencode-shell--turn-server-user-id entry)))
+                      opencode-shell--turns)
+                     force t
+                     turn t
+                     before nil))
+           (when known
              (setq parent-id (or (opencode-shell--get info 'parentID)
                                  (opencode-shell--get info 'parentId))
                    turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
