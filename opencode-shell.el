@@ -1761,15 +1761,23 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
 
 (defun opencode-shell--normalize-turns (messages)
   "Reconcile server MESSAGES into stable buffer-local turn records."
-  (let ((old opencode-shell--turns) observed current used changed
+  (let ((old opencode-shell--turns) observed current changed
         (touched (make-hash-table :test #'eq))
         (turn-index (make-hash-table :test #'equal))
-        (assistant-indexes (make-hash-table :test #'eq)))
+        (assistant-indexes (make-hash-table :test #'eq))
+        (local-turns-by-text (make-hash-table :test #'equal))
+        (old-set (make-hash-table :test #'eq)))
     (dolist (turn old)
+      (puthash turn t old-set)
       (when-let ((id (opencode-shell--turn-id turn)))
         (puthash id turn turn-index))
       (when-let ((id (opencode-shell--turn-server-user-id turn)))
-        (puthash id turn turn-index)))
+        (puthash id turn turn-index))
+      (unless (opencode-shell--turn-server-user-id turn)
+        (push turn (gethash (opencode-shell--turn-user turn) local-turns-by-text))))
+    (maphash (lambda (text turns)
+               (puthash text (nreverse turns) local-turns-by-text))
+             local-turns-by-text)
     (dolist (envelope messages)
       (let* ((info (opencode-shell--get envelope 'info))
              (role (format "%s" (or (opencode-shell--get info 'role) "")))
@@ -1779,15 +1787,13 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
         (cond
           ((equal role "user")
            (let* ((text (opencode-shell--message-text envelope))
+                   (local-candidates (gethash text local-turns-by-text))
                    (turn (or (and id (gethash id turn-index))
-                            (seq-find
-                            (lambda (candidate)
-                              (and (null (opencode-shell--turn-server-user-id candidate))
-                                   (not (memq candidate used))
-                                   (equal text (opencode-shell--turn-user candidate))))
-                            old)
+                            (car local-candidates)
                              (opencode-shell--make-turn
                               :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter)))))))
+            (when (and local-candidates (eq turn (car local-candidates)))
+              (puthash text (cdr local-candidates) local-turns-by-text))
             (let ((before (opencode-shell--turn-state-signature turn)))
             (setf (opencode-shell--turn-server-user-id turn) id
                   (opencode-shell--turn-acknowledged turn) t
@@ -1800,7 +1806,6 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                 (cl-pushnew turn changed :test #'eq)))
             (when id (puthash id turn turn-index))
             (setq current turn)
-            (push turn used)
             (push turn observed)))
           ((equal role "assistant")
             (let* ((turn (or (and parent (gethash parent turn-index))
@@ -1840,13 +1845,14 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
          (opencode-shell--aggregate-turn turn)
          (unless (equal before (opencode-shell--turn-state-signature turn))
            (cl-pushnew turn changed :test #'eq))))
-     touched)
+    touched)
     (setq observed (nreverse observed))
-    (let ((result (copy-sequence old)))
+    (let (new-turns)
       (dolist (turn observed)
-        (unless (memq turn result)
-          (setq result (append result (list turn)))
+        (unless (gethash turn old-set)
+          (push turn new-turns)
           (cl-pushnew turn changed :test #'eq)))
+      (let ((result (append (copy-sequence old) (nreverse new-turns))))
       (let ((before (mapcar #'opencode-shell--turn-state-signature result)))
         (opencode-shell--settle-superseded-turns result)
         (cl-mapc (lambda (turn signature)
@@ -1854,7 +1860,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                      (cl-pushnew turn changed :test #'eq)))
                  result before))
       (setq opencode-shell--normalized-changed-turns (nreverse changed))
-      result)))
+        result))))
 
 (defun opencode-shell--message-envelope-id (envelope)
   "Return ENVELOPE's stable message ID."
