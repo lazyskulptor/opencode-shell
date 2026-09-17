@@ -1158,7 +1158,7 @@
              (should (= (length cancelled) 2)))
         (when (buffer-live-p opened) (kill-buffer opened))))))
 
-(ert-deftest opencode-shell-animation-is-ui-only-resettable-and-deduplicated ()
+(ert-deftest opencode-shell-animation-is-ui-only-fixed-width-and-deduplicated ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting))
@@ -1168,8 +1168,11 @@
           (opencode-shell-async--animation-timer nil)
           timers cancelled network-calls)
       (setq opencode-shell--turns (list turn)
-            opencode-shell--animation-frame 7)
+            opencode-shell--animation-frame 0)
       (opencode-shell--render-turns)
+      (let ((before (buffer-string))
+            (tick (buffer-chars-modified-tick))
+            (position (point)))
       (cl-letf (((symbol-function 'run-at-time)
                  (lambda (&rest args)
                    (let ((timer (cons 'timer args)))
@@ -1200,17 +1203,16 @@
           (funcall (nth 3 animation)))
         (should (= opencode-shell--animation-frame 1))
         (should-not network-calls)
-        (should (string-match-p (regexp-quote (make-string 2 opencode-shell--spinner-character))
-                                (buffer-string)))
+        (should (equal before (buffer-string)))
+        (should (= tick (buffer-chars-modified-tick)))
+        (should (= position (point)))
+        (should (equal (overlay-get (car opencode-shell--spinner-overlays) 'display)
+                       "▱"))
         (opencode-shell--stop-polling)
         (should-not opencode-shell--runtime-key)
         (should-not (gethash (current-buffer)
                              opencode-shell-async--animation-subscribers))
-        (should (= 2 (length cancelled)))
-        (setq timers nil opencode-shell--animation-frame 6)
-        (opencode-shell--start-polling)
-        (should (= opencode-shell--animation-frame 0))
-        (opencode-shell--stop-polling)))))
+        (should (= 2 (length cancelled))))))))
 
 (ert-deftest opencode-shell-animation-keeps-permission-before-status ()
   (with-temp-buffer
@@ -2005,42 +2007,49 @@
                        (permissions . "/permission")
                        (questions . "/question")))))))
 
-(ert-deftest opencode-shell-history-poll-restarts-growing-animation ()
+(ert-deftest opencode-shell-history-poll-does-not-mutate-presentation ()
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s"
-          opencode-shell--animation-frame 7
+          opencode-shell--animation-frame 1
           opencode-shell--turns
           (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
     (opencode-shell--render-turns)
-    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore)
-              ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
-      (opencode-shell--resync)
-      (opencode-shell-async-drain (current-buffer)))
-    (should (= opencode-shell--animation-frame 0))
-    (should (string-match-p
-             (format "Waiting for response %s"
-                     (regexp-quote (make-string 1 opencode-shell--spinner-character)))
-             (buffer-string)))
-    (opencode-shell--animation-tick)
-    (should (string-match-p
-             (format "Waiting for response %s"
-                     (regexp-quote (make-string 2 opencode-shell--spinner-character)))
-             (buffer-string)))))
+    (let ((before (buffer-string))
+          (tick (buffer-chars-modified-tick))
+          (position (point)))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore)
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+        (opencode-shell--resync)
+        (opencode-shell-async-drain (current-buffer)))
+      (should (= opencode-shell--animation-frame 1))
+      (should (equal before (buffer-string)))
+      (should (= tick (buffer-chars-modified-tick)))
+      (should (= position (point)))
+      (should-not opencode-shell--render-dirty))))
 
-(ert-deftest opencode-shell-animation-keeps-growing-until-next-poll ()
+(ert-deftest opencode-shell-animation-is-fixed-width-buffer-no-op ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--turns
-          (list (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+    (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+      (setq opencode-shell--turns (list turn))
     (opencode-shell--render-turns)
-    (dotimes (_ 12) (opencode-shell--animation-tick))
-    (should (= opencode-shell--animation-frame 12))
-    (should (string-match-p
-             (format "Waiting for response %s"
-                     (regexp-quote
-                      (make-string 13 opencode-shell--spinner-character)))
-             (buffer-string)))))
+      (let ((before (buffer-string))
+            (tick (buffer-chars-modified-tick))
+            (position (point))
+            (response-begin (marker-position (opencode-shell--turn-response-begin turn)))
+            (response-end (marker-position (opencode-shell--turn-response-end turn))))
+        (dotimes (_ 13) (opencode-shell--animation-tick))
+        (should (= opencode-shell--animation-frame 1))
+        (should (equal before (buffer-string)))
+        (should (= tick (buffer-chars-modified-tick)))
+        (should (= position (point)))
+        (should (= response-begin
+                   (marker-position (opencode-shell--turn-response-begin turn))))
+        (should (= response-end
+                   (marker-position (opencode-shell--turn-response-end turn))))
+        (should (= 1 (how-many (string opencode-shell--spinner-character)
+                               (point-min) (point-max))))))))
 
 (ert-deftest opencode-shell-hidden-resync-does-not-touch-buffer-text ()
   (with-temp-buffer
@@ -2054,7 +2063,7 @@
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
         (opencode-shell--resync)
         (should (equal before (buffer-string)))
-        (should opencode-shell--render-dirty)))))
+        (should-not opencode-shell--render-dirty)))))
 
 (ert-deftest opencode-shell-permission-precedes-relocated-response-spinner ()
   (with-temp-buffer

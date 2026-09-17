@@ -420,7 +420,10 @@ and lifecycle keys."
   :type 'number :group 'opencode-shell)
 
 (defconst opencode-shell--spinner-character ?▰
-  "Character appended by each transient-status animation tick.")
+  "Character occupying the fixed-width transient-status spinner slot.")
+
+(defconst opencode-shell--spinner-frames ["▰" "▱"]
+  "Fixed-width display frames used without changing transcript text.")
 
 (defcustom opencode-shell-log-requests t
   "When non-nil, log API results without payloads or secrets."
@@ -475,6 +478,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--runtime-key nil)
 (defvar-local opencode-shell--animation-frame 0)
+(defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--render-force nil)
@@ -1404,6 +1408,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (opencode-shell-async-unsubscribe-runtime
      opencode-shell--runtime-key (current-buffer)))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
+  (opencode-shell--clear-spinner-overlays)
   (setq opencode-shell--runtime-key nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
@@ -1419,6 +1424,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (opencode-shell-async-unsubscribe-runtime
      opencode-shell--runtime-key (current-buffer)))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
+  (opencode-shell--clear-spinner-overlays)
   (setq opencode-shell--runtime-key nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
@@ -1426,8 +1432,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Start periodic network polling and UI animation if needed."
   (unless opencode-shell--runtime-key
     (let ((buffer (current-buffer)))
-      (setq opencode-shell--animation-frame 0)
-      (opencode-shell--schedule-render "poll-start")
       (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
              (key (opencode-shell--server-key profile))
              (base (string-remove-suffix
@@ -2009,7 +2013,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (when offset
       (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
     (unless (equal draft (opencode-shell--composer-text))
-      (error "Permission rendering changed composer text")))))
+      (error "Permission rendering changed composer text"))))
+  (opencode-shell--refresh-spinner-overlays))
 
 (defun opencode-shell--refresh-permissions ()
   "Fetch the current `/permission' snapshot outside the normal poll cadence.
@@ -2169,9 +2174,32 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current UI-only spinner frame."
-  (format "%s %s\n\n" label
-          (make-string (1+ opencode-shell--animation-frame)
-                       opencode-shell--spinner-character)))
+  (concat label " "
+          (propertize (string opencode-shell--spinner-character)
+                      'opencode-shell-spinner t)
+          "\n\n"))
+
+(defun opencode-shell--clear-spinner-overlays ()
+  "Delete presentation-only spinner overlays in the current buffer."
+  (mapc #'delete-overlay opencode-shell--spinner-overlays)
+  (setq opencode-shell--spinner-overlays nil))
+
+(defun opencode-shell--spinner-frame ()
+  "Return the current fixed-width spinner display frame."
+  (aref opencode-shell--spinner-frames opencode-shell--animation-frame))
+
+(defun opencode-shell--refresh-spinner-overlays ()
+  "Recreate spinner overlays for status slots in the current buffer."
+  (opencode-shell--clear-spinner-overlays)
+  (let ((position (point-min)))
+    (while (setq position
+                 (text-property-any position (point-max)
+                                    'opencode-shell-spinner t))
+      (let ((overlay (make-overlay position (1+ position) nil t nil)))
+        (overlay-put overlay 'evaporate t)
+        (overlay-put overlay 'display (opencode-shell--spinner-frame))
+        (push overlay opencode-shell--spinner-overlays))
+      (setq position (1+ position)))))
 
 (defun opencode-shell--transcript-window ()
   "Return the preferred live window displaying the current transcript."
@@ -2235,34 +2263,17 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (set-marker end (point))))))
 
 (defun opencode-shell--render-status-animation ()
-  "Rerender only live transient status regions for the current frame."
-  (opencode-shell--without-user-undo
-    (let ((permission-turn (opencode-shell--permission-status-turn)))
-      (save-excursion
-        (dolist (turn opencode-shell--rendered-turns)
-          (when (and (not (eq turn permission-turn))
-                     (not (eq (opencode-shell--turn-status turn) 'complete))
-                     (opencode-shell--turn-rendered-p turn))
-            (opencode-shell--update-turn-response turn)))
-      (when (and (markerp opencode-shell--permission-status-begin)
-                 (marker-position opencode-shell--permission-status-begin)
-                 (markerp opencode-shell--permission-status-end)
-                 (marker-position opencode-shell--permission-status-end))
-        (let* ((begin opencode-shell--permission-status-begin)
-               (end opencode-shell--permission-status-end)
-               (display (or (opencode-shell--permission-status-display) ""))
-               (inhibit-read-only t))
-          (unless (string= display (buffer-substring begin end))
-            (let ((position (marker-position begin)))
-              (delete-region begin end)
-              (goto-char position)
-              (insert-before-markers display)
-              (set-marker begin position)
-              (set-marker end (point))))))))))
+  "Update transient spinner presentation without modifying buffer text."
+  (setq opencode-shell--spinner-overlays
+        (seq-filter #'overlay-buffer opencode-shell--spinner-overlays))
+  (dolist (overlay opencode-shell--spinner-overlays)
+    (overlay-put overlay 'display (opencode-shell--spinner-frame))))
 
 (defun opencode-shell--animation-tick ()
   "Advance one UI-only spinner frame without issuing network requests."
-  (cl-incf opencode-shell--animation-frame)
+  (setq opencode-shell--animation-frame
+        (mod (1+ opencode-shell--animation-frame)
+             (length opencode-shell--spinner-frames)))
   (opencode-shell--render-status-animation))
 
 (defun opencode-shell--render-turns (&optional force)
@@ -2486,9 +2497,6 @@ Render immediately unless DEFER-RENDER is non-nil."
   (when full (opencode-shell--refresh-session-metadata))
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
-      (setq opencode-shell--animation-frame 0)
-      (when opencode-shell--turns
-        (opencode-shell--schedule-render "poll"))
       (opencode-shell--guarded-request
        'messages
        "GET" (format "/session/%s/message" opencode-shell--session-id)
