@@ -34,3 +34,9 @@
   viewport, draft, and undo state.
 - Coalesce adjacent SSE and reconciliation wakes, suppress successful routine
   snapshot request logs, and retain errors plus semantic lifecycle diagnostics.
+- Apply validated message and part SSE deltas to their target session without a
+  full-history request, while retaining authoritative snapshots for initial,
+  reconnect, integrity, unsupported-event, and polling-fallback recovery.
+- Reconcile fallback snapshots linearly and render only changed response blocks,
+  keeping fixed-width spinner redisplay and unrelated Emacs buffers responsive
+  for long resumed sessions.

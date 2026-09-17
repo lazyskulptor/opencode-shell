@@ -201,7 +201,22 @@
               (should opencode-shell--spinner-overlays)
               (should-not
                (equal first-frame
-                       (overlay-get (car opencode-shell--spinner-overlays) 'display))))))
+                      (overlay-get (car opencode-shell--spinner-overlays) 'display)))
+              (opencode-shell--render-messages
+               '(((info . ((id . "large-active-assistant")
+                           (sessionID . "large-session")
+                           (role . "assistant")
+                           (parentID . "large-active-user")
+                           (finish . "stop") (time . ((completed . 2)))))
+                  (parts . (((id . "large-tool") (sessionID . "large-session")
+                             (messageID . "large-active-assistant")
+                             (type . "tool") (tool . "bash")
+                             (state . ((status . "completed"))))))))
+               2 t)
+              (opencode-shell-async-drain buffer)
+              (should (eq (opencode-shell--turn-status
+                           (car (last opencode-shell--turns)))
+                          'complete)))))
       (set-window-buffer window original-buffer)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 

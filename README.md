@@ -175,8 +175,9 @@ For polling diagnostics, leave `opencode-shell-log-requests` enabled and run
 `M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted
 when state changes and name the local blockers, completion metadata, tool-state
 counts, pending permission count, and submit reconciliation state. Routine
-unchanged snapshots are semantic no-ops, and adjacent SSE/timer wakes are
-coalesced into one reconciliation. Logs intentionally exclude message/reasoning text,
+unchanged snapshots are semantic no-ops. Validated message and part SSE events
+update only their target session and turn; unknown events, reconnects, and
+fallback polling trigger bounded snapshot reconciliation. Logs intentionally exclude message/reasoning text,
 tool input/output, permission descriptions and patterns, request bodies, query
 parameters, directories, authorization values, and server error bodies.
 The network cadence remains controlled independently by
@@ -194,14 +195,16 @@ fallback lines followed by reconnect lines indicate automatic recovery.
 ## Asynchronous runtime principles
 
 Interactive commands never wait synchronously for network or process I/O.
-Transport callbacks reconcile authoritative server snapshots but do not directly
-rewrite transcript or browser buffers. UI work is coalesced and applied at idle
+Transport callbacks decode validated application events but do not directly
+rewrite transcript or browser buffers. Session-scoped message and part deltas
+update an ID-indexed local state store; UI work is coalesced and applied at idle
 time, and hidden buffers retain dirty state without spending time rendering it.
-OpenCode's `/event` SSE endpoint is the preferred wake-up path, shared per server;
-low-frequency snapshot polling remains the recovery and compatibility path.
+OpenCode's `/event` SSE endpoint is the primary update path, shared per server;
+initial, reconnect, integrity, and fallback snapshots remain authoritative recovery.
 `opencode-shell-sse.el` owns byte-level HTTP, chunked-transfer, and SSE parsing
-plus one connection lifecycle. `opencode-shell-async.el` owns sharing, reconnect,
-fallback polling, and coalescing; neither transport layer edits UI buffers.
+plus one connection lifecycle. `opencode-shell-event.el` validates application
+event shape and scope. `opencode-shell-async.el` owns session routing, sharing,
+reconnect, fallback polling, and coalescing; none of these layers edits UI buffers.
 
 These rules apply to all new runtime work. See
 [`docs/async-runtime.md`](docs/async-runtime.md) for the architecture, fallback,

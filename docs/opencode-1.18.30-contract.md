@@ -61,13 +61,14 @@ update field.
 JSON request and response shapes follow OpenCode 1.18.30. This contract contains no Athena or
 Aider concepts.
 
-The client uses `/event` as a shared asynchronous wake-up signal when a safe SSE
-connection is available. Event payloads never become authoritative transcript
-state: they schedule coalesced reads from `/session/:id/message`, `/permission`,
-`/question`, and `/session/status`. Stable message identities and monotonic
-history reconciliation remain authoritative and recover after event loss or
-request interruption. A low-frequency polling fallback preserves the same
-behavior when SSE is unavailable or disconnected.
+The client uses `/event` as a shared incremental update path when a safe SSE
+connection is available. OpenCode 1.18.30 `message.updated`, `message.removed`,
+`message.part.updated`, and `message.part.removed` payloads are validated and
+routed by `sessionID`; they update an ID-indexed local transcript state without
+reading the complete history. Stable message/part identities and snapshot
+reconciliation remain authoritative and recover after event loss, unsupported
+payloads, reconnect, or request interruption. A low-frequency polling fallback
+preserves the same behavior when SSE is unavailable or disconnected.
 
 The `/event` wire path is isolated in `opencode-shell-sse.el`: a process-free
 incremental parser validates the HTTP status and actual `Content-Type` field,
@@ -76,9 +77,9 @@ of network split boundaries. A connection object owns only its process, immutabl
 attempt token, parser state, and header deadline. The shared async runtime owns
 reconnect backoff, the bounded circuit breaker, subscriber sharing, and polling.
 Protocol/configuration failure opens fallback immediately; transient closure or
-timeout reconnects until the failure budget is exhausted. No event payload is
-logged or applied directly to transcript, permission, question, or completion
-state.
+timeout reconnects until the failure budget is exhausted. The application-event
+decoder retains only validated message/part state and identity fields. Raw event
+payloads, message text, reasoning, and tool input/output are never logged.
 
 A session may be absent from `/session/status` while its history still contains an
 assistant message with a running tool and no `step-finish`. This is not completion:
