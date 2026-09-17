@@ -82,10 +82,11 @@ recurring reconciliation is limited to message history and pending permissions
 and questions; session metadata and model/agent capabilities are full-resync data.
 The transcript shows sending, waiting, receiving, recovering, aborting, or error
 state and never replaces an already completed response with stale data. Pending
-status uses a fixed-width spinner that advances on the UI-only
-`opencode-shell-animation-interval` (0.2 seconds by default). Spinner frames use
-overlay presentation, so they do not change transcript bytes, markers, point, or
-undo history and do not issue requests. Reasoning-only updates show `Thinking`;
+status uses a bounded right-growing spinner that advances on the UI-only
+`opencode-shell-animation-interval` (0.2 seconds by default), resets when the
+current session receives transcript progress, and cycles independently of polling.
+Spinner frames use overlay presentation, so they do not change transcript bytes,
+markers, point, or undo history and do not issue requests. Reasoning-only updates show `Thinking`;
 text or tool activity shows `Receiving`.
 Assistant completion comes from the matching message's `time.completed`
 metadata together with either a genuinely terminal `finish` value or a

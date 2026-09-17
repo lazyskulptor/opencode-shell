@@ -30,13 +30,18 @@
 - Document asynchronous runtime invariants that prohibit synchronous I/O and
   callback-driven buffer rendering on interactive hot paths.
 - Keep polling and animation presentation-only for unchanged snapshots: use a
-  fixed-width overlay spinner and preserve transcript text, markers, cursor,
-  viewport, draft, and undo state.
+  bounded right-growing overlay spinner, reset it on current-session transcript
+  progress, and preserve transcript text, markers, cursor, viewport, draft, and
+  undo state.
 - Coalesce adjacent SSE and reconciliation wakes, suppress successful routine
   snapshot request logs, and retain errors plus semantic lifecycle diagnostics.
 - Apply validated message and part SSE deltas to their target session without a
   full-history request, while retaining authoritative snapshots for initial,
   reconnect, integrity, unsupported-event, and polling-fallback recovery.
 - Reconcile fallback snapshots linearly and render only changed response blocks,
-  keeping fixed-width spinner redisplay and unrelated Emacs buffers responsive
+  keeping overlay spinner redisplay and unrelated Emacs buffers responsive
   for long resumed sessions.
+- Recover live transcript caches before timer-delivered hash operations, discard
+  stale work after mode transitions, coalesce update/removal events by entity,
+  scope unsupported-event reconciliation by resource, and cascade user-message
+  removals through locally indexed assistant children.

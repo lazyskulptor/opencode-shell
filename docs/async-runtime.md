@@ -47,17 +47,23 @@ composer noticeably pause.
   integrity polling, and keyed delivery. It never parses wire bytes.
 - **State:** buffer-local ID-indexed message envelopes, delta and snapshot merge,
   generation checks, request deduplication, and changed-turn dirty flags. It does
-  not modify displayed text.
+  not modify displayed text. Live transcripts recreate a missing cache at this
+  ownership boundary; stale work after a major-mode transition is discarded.
 - **Presentation:** idle, visible-only, coalesced transcript/browser rendering.
-  Composer text, point, markers, and undo history remain stable.
+  The bounded right-growing spinner is an overlay driven by its own animation
+  timer and reset by current-session transcript progress, not polling. Composer
+  text, point, markers, and undo history remain stable.
 
 ## Lifecycle
 
 Opening a live transcript subscribes it to its profile runtime. The first
 subscriber starts SSE or polling fallback. Validated events route only to the
 matching session and update message or part state without a snapshot read.
-Duplicate identities coalesce; unknown events and the first event after reconnect
-schedule one snapshot. Periodic low-frequency reconciliation covers lost events.
+Update/removal events coalesce by message or part identity, so their final order
+is preserved within a delivery burst. Unsupported message, permission, and
+question events reconcile only their affected resource; malformed or unclassified
+events and the first event after reconnect reconcile all polling state. Periodic
+low-frequency reconciliation covers lost events.
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.

@@ -69,6 +69,12 @@ reading the complete history. Stable message/part identities and snapshot
 reconciliation remain authoritative and recover after event loss, unsupported
 payloads, reconnect, or request interruption. A low-frequency polling fallback
 preserves the same behavior when SSE is unavailable or disconnected.
+Unsupported events are reduced to resource-scoped snapshot hints when their type
+identifies messages, permissions, or questions; malformed and unclassified
+events conservatively reconcile all polling state. Update and removal events for
+one entity share a delivery identity so latest-value coalescing cannot reverse
+their final state. Removing a user message also removes its locally indexed
+assistant children.
 
 The `/event` wire path is isolated in `opencode-shell-sse.el`: a process-free
 incremental parser validates the HTTP status and actual `Content-Type` field,
