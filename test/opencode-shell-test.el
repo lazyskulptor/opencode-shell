@@ -179,13 +179,11 @@
     (insert "draft")
     (let* ((buffer (current-buffer))
            (turns (list (opencode-shell-test--complete-user-turn "msg-1" "done")))
-           (poll-timer 'existing-poll-timer)
            (opencode-shell--session-directory-overrides nil))
       (setq-local opencode-shell--session-id "ses-source"
                   opencode-shell--profile opencode-shell-test--local-profile
-                  opencode-shell--directory "/server/project/old/"
-                  opencode-shell--turns turns
-                  opencode-shell--poll-timer poll-timer)
+                   opencode-shell--directory "/server/project/old/"
+                   opencode-shell--turns turns)
       (cl-letf (((symbol-function 'read-directory-name)
                  (lambda (&rest _) "/client/project/new/nested/"))
                 ((symbol-function 'opencode-shell--project-directory)
@@ -198,7 +196,6 @@
       (should (eq (current-buffer) buffer))
       (should (equal opencode-shell--session-id "ses-source"))
       (should (eq opencode-shell--turns turns))
-      (should (eq opencode-shell--poll-timer poll-timer))
       (should (equal (opencode-shell--composer-text) "draft"))
       (should (equal opencode-shell--directory "/server/project/new/"))
       (should (equal (opencode-shell--session-directory-override
@@ -989,12 +986,12 @@
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
         (opencode-shell--resync t)
-        (should (= (length requests) 7))
+        (should (= (length requests) 6))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
         (opencode-shell--resync t)
-        (should (= (length requests) 7))
+        (should (= (length requests) 6))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
         (funcall (cadr (assoc "/agent" requests)) nil)
@@ -1011,8 +1008,7 @@
           (setq opencode-shell--in-flight nil))
         (opencode-shell--resync)
         (should (equal (mapcar #'car requests)
-                         '("/question" "/permission" "/session/status"
-                           "/session/s/message")))))))
+                       '("/question" "/permission" "/session/s/message")))))))
 
 (ert-deftest opencode-shell-periodic-resync-excludes-session-metadata ()
   (with-temp-buffer
@@ -1026,8 +1022,7 @@
                    (push path paths))))
         (opencode-shell--resync nil)
         (should (equal (sort paths #'string<)
-                       '("/permission" "/question" "/session/s/message"
-                         "/session/status")))
+                       '("/permission" "/question" "/session/s/message")))
         (should-not (member "/session" paths))
         (should-not (member "/agent" paths))
         (should-not (member "/provider" paths))))))
@@ -1208,8 +1203,9 @@
         (should (string-match-p (regexp-quote (make-string 2 opencode-shell--spinner-character))
                                 (buffer-string)))
         (opencode-shell--stop-polling)
-        (should-not opencode-shell--poll-timer)
-        (should-not opencode-shell--animation-timer)
+        (should-not opencode-shell--runtime-key)
+        (should-not (gethash (current-buffer)
+                             opencode-shell-async--animation-subscribers))
         (should (= 2 (length cancelled)))
         (setq timers nil opencode-shell--animation-frame 6)
         (opencode-shell--start-polling)
@@ -1281,19 +1277,18 @@
 (ert-deftest opencode-shell-completion-stops-polling ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (let ((timer (run-at-time 60 nil #'ignore))
-          (animation (run-at-time 60 nil #'ignore)))
-      (unwind-protect
-          (progn
-            (setq opencode-shell--poll-timer timer
-                  opencode-shell--animation-timer animation)
-            (opencode-shell--render-messages nil)
-            (should-not opencode-shell--poll-timer)
-            (should-not opencode-shell--animation-timer)
-            (should-not (memq timer timer-list))
-            (should-not (memq animation timer-list)))
-        (when (timerp timer) (cancel-timer timer))
-        (when (timerp animation) (cancel-timer animation))))))
+    (let ((opencode-shell--runtime-key 'server)
+          runtime-unsubscribed animation-unsubscribed)
+      (cl-letf (((symbol-function 'opencode-shell-async-cancel) #'ignore)
+                ((symbol-function 'opencode-shell-async-unsubscribe-runtime)
+                 (lambda (key buffer)
+                   (setq runtime-unsubscribed (list key buffer))))
+                ((symbol-function 'opencode-shell-async-unsubscribe-animation)
+                 (lambda (buffer) (setq animation-unsubscribed buffer))))
+        (opencode-shell--render-messages nil))
+      (should (equal runtime-unsubscribed (list 'server (current-buffer))))
+      (should (eq animation-unsubscribed (current-buffer)))
+      (should-not opencode-shell--runtime-key))))
 
 (ert-deftest opencode-shell-evil-setup-load-orders ()
   (let (calls)
@@ -1520,12 +1515,10 @@
               #'opencode-shell--open-at-point))
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--poll-timer (run-at-time 60 nil #'ignore))
     (setq opencode-shell--generation 4
           opencode-shell--in-flight '((messages . t))
           opencode-shell--capabilities-loading t)
     (opencode-shell--cleanup)
-    (should-not opencode-shell--poll-timer)
     (should-not opencode-shell--in-flight)
     (should-not opencode-shell--capabilities-loading)
     (should (= opencode-shell--generation 5))))
@@ -1574,25 +1567,20 @@
 (ert-deftest opencode-shell-superseded-history-orphan-stops-polling ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (let ((timer (run-at-time 60 nil #'ignore)) events)
-      (unwind-protect
-          (progn
-            (setq opencode-shell--poll-timer timer)
-            (cl-letf (((symbol-function 'opencode-shell--log-lifecycle)
-                       (lambda (event &optional _force) (push event events))))
-              (opencode-shell--render-messages
-               (list (opencode-shell-test--message "u1" "user" "orphan")
-                     (opencode-shell-test--message "u2" "user" "new")
-                     (opencode-shell-test--message "a2" "assistant" "answer" "u2")))
-              (let ((orphan (car opencode-shell--turns)))
-                (should (eq (opencode-shell--turn-status orphan) 'complete))
-                (should (opencode-shell--turn-locally-settled orphan))
-                (should (equal (opencode-shell--turn-terminal-error orphan)
-                               "Interrupted: Superseded by a later prompt")))
-              (should (equal opencode-shell--request-status "idle"))
-              (should-not opencode-shell--poll-timer)
-              (should (member "poll-stop" events))))
-        (when (timerp timer) (cancel-timer timer))))))
+    (let (events)
+      (cl-letf (((symbol-function 'opencode-shell--log-lifecycle)
+                 (lambda (event &optional _force) (push event events))))
+        (opencode-shell--render-messages
+         (list (opencode-shell-test--message "u1" "user" "orphan")
+               (opencode-shell-test--message "u2" "user" "new")
+               (opencode-shell-test--message "a2" "assistant" "answer" "u2")))
+        (let ((orphan (car opencode-shell--turns)))
+          (should (eq (opencode-shell--turn-status orphan) 'complete))
+          (should (opencode-shell--turn-locally-settled orphan))
+          (should (equal (opencode-shell--turn-terminal-error orphan)
+                         "Interrupted: Superseded by a later prompt")))
+        (should (equal opencode-shell--request-status "idle"))
+        (should (member "poll-stop" events))))))
 
 (ert-deftest opencode-shell-submit-settles-existing-nonterminal-turns ()
   (with-temp-buffer
@@ -1770,28 +1758,21 @@
                    (parts . (((id . "p1") (type . "tool") (tool . "read")
                               (state . ((status . "completed"))))
                              ((id . "p2") (type . "step-finish"))))))
-          (step2 '((info . ((id . "a2") (role . "assistant") (parentID . "u1")
-                            (finish . "stop") (time . ((created . 3) (completed . 4)))))
-                   (parts . (((id . "p3") (type . "text") (text . "answer"))
-                             ((id . "p4") (type . "step-finish"))))))
-          (timer (run-at-time 60 nil #'ignore)))
-      (unwind-protect
-          (progn
-            (setq opencode-shell--poll-timer timer)
-            (opencode-shell--render-messages (list user step1))
-            (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-            ;; The premature-completion bug would restore the composer and
-            ;; cancel polling right after this first (non-final) step.
-            (should (timerp opencode-shell--poll-timer))
-            (should opencode-shell--submit-in-flight)
-            (should-not opencode-shell--composer-visible)
-            (opencode-shell--render-messages (list user step1 step2))
-            (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-            (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
-            (should-not opencode-shell--submit-in-flight)
-            (should opencode-shell--composer-visible)
-            (should-not opencode-shell--poll-timer))
-        (when (timerp timer) (cancel-timer timer))))))
+           (step2 '((info . ((id . "a2") (role . "assistant") (parentID . "u1")
+                             (finish . "stop") (time . ((created . 3) (completed . 4)))))
+                    (parts . (((id . "p3") (type . "text") (text . "answer"))
+                              ((id . "p4") (type . "step-finish")))))))
+      (opencode-shell--render-messages (list user step1))
+      (should-not (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      ;; The premature-completion bug would restore the composer and stop
+      ;; reconciliation right after this first (non-final) step.
+      (should opencode-shell--submit-in-flight)
+      (should-not opencode-shell--composer-visible)
+      (opencode-shell--render-messages (list user step1 step2))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
+      (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
+      (should-not opencode-shell--submit-in-flight)
+      (should opencode-shell--composer-visible))))
 
 (ert-deftest opencode-shell-error-terminated-message-completes-turn ()
   (with-temp-buffer
@@ -1849,30 +1830,22 @@
           opencode-shell--composer-visible nil
           opencode-shell--permissions '(((id . "permission-1")
                                          (sessionID . "session-1"))))
-    (let ((timer (run-at-time 60 nil #'ignore)))
-      (unwind-protect
-          (progn
-            (setq opencode-shell--poll-timer timer)
-            (opencode-shell--render-messages
-             (car opencode-shell-test--completion-polling-snapshots) 1)
-            (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
-                        'receiving))
-            (should (timerp opencode-shell--poll-timer))
-            (opencode-shell--render-messages
-             (cadr opencode-shell-test--completion-polling-snapshots) 2)
-            (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
-                        'complete))
-            (should opencode-shell--submit-in-flight)
-            (should-not opencode-shell--composer-visible)
-            (should (timerp opencode-shell--poll-timer))
-            (setq opencode-shell--permissions nil)
-            (opencode-shell--render-messages
-             (cadr opencode-shell-test--completion-polling-snapshots) 3)
-            (should-not opencode-shell--submit-in-flight)
-            (should opencode-shell--composer-visible)
-            (should-not opencode-shell--poll-timer)
-            (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))
-        (when (timerp timer) (cancel-timer timer))))))
+    (opencode-shell--render-messages
+     (car opencode-shell-test--completion-polling-snapshots) 1)
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                'receiving))
+    (opencode-shell--render-messages
+     (cadr opencode-shell-test--completion-polling-snapshots) 2)
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                'complete))
+    (should opencode-shell--submit-in-flight)
+    (should-not opencode-shell--composer-visible)
+    (setq opencode-shell--permissions nil)
+    (opencode-shell--render-messages
+     (cadr opencode-shell-test--completion-polling-snapshots) 3)
+    (should-not opencode-shell--submit-in-flight)
+    (should opencode-shell--composer-visible)
+    (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
   (with-temp-buffer
@@ -2018,25 +1991,19 @@
         (should-not opencode-shell--render-dirty)
         (should (string-match-p "answer" (buffer-string)))))))
 
-(ert-deftest opencode-shell-history-poll-advances-buffer-local-heartbeat ()
-  (let ((first (generate-new-buffer " *heartbeat-1*"))
-        (second (generate-new-buffer " *heartbeat-2*")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
-          (with-current-buffer first
-            (opencode-shell-mode)
-            (setq opencode-shell--session-id "s")
-            (dotimes (_ 4) (opencode-shell--resync))
-            (should (= opencode-shell--poll-heartbeat 1))
-            (should (equal (opencode-shell--status-display "Waiting")
-                           (format "Waiting %s\n\n"
-                                   (make-string 1 opencode-shell--spinner-character)))))
-          (with-current-buffer second
-            (opencode-shell-mode)
-            (should (= opencode-shell--poll-heartbeat 0))
-            (should (= opencode-shell--animation-frame 0))))
-      (kill-buffer first)
-      (kill-buffer second))))
+(ert-deftest opencode-shell-transcript-resync-skips-legacy-status-snapshot ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let (requests)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method path &rest _)
+                   (push (cons key path) requests))))
+        (opencode-shell--resync))
+      (should (equal (nreverse requests)
+                     '((messages . "/session/s/message")
+                       (permissions . "/permission")
+                       (questions . "/question")))))))
 
 (ert-deftest opencode-shell-history-poll-restarts-growing-animation ()
   (with-temp-buffer
@@ -2075,15 +2042,6 @@
                       (make-string 13 opencode-shell--spinner-character)))
              (buffer-string)))))
 
-(ert-deftest opencode-shell-overlapping-resync-does-not-advance-heartbeat ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq opencode-shell--session-id "s"
-          opencode-shell--in-flight '((messages . t)))
-    (cl-letf (((symbol-function 'opencode-shell--guarded-request) #'ignore))
-      (opencode-shell--resync)
-      (should (= opencode-shell--poll-heartbeat 0)))))
-
 (ert-deftest opencode-shell-hidden-resync-does-not-touch-buffer-text ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2097,53 +2055,6 @@
         (opencode-shell--resync)
         (should (equal before (buffer-string)))
         (should opencode-shell--render-dirty)))))
-
-(ert-deftest opencode-shell-missing-status-does-not-complete-running-tool ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq opencode-shell--session-id "s")
-    (opencode-shell--render-messages
-     (list (opencode-shell-test--message "u1" "user" "question")
-           (opencode-shell-test--tool-message "a1" "u1" "running")))
-    (opencode-shell--complete-idle-turn)
-    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))))
-
-(ert-deftest opencode-shell-idle-status-never-completes-text-response ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq opencode-shell--session-id "s")
-    (opencode-shell--render-messages
-     (list (opencode-shell-test--message "u1" "user" "question")
-           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
-             (parts . (((id . "p1") (type . "text") (text . "answer")))))))
-    (setq opencode-shell--session-status '((s . ((type . "idle"))))
-          opencode-shell--submit-in-flight "u1"
-          opencode-shell--composer-visible nil)
-    (opencode-shell--complete-idle-turn)
-    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
-    (should opencode-shell--submit-in-flight)
-    (opencode-shell--complete-idle-turn)
-    (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving))
-    (should opencode-shell--submit-in-flight)
-    (should-not opencode-shell--composer-visible)))
-
-(ert-deftest opencode-shell-permission-blocks-idle-completion-and-prompt ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (setq opencode-shell--session-id "s"
-          opencode-shell--submit-in-flight "u1"
-          opencode-shell--composer-visible nil
-          opencode-shell--permissions '(((id . "p1") (sessionID . "s")))
-          opencode-shell--session-status '((s . ((type . "idle")))))
-    (opencode-shell--render-messages
-     (list (opencode-shell-test--message "u1" "user" "question")
-           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
-             (parts . (((id . "p") (type . "text") (text . "answer")))))))
-    (opencode-shell--complete-idle-turn)
-    (opencode-shell--complete-idle-turn)
-    (should opencode-shell--submit-in-flight)
-    (should-not opencode-shell--composer-visible)
-    (should (= opencode-shell--idle-completion-count 0))))
 
 (ert-deftest opencode-shell-permission-precedes-relocated-response-spinner ()
   (with-temp-buffer

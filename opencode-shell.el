@@ -473,9 +473,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--agents nil)
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
-(defvar-local opencode-shell--poll-timer nil)
 (defvar-local opencode-shell--runtime-key nil)
-(defvar-local opencode-shell--animation-timer nil)
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
@@ -492,11 +490,9 @@ and lifecycle keys."
 (defvar-local opencode-shell--request-status "idle")
 (defvar-local opencode-shell--message-request-sequence 0)
 (defvar-local opencode-shell--message-applied-sequence 0)
-(defvar-local opencode-shell--poll-heartbeat 0)
 (defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
-(defvar-local opencode-shell--idle-completion-count 0)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
 (defvar-local opencode-shell--permission-end nil)
@@ -1404,20 +1400,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                #'opencode-shell--refresh-table-layout t)
   (remove-hook 'window-configuration-change-hook
                #'opencode-shell--render-if-visible t)
-  (when (and (timerp opencode-shell--poll-timer)
-             (null opencode-shell--runtime-key))
-    (cancel-timer opencode-shell--poll-timer))
   (when opencode-shell--runtime-key
     (opencode-shell-async-unsubscribe-runtime
      opencode-shell--runtime-key (current-buffer)))
-  (when (and (timerp opencode-shell--animation-timer)
-             (not (eq opencode-shell--animation-timer
-                      opencode-shell-async--animation-timer)))
-    (cancel-timer opencode-shell--animation-timer))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
-  (setq opencode-shell--poll-timer nil
-        opencode-shell--animation-timer nil
-        opencode-shell--runtime-key nil)
+  (setq opencode-shell--runtime-key nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
   (when opencode-shell--session-id
@@ -1428,20 +1415,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 (defun opencode-shell--stop-polling ()
   "Stop periodic network polling and UI animation in the current buffer."
   (opencode-shell-async-cancel)
-  (when (and (timerp opencode-shell--poll-timer)
-             (null opencode-shell--runtime-key))
-    (cancel-timer opencode-shell--poll-timer))
   (when opencode-shell--runtime-key
     (opencode-shell-async-unsubscribe-runtime
      opencode-shell--runtime-key (current-buffer)))
-  (when (and (timerp opencode-shell--animation-timer)
-             (not (eq opencode-shell--animation-timer
-                      opencode-shell-async--animation-timer)))
-    (cancel-timer opencode-shell--animation-timer))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
-  (setq opencode-shell--poll-timer nil
-        opencode-shell--animation-timer nil
-        opencode-shell--runtime-key nil)
+  (setq opencode-shell--runtime-key nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
 (defun opencode-shell--start-polling ()
@@ -1456,21 +1434,20 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                     "/" (or opencode-shell--base-url
                             (plist-get profile :base-url) opencode-shell-base-url)))
              (auth (opencode-shell--auth-header profile))
-             (runtime
-              (opencode-shell-async-subscribe-runtime
-               key buffer (concat base "/event") (and auth (list auth))
-               (not (opencode-shell--profile-remote-p profile))
-               opencode-shell-poll-interval
-               (lambda () (opencode-shell--resync nil))
-               (lambda (event)
-                 (when opencode-shell-log-requests
-                   (opencode-shell--log "OpenCode async %s" event))))))
-        (setq opencode-shell--runtime-key key
-              opencode-shell--poll-timer (plist-get runtime :poll-timer)
-              opencode-shell--animation-timer
-            (opencode-shell-async-subscribe-animation
-             buffer opencode-shell-animation-interval
-             #'opencode-shell--animation-tick)))
+              (runtime
+               (opencode-shell-async-subscribe-runtime
+                key buffer (concat base "/event") (and auth (list auth))
+                (not (opencode-shell--profile-remote-p profile))
+                opencode-shell-poll-interval
+                (lambda () (opencode-shell--resync nil))
+                (lambda (event)
+                  (when opencode-shell-log-requests
+                    (opencode-shell--log "OpenCode async %s" event))))))
+        (ignore runtime)
+        (setq opencode-shell--runtime-key key)
+        (opencode-shell-async-subscribe-animation
+         buffer opencode-shell-animation-interval
+         #'opencode-shell--animation-tick))
       (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload
@@ -1879,8 +1856,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (opencode-shell--deduplicate-questions
          (opencode-shell--session-questions items)))
   (when (opencode-shell--human-interaction-blocked-p)
-    (setq opencode-shell--composer-visible nil
-          opencode-shell--idle-completion-count 0)
+    (setq opencode-shell--composer-visible nil)
     (opencode-shell--start-polling))
   (if defer-render
       (opencode-shell--schedule-render "questions")
@@ -2065,8 +2041,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
          (opencode-shell--deduplicate-permissions
           (opencode-shell--session-permissions items))))
   (when (opencode-shell--permission-blocked-p)
-    (setq opencode-shell--composer-visible nil
-          opencode-shell--idle-completion-count 0)
+    (setq opencode-shell--composer-visible nil)
     (opencode-shell--start-polling))
   (if defer-render
       (opencode-shell--schedule-render "permissions")
@@ -2444,10 +2419,6 @@ Render immediately unless DEFER-RENDER is non-nil."
             (setq opencode-shell--render-dirty nil
                   opencode-shell--render-event nil)))))))
 
-(defun opencode-shell--complete-idle-turn ()
-  "Record that idle status alone is not assistant completion evidence."
-  (setq opencode-shell--idle-completion-count 0))
-
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
   (unless (alist-get key opencode-shell--in-flight)
@@ -2516,19 +2487,12 @@ Render immediately unless DEFER-RENDER is non-nil."
   (unless (alist-get 'messages opencode-shell--in-flight)
     (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
       (setq opencode-shell--animation-frame 0)
-      (setq opencode-shell--poll-heartbeat (% (1+ opencode-shell--poll-heartbeat) 3))
       (when opencode-shell--turns
         (opencode-shell--schedule-render "poll"))
       (opencode-shell--guarded-request
        'messages
        "GET" (format "/session/%s/message" opencode-shell--session-id)
         (lambda (messages) (opencode-shell--render-messages messages sequence t)))))
-  (opencode-shell--guarded-request
-   'status "GET" "/session/status"
-    (lambda (statuses)
-      (setq opencode-shell--session-status statuses)
-      (opencode-shell--complete-idle-turn)
-      (opencode-shell--log-lifecycle "status")))
   (opencode-shell--guarded-request
    'permissions "GET" "/permission"
    (lambda (items) (opencode-shell--receive-permissions items t))
@@ -2609,7 +2573,6 @@ Render immediately unless DEFER-RENDER is non-nil."
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
             opencode-shell--request-status "sending"
             opencode-shell--composer-visible nil
-            opencode-shell--idle-completion-count 0
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
        (opencode-shell--replace-composer "")
        (opencode-shell--render-turns)
@@ -3310,9 +3273,7 @@ ACTIVE means that their session browser is already live."
       (dolist (buffer active-buffers)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
-            (setq opencode-shell--runtime-key nil
-                  opencode-shell--poll-timer nil
-                  opencode-shell--animation-timer nil)
+            (setq opencode-shell--runtime-key nil)
             (opencode-shell--start-polling))))
       (force-mode-line-update t)
       (message "Reloaded OpenCode Shell"))))
