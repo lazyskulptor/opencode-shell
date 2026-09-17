@@ -89,10 +89,17 @@ state application.  Unknown or malformed values become snapshot hints."
 
 (defun opencode-shell-event-identity (event)
   "Return a stable delivery identity for decoded EVENT."
-  (list (plist-get event :kind)
-        (plist-get event :session-id)
-        (plist-get event :message-id)
-        (plist-get event :part-id)))
+  (let ((kind (plist-get event :kind)))
+    (cond
+     ((memq kind '(part-updated part-removed))
+      (list 'part (plist-get event :session-id)
+            (plist-get event :message-id) (plist-get event :part-id)))
+     ((memq kind '(message-updated message-removed))
+      (list 'message (plist-get event :session-id)
+            (plist-get event :message-id)))
+     (t
+      (list 'snapshot (plist-get event :session-id)
+            (plist-get event :resource))))))
 
 (provide 'opencode-shell-event)
 ;;; opencode-shell-event.el ends here

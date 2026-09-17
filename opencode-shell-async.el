@@ -276,8 +276,11 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
 Only the latest pending value for KEY and GENERATION is retained."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setf (alist-get key opencode-shell-async--queue nil nil #'equal)
-            (cons generation (cons function arguments)))
+      ;; Reinsert replacements at the newest position so coalescing cannot
+      ;; reorder the latest occurrence behind events that arrived in between.
+      (setq opencode-shell-async--queue
+            (cons (cons key (cons generation (cons function arguments)))
+                  (assoc-delete-all key opencode-shell-async--queue)))
       (unless (timerp opencode-shell-async--idle-timer)
         (setq opencode-shell-async--idle-timer
               (run-with-idle-timer 0 nil #'opencode-shell-async-drain buffer)))

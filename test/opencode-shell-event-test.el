@@ -31,6 +31,28 @@
     (should-not (plist-get malformed :session-id))
     (should (eq (plist-get malformed :reason) 'malformed))))
 
+(ert-deftest opencode-shell-event-coalesces-update-and-removal-by-entity ()
+  (should
+   (equal (opencode-shell-event-identity
+           '(:kind message-updated :session-id "s" :message-id "m"))
+          (opencode-shell-event-identity
+           '(:kind message-removed :session-id "s" :message-id "m"))))
+  (should
+   (equal (opencode-shell-event-identity
+           '(:kind part-updated :session-id "s" :message-id "m" :part-id "p"))
+          (opencode-shell-event-identity
+           '(:kind part-removed :session-id "s" :message-id "m" :part-id "p"))))
+  (should-not
+   (equal (opencode-shell-event-identity
+           '(:kind message-updated :session-id "s" :message-id "m1"))
+          (opencode-shell-event-identity
+           '(:kind message-updated :session-id "s" :message-id "m2"))))
+  (should-not
+   (equal (opencode-shell-event-identity
+           '(:kind snapshot :session-id "s" :resource messages))
+          (opencode-shell-event-identity
+           '(:kind snapshot :session-id "s" :resource permissions)))))
+
 (ert-deftest opencode-shell-event-routes-session-scoped-events-only-to-their-subscriber ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (first (generate-new-buffer " *event-session-a*"))

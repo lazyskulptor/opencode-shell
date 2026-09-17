@@ -377,6 +377,22 @@
         (should-not opencode-shell-async--queue)
         (should-not opencode-shell-async--idle-timer)))))
 
+(ert-deftest opencode-shell-async-queue-repositions-a-replaced-key ()
+  (with-temp-buffer
+    (setq-local opencode-shell--generation 3)
+    (let (values)
+      (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer)))
+                ((symbol-function 'cancel-timer) #'ignore))
+        (dolist (entry '((entity-a . old-a) (entity-b . b) (entity-a . latest-a)))
+          (opencode-shell-async-enqueue
+           (current-buffer) (car entry) 3
+           (lambda (value) (setq values (append values (list value))))
+           (cdr entry)))
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal values '(b latest-a)))))))
+
 (ert-deftest opencode-shell-question-multiple-custom-semantics ()
   (let ((item '((id . "q")
                 (questions . (((question . "Single choice")
