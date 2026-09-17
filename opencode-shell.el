@@ -1452,7 +1452,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                 (lambda () (opencode-shell--resync nil))
                 (lambda (event)
                   (when opencode-shell-log-requests
-                    (opencode-shell--log "OpenCode async %s" event))))))
+                    (opencode-shell--log "OpenCode async %s" event)))
+                opencode-shell--session-id
+                (lambda (_event) (opencode-shell--resync nil)))))
         (ignore runtime)
         (setq opencode-shell--runtime-key key)
         (opencode-shell-async-subscribe-animation

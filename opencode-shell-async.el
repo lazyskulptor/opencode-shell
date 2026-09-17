@@ -14,6 +14,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'opencode-shell-sse)
+(require 'opencode-shell-event)
 
 (defvar opencode-shell-async--runtimes (make-hash-table :test #'equal)
   "Shared runtime state keyed by server identity.")
@@ -55,15 +56,34 @@
   (prog1 (gethash key opencode-shell-async--runtimes)
     (remhash key opencode-shell-async--runtimes)))
 
-(defun opencode-shell-async--deliver-runtime (runtime _reason)
-  "Coalesce RUNTIME subscriber callbacks under one wake key."
+(defun opencode-shell-async--subscription-callback (subscription)
+  "Return the reconciliation callback from SUBSCRIPTION."
+  (if (functionp subscription) subscription
+    (plist-get subscription :callback)))
+
+(defun opencode-shell-async--deliver-runtime (runtime _reason &optional event)
+  "Deliver a wake or decoded EVENT to matching RUNTIME subscribers."
   (maphash
-   (lambda (buffer callback)
+   (lambda (buffer subscription)
      (if (not (buffer-live-p buffer))
          (remhash buffer (plist-get runtime :subscribers))
-       (with-current-buffer buffer
-          (opencode-shell-async-enqueue
-           buffer 'runtime-wake opencode-shell--generation callback))))
+       (let ((event-session (and event (plist-get event :session-id)))
+             (subscriber-session (and (listp subscription)
+                                      (plist-get subscription :session-id))))
+         (when (or (null event-session)
+                   (null subscriber-session)
+                   (equal event-session subscriber-session))
+           (with-current-buffer buffer
+             (let ((event-callback (and event (listp subscription)
+                                        (plist-get subscription :event-callback)))
+                   (callback (opencode-shell-async--subscription-callback subscription)))
+               (if event-callback
+                   (opencode-shell-async-enqueue
+                    buffer (cons 'runtime-event
+                                 (opencode-shell-event-identity event))
+                    opencode-shell--generation event-callback event)
+                 (opencode-shell-async-enqueue
+                  buffer 'runtime-wake opencode-shell--generation callback))))))))
    (plist-get runtime :subscribers)))
 
 (defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)
@@ -99,14 +119,19 @@
               (plist-get runtime :reconnect-timer)
               (run-at-time delay nil #'opencode-shell-async--connect key))))))
 
-(defun opencode-shell-async--transport-event (key attempt _event)
+(defun opencode-shell-async--transport-event (key attempt event)
   "Wake KEY runtime for an SSE event from ATTEMPT."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
             (plist-get runtime :failures) 0)
-      (opencode-shell-async--runtime-log runtime "transport=sse wake=event")
-      (opencode-shell-async--deliver-runtime runtime 'event))))
+      (let ((application-event (opencode-shell-event-decode event)))
+        (opencode-shell-async--runtime-log
+         runtime "transport=sse wake=event type=%s scope=%s"
+         (or (plist-get application-event :type) "malformed")
+         (if (plist-get application-event :session-id) "session" "server"))
+        (opencode-shell-async--deliver-runtime
+         runtime 'event application-event)))))
 
 (defun opencode-shell-async--transport-open (key attempt)
   "Record a successful SSE handshake for KEY and ATTEMPT."
@@ -165,8 +190,11 @@
           (setf (plist-get runtime :connection) connection))))))
 
 (defun opencode-shell-async-subscribe-runtime
-    (key buffer url headers sse-enabled poll-interval callback &optional logger)
-  "Subscribe BUFFER to KEY runtime and invoke CALLBACK on event/poll wakes."
+    (key buffer url headers sse-enabled poll-interval callback
+         &optional logger session-id event-callback)
+  "Subscribe BUFFER to KEY runtime.
+Invoke CALLBACK for reconciliation wakes.  Route decoded application events
+for SESSION-ID to EVENT-CALLBACK when it is non-nil."
   (unless (opencode-shell-async--positive-finite-number-p poll-interval)
     (error "Poll interval must be a positive finite number"))
   (let* ((existing (gethash key opencode-shell-async--runtimes))
@@ -187,7 +215,9 @@
                              :backoff 1 :ticks 0 :poll-timer nil
                              :reconnect-timer nil :connection nil
                              :attempt nil :failures 0))))
-    (puthash buffer callback (plist-get runtime :subscribers))
+    (puthash buffer (list :callback callback :session-id session-id
+                          :event-callback event-callback)
+             (plist-get runtime :subscribers))
     (puthash key runtime opencode-shell-async--runtimes)
     (unless (timerp (plist-get runtime :poll-timer))
       (setf (plist-get runtime :poll-timer)

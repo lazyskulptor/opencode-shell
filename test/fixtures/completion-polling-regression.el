@@ -22,6 +22,14 @@
     "data: {\"type\":\"session.idle\"}\n\n")
   "Payload-free event burst used to verify wake-up coalescing.")
 
+(defconst opencode-shell-test--message-updated-event
+  "{\"type\":\"message.updated\",\"properties\":{\"info\":{\"id\":\"assistant-active\",\"sessionID\":\"session-a\",\"role\":\"assistant\",\"parentID\":\"user-active\"}}}"
+  "Sanitized OpenCode 1.18.30 message.updated wire payload.")
+
+(defconst opencode-shell-test--part-updated-event
+  "{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"id\":\"part-active\",\"sessionID\":\"session-a\",\"messageID\":\"assistant-active\",\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"running\"}}}}"
+  "Sanitized OpenCode 1.18.30 message.part.updated wire payload.")
+
 (defconst opencode-shell-test--active-transcript-snapshot
   '(((info . ((id . "user-active") (role . "user")))
      (parts . (((type . "text") (text . "질문")))))
