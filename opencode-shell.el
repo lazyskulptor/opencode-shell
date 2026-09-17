@@ -496,6 +496,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--message-envelopes nil)
 (defvar-local opencode-shell--message-order nil)
+(defvar-local opencode-shell--normalized-changed-turns nil)
 (defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
@@ -1382,6 +1383,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
               opencode-shell--rendered-turns nil
               opencode-shell--message-envelopes (make-hash-table :test #'equal)
               opencode-shell--message-order nil
+              opencode-shell--normalized-changed-turns nil
               opencode-shell--permissions nil
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t)
@@ -1554,10 +1556,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
          (known-info (opencode-shell--get known 'info))
          (incoming-info (opencode-shell--get incoming 'info))
          (info (opencode-shell--merge-alist known-info incoming-info)))
-    (setf (alist-get 'time info)
-          (opencode-shell--merge-alist (opencode-shell--get known-info 'time)
-                                       (opencode-shell--get incoming-info 'time))
-          (alist-get 'info merged) info)
+    (when (or (assq 'time known-info) (assq 'time incoming-info))
+      (setf (alist-get 'time info)
+            (opencode-shell--merge-alist (opencode-shell--get known-info 'time)
+                                         (opencode-shell--get incoming-info 'time))))
+    (setf (alist-get 'info merged) info)
     (setf (alist-get 'parts merged)
           (opencode-shell--merge-parts (opencode-shell--get known 'parts)
                                        (opencode-shell--get incoming 'parts)))
@@ -1724,9 +1727,38 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
             (opencode-shell--turn-locally-settled turn) t)))
   turns)
 
+(defun opencode-shell--aggregate-turn (turn)
+  "Recompute TURN presentation state once from its merged assistant messages."
+  (let* ((messages (opencode-shell--turn-assistant-messages turn))
+         (parts (apply #'append
+                       (mapcar (lambda (item)
+                                 (opencode-shell--get (cdr item) 'parts))
+                               messages)))
+         (last-envelope (cdr (car (last messages))))
+         (complete (and last-envelope
+                        (opencode-shell--assistant-envelope-complete-p last-envelope)
+                        (not (seq-some #'opencode-shell--running-tool-part-p parts)))))
+    (setf (opencode-shell--turn-parts turn) parts
+          (opencode-shell--turn-assistant turn)
+          (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
+                     messages "")
+          (opencode-shell--turn-terminal-error turn)
+          (if complete
+              (opencode-shell--message-error-label
+               (opencode-shell--get last-envelope 'info))
+            (opencode-shell--turn-terminal-error turn))
+          (opencode-shell--turn-status turn)
+          (cond (complete 'complete)
+                ((opencode-shell--turn-locally-settled turn) 'complete)
+                (t (opencode-shell--response-phase turn)))
+          (opencode-shell--turn-locally-settled turn)
+          (and (opencode-shell--turn-locally-settled turn) (not complete)))
+    turn))
+
 (defun opencode-shell--normalize-turns (messages)
   "Reconcile server MESSAGES into stable buffer-local turn records."
-  (let ((old opencode-shell--turns) observed current used)
+  (let ((old opencode-shell--turns) observed current used changed
+        (touched (make-hash-table :test #'eq)))
     (dolist (envelope messages)
       (let* ((info (opencode-shell--get envelope 'info))
              (role (format "%s" (or (opencode-shell--get info 'role) "")))
@@ -1743,16 +1775,18 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                                    (not (memq candidate used))
                                    (equal text (opencode-shell--turn-user candidate))))
                             old)
-                            (opencode-shell--make-turn
-                             :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter)))))))
+                             (opencode-shell--make-turn
+                              :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter)))))))
+            (let ((before (opencode-shell--turn-state-signature turn)))
             (setf (opencode-shell--turn-server-user-id turn) id
                   (opencode-shell--turn-acknowledged turn) t
-                  (opencode-shell--turn-user turn) text
-                  (opencode-shell--turn-parts turn) nil
-                  (opencode-shell--turn-status turn)
-                  (if (or (opencode-shell--turn-assistant turn)
-                          (opencode-shell--turn-locally-settled turn))
-                      'complete 'waiting))
+                  (opencode-shell--turn-user turn) text)
+              (unless (opencode-shell--turn-assistant-messages turn)
+                (setf (opencode-shell--turn-status turn)
+                      (if (opencode-shell--turn-locally-settled turn)
+                          'complete 'waiting)))
+              (unless (equal before (opencode-shell--turn-state-signature turn))
+                (cl-pushnew turn changed :test #'eq)))
             (setq current turn)
             (push turn used)
             (push turn observed)))
@@ -1761,46 +1795,36 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                              current)))
             (when turn
               (let* ((messages (opencode-shell--turn-assistant-messages turn))
-                     (entry (assoc id messages)))
-                 (if entry (setcdr entry (opencode-shell--merge-envelope (cdr entry) envelope))
-                   (setq messages (append messages (list (cons id envelope)))))
-                (setf (opencode-shell--turn-assistant-messages turn) messages
-                      (opencode-shell--turn-parts turn)
-                      (apply #'append (mapcar (lambda (item)
-                                                (opencode-shell--get (cdr item) 'parts))
-                                              messages))
-                      (opencode-shell--turn-assistant turn)
-                      (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
-                                 messages "")
-                      (opencode-shell--turn-terminal-error turn)
-                      (if (and (opencode-shell--assistant-envelope-complete-p
-                                (cdar (last messages)))
-                               (not (seq-some #'opencode-shell--running-tool-part-p
-                                              (opencode-shell--turn-parts turn))))
-                          (opencode-shell--message-error-label
-                           (opencode-shell--get (cdar (last messages)) 'info))
-                        (opencode-shell--turn-terminal-error turn))
-                      (opencode-shell--turn-status turn)
-                      (cond
-                       ((and (opencode-shell--assistant-envelope-complete-p
-                              (cdar (last messages)))
-                             (not (seq-some #'opencode-shell--running-tool-part-p
-                                            (opencode-shell--turn-parts turn))))
-                        'complete)
-                       ((opencode-shell--turn-locally-settled turn) 'complete)
-                       (t (opencode-shell--response-phase turn)))
-                      (opencode-shell--turn-locally-settled turn)
-                      (and (opencode-shell--turn-locally-settled turn)
-                           (not (and (opencode-shell--assistant-envelope-complete-p
-                                      (cdar (last messages)))
-                                     (not (seq-some #'opencode-shell--running-tool-part-p
-                                                    (opencode-shell--turn-parts turn))))))))))))))
+                     (entry (assoc id messages))
+                     (merged (if entry
+                                 (opencode-shell--merge-envelope (cdr entry) envelope)
+                               envelope)))
+                (unless (and entry (equal (cdr entry) merged))
+                  (if entry (setcdr entry merged)
+                    (setq messages (append messages (list (cons id merged)))))
+                  (setf (opencode-shell--turn-assistant-messages turn) messages)
+                   (puthash turn t touched)))))))))
+    (maphash
+     (lambda (turn _)
+       (let ((before (opencode-shell--turn-state-signature turn)))
+         (opencode-shell--aggregate-turn turn)
+         (unless (equal before (opencode-shell--turn-state-signature turn))
+           (cl-pushnew turn changed :test #'eq))))
+     touched)
     (setq observed (nreverse observed))
     (let ((result (copy-sequence old)))
       (dolist (turn observed)
         (unless (memq turn result)
-          (setq result (append result (list turn)))))
-      (opencode-shell--settle-superseded-turns result))))
+          (setq result (append result (list turn)))
+          (cl-pushnew turn changed :test #'eq)))
+      (let ((before (mapcar #'opencode-shell--turn-state-signature result)))
+        (opencode-shell--settle-superseded-turns result)
+        (cl-mapc (lambda (turn signature)
+                   (unless (equal signature (opencode-shell--turn-state-signature turn))
+                     (cl-pushnew turn changed :test #'eq)))
+                 result before))
+      (setq opencode-shell--normalized-changed-turns (nreverse changed))
+      result)))
 
 (defun opencode-shell--message-envelope-id (envelope)
   "Return ENVELOPE's stable message ID."
@@ -2575,6 +2599,12 @@ When FORCE is non-nil, rebuild turn blocks during the next render."
    opencode-shell--submit-in-flight
    opencode-shell--composer-visible))
 
+(defun opencode-shell--message-lifecycle-signature ()
+  "Return top-level message lifecycle state outside individual turns."
+  (list opencode-shell--request-status
+        opencode-shell--submit-in-flight
+        opencode-shell--composer-visible))
+
 (defun opencode-shell--update-message-lifecycle-state ()
   "Derive request and composer lifecycle state from normalized turns."
   (setq opencode-shell--request-status
@@ -2607,12 +2637,13 @@ When FORCE is non-nil, rebuild turn blocks during the next render."
   "Reconcile chronological message envelopes from MESSAGES.
 Render immediately unless DEFER-RENDER is non-nil."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
-    (let ((before (opencode-shell--transcript-state-signature)))
+    (let ((before (opencode-shell--message-lifecycle-signature)))
       (when sequence (setq opencode-shell--message-applied-sequence sequence))
       (opencode-shell--cache-message-snapshot messages)
       (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
       (opencode-shell--update-message-lifecycle-state)
-      (unless (equal before (opencode-shell--transcript-state-signature))
+      (when (or opencode-shell--normalized-changed-turns
+                (not (equal before (opencode-shell--message-lifecycle-signature))))
         (let ((event (if sequence (format "messages:%d" sequence) "messages")))
           (if defer-render
               (opencode-shell--schedule-render event)

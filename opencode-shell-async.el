@@ -130,15 +130,20 @@
          runtime "transport=sse wake=event type=%s scope=%s"
          (or (plist-get application-event :type) "malformed")
          (if (plist-get application-event :session-id) "session" "server"))
-        (opencode-shell-async--deliver-runtime
-         runtime 'event application-event)))))
+        (if (plist-get runtime :needs-reconcile)
+            (progn
+              (setf (plist-get runtime :needs-reconcile) nil)
+              (opencode-shell-async--deliver-runtime runtime 'reconnect))
+          (opencode-shell-async--deliver-runtime
+           runtime 'event application-event))))))
 
 (defun opencode-shell-async--transport-open (key attempt)
   "Record a successful SSE handshake for KEY and ATTEMPT."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
-            (plist-get runtime :failures) 0)
+            (plist-get runtime :failures) 0
+            (plist-get runtime :needs-reconcile) t)
       (opencode-shell-async--runtime-log runtime "transport=sse state=connected"))))
 
 (defun opencode-shell-async--transport-error (key attempt error)
@@ -212,9 +217,9 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
                              :sse-disabled nil
                              :poll-interval poll-interval
                              :logger logger
-                             :backoff 1 :ticks 0 :poll-timer nil
-                             :reconnect-timer nil :connection nil
-                             :attempt nil :failures 0))))
+                              :backoff 1 :ticks 0 :poll-timer nil
+                              :reconnect-timer nil :connection nil
+                              :attempt nil :failures 0 :needs-reconcile nil))))
     (puthash buffer (list :callback callback :session-id session-id
                           :event-callback event-callback)
              (plist-get runtime :subscribers))

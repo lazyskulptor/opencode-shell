@@ -2032,7 +2032,29 @@
            (list (opencode-shell-test--message "u1" "user" "question")
                  (opencode-shell-test--message "a1" "assistant" "changed" "u1" t))
            3 t)
-          (should (= renders 1)))))))
+           (should (= renders 1)))))))
+
+(ert-deftest opencode-shell-large-snapshot-aggregates-only-changed-turns ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((messages (opencode-shell-test--large-message-snapshot 40))
+           (changed (copy-tree messages))
+           (original (symbol-function 'opencode-shell--aggregate-turn))
+           (aggregates 0))
+      (cl-letf (((symbol-function 'opencode-shell--aggregate-turn)
+                 (lambda (turn)
+                   (cl-incf aggregates)
+                   (funcall original turn))))
+        (opencode-shell--render-messages messages 1)
+        (should (= aggregates 41))
+        (setq aggregates 0)
+        (opencode-shell--render-messages messages 2 t)
+        (should (zerop aggregates))
+        (setf (alist-get 'text
+                         (car (alist-get 'parts (car (last changed)))))
+              "changed")
+        (opencode-shell--render-messages changed 3 t)
+        (should (= aggregates 1))))))
 
 (ert-deftest opencode-shell-identical-human-snapshots-do-not-schedule-render ()
   (with-temp-buffer
@@ -2570,6 +2592,36 @@
           (should (zerop (plist-get runtime :failures)))
           (should (= (plist-get runtime :backoff) 1)))
       (remhash key opencode-shell-async--runtimes))))
+
+(ert-deftest opencode-shell-sse-first-event-after-connect-reconciles-once ()
+  (with-temp-buffer
+    (setq-local opencode-shell--generation 1)
+    (let* ((key 'reconnect-snapshot)
+           (subscribers (make-hash-table :test #'eq))
+           (runtime (list :subscribers subscribers :attempt 'attempt
+                          :failures 2 :backoff 4 :needs-reconcile nil))
+           (reconciles 0)
+           (events 0))
+      (puthash (current-buffer)
+               (list :callback (lambda () (cl-incf reconciles))
+                     :session-id "session-a"
+                     :event-callback (lambda (_) (cl-incf events)))
+               subscribers)
+      (puthash key runtime opencode-shell-async--runtimes)
+      (unwind-protect
+          (cl-letf (((symbol-function 'run-with-idle-timer)
+                     (lambda (&rest _) 'timer))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                    ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+            (opencode-shell-async--transport-open key 'attempt)
+            (should (plist-get runtime :needs-reconcile))
+            (opencode-shell-async--transport-event
+             key 'attempt (list :data opencode-shell-test--message-updated-event))
+            (opencode-shell-async-drain (current-buffer))
+            (should (= reconciles 1))
+            (should (zerop events))
+            (should-not (plist-get runtime :needs-reconcile)))
+        (remhash key opencode-shell-async--runtimes)))))
 
 (ert-deftest opencode-shell-async-rejects-nonpositive-runtime-intervals ()
   (dolist (interval '(0 -1))

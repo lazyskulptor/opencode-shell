@@ -1,5 +1,7 @@
 ;;; completion-polling-regression.el --- Sanitized lifecycle fixture -*- lexical-binding: t; -*-
 
+(require 'cl-lib)
+
 (defconst opencode-shell-test--completion-polling-snapshots
   '((((info . ((id . "user-1") (role . "user")))
       (parts . nil))
@@ -57,6 +59,30 @@
   '(((id . "question-active") (sessionID . "acceptance-stability")
      (questions . (((question . "Continue?"))))))
   "Pending question snapshot for stability acceptance tests.")
+
+(defun opencode-shell-test--large-message-snapshot (turn-count)
+  "Return TURN-COUNT completed turns followed by one active turn."
+  (append
+   (apply #'append
+          (cl-loop for index from 1 to turn-count
+                   collect
+                   `(((info . ((id . ,(format "large-user-%d" index))
+                               (role . "user") (sessionID . "large-session")))
+                      (parts . nil))
+                     ((info . ((id . ,(format "large-assistant-%d" index))
+                               (role . "assistant")
+                               (sessionID . "large-session")
+                               (parentID . ,(format "large-user-%d" index))
+                               (finish . "stop") (time . ((completed . ,index)))))
+                      (parts . (((id . ,(format "large-text-%d" index))
+                                 (type . "text") (text . "done"))))))))
+   `(((info . ((id . "large-active-user") (role . "user")
+               (sessionID . "large-session"))) (parts . nil))
+     ((info . ((id . "large-active-assistant") (role . "assistant")
+               (sessionID . "large-session")
+               (parentID . "large-active-user")))
+      (parts . (((id . "large-active-part") (type . "reasoning")
+                 (text . "working"))))))))
 
 (provide 'completion-polling-regression)
 ;;; completion-polling-regression.el ends here
