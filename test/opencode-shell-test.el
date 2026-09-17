@@ -1195,7 +1195,7 @@
              (should (= (length cancelled) 2)))
         (when (buffer-live-p opened) (kill-buffer opened))))))
 
-(ert-deftest opencode-shell-animation-is-ui-only-fixed-width-and-deduplicated ()
+(ert-deftest opencode-shell-animation-is-ui-only-growing-and-deduplicated ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting))
@@ -1244,7 +1244,7 @@
         (should (= tick (buffer-chars-modified-tick)))
         (should (= position (point)))
         (should (equal (overlay-get (car opencode-shell--spinner-overlays) 'display)
-                       "▱"))
+                       "▰▰"))
         (opencode-shell--stop-polling)
         (should-not opencode-shell--runtime-key)
         (should-not (gethash (current-buffer)
@@ -2085,6 +2085,19 @@
     (should (hash-table-p opencode-shell--message-envelopes))
     (should (gethash "u1" opencode-shell--message-envelopes))))
 
+(ert-deftest opencode-shell-changed-authoritative-snapshot-resets-spinner ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((messages
+           '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+              (parts . nil)))))
+      (setq opencode-shell--animation-frame 6)
+      (opencode-shell--render-messages messages 1 nil t)
+      (should (zerop opencode-shell--animation-frame))
+      (setq opencode-shell--animation-frame 4)
+      (opencode-shell--render-messages messages 2 nil t)
+      (should (= opencode-shell--animation-frame 4)))))
+
 (ert-deftest opencode-shell-stale-in-flight-snapshot-cannot-overwrite-event-delta ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2170,7 +2183,7 @@
         (should (= redisplays 1))
         (should opencode-shell--spinner-overlays)
         (should (equal (overlay-get (car opencode-shell--spinner-overlays) 'display)
-                       "▱"))
+                        "▰▰"))
         (should (equal text (buffer-string)))
         (should (= tick (buffer-chars-modified-tick)))
         (should (= position (point)))))))
@@ -2255,7 +2268,7 @@
       (should (= position (point)))
       (should-not opencode-shell--render-dirty))))
 
-(ert-deftest opencode-shell-animation-is-fixed-width-buffer-no-op ()
+(ert-deftest opencode-shell-animation-is-growing-buffer-no-op ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
@@ -2267,7 +2280,9 @@
             (response-begin (marker-position (opencode-shell--turn-response-begin turn)))
             (response-end (marker-position (opencode-shell--turn-response-end turn))))
         (dotimes (_ 13) (opencode-shell--animation-tick))
-        (should (= opencode-shell--animation-frame 1))
+        (should (= opencode-shell--animation-frame 3))
+        (should (equal (overlay-get (car opencode-shell--spinner-overlays) 'display)
+                       "▰▰▰▰"))
         (should (equal before (buffer-string)))
         (should (= tick (buffer-chars-modified-tick)))
         (should (= position (point)))

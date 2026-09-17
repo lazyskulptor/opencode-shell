@@ -145,6 +145,22 @@
       (should (hash-table-p opencode-shell--message-envelopes))
       (should (gethash "user-live" opencode-shell--message-envelopes)))))
 
+(ert-deftest opencode-shell-event-resets-growing-spinner-for-transcript-progress ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--animation-frame 6
+          opencode-shell--session-id "session-a")
+    (opencode-shell--receive-application-event
+     '(:kind message-updated :type "message.updated" :session-id "session-a"
+       :message-id "user-live"
+       :info ((id . "user-live") (sessionID . "session-a") (role . "user"))))
+    (should (zerop opencode-shell--animation-frame))
+    (setq opencode-shell--animation-frame 4)
+    (opencode-shell--receive-application-event
+     '(:kind snapshot :type "permission.updated" :reason unsupported
+       :session-id "session-a"))
+    (should (= opencode-shell--animation-frame 4))))
+
 (ert-deftest opencode-shell-event-drops-delivery-after-major-mode-transition ()
   (let ((buffer (generate-new-buffer " *event-mode-transition*")))
     (unwind-protect

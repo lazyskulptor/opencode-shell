@@ -422,8 +422,8 @@ and lifecycle keys."
 (defconst opencode-shell--spinner-character ?▰
   "Character occupying the fixed-width transient-status spinner slot.")
 
-(defconst opencode-shell--spinner-frames ["▰" "▱"]
-  "Fixed-width display frames used without changing transcript text.")
+(defconst opencode-shell--spinner-max-width 10
+  "Maximum display width of the transient-status spinner.")
 
 (defcustom opencode-shell-log-requests t
   "When non-nil, log API results without payloads or secrets."
@@ -2055,6 +2055,9 @@ Return a plist containing affected turns and whether a full render is required."
   "Apply decoded application EVENT or reconcile when it is not safe locally."
   (when (derived-mode-p 'opencode-shell-mode)
     (opencode-shell--ensure-message-cache)
+    (when (memq (plist-get event :kind)
+                '(message-updated message-removed part-updated part-removed))
+      (opencode-shell--reset-spinner-frame))
     (if (and (memq (plist-get event :kind)
                    '(message-updated message-removed part-updated part-removed))
              (opencode-shell--apply-message-event event))
@@ -2459,8 +2462,14 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (setq opencode-shell--spinner-overlays nil))
 
 (defun opencode-shell--spinner-frame ()
-  "Return the current fixed-width spinner display frame."
-  (aref opencode-shell--spinner-frames opencode-shell--animation-frame))
+  "Return the current right-growing spinner display frame."
+  (make-string (1+ opencode-shell--animation-frame)
+               opencode-shell--spinner-character))
+
+(defun opencode-shell--reset-spinner-frame ()
+  "Reset transient progress presentation to its first frame."
+  (setq opencode-shell--animation-frame 0)
+  (opencode-shell--render-status-animation))
 
 (defun opencode-shell--refresh-spinner-overlays ()
   "Recreate spinner overlays for status slots in the current buffer."
@@ -2549,7 +2558,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   "Advance one UI-only spinner frame without issuing network requests."
   (setq opencode-shell--animation-frame
         (mod (1+ opencode-shell--animation-frame)
-             (length opencode-shell--spinner-frames)))
+             opencode-shell--spinner-max-width))
   (opencode-shell--render-status-animation))
 
 (defun opencode-shell--render-turns (&optional force changed-turns)
@@ -2740,6 +2749,7 @@ non-nil, remove cached server messages absent from the snapshot."
       (opencode-shell--update-message-lifecycle-state)
       (when (or opencode-shell--normalized-changed-turns
                 (not (equal before (opencode-shell--message-lifecycle-signature))))
+        (when authoritative (opencode-shell--reset-spinner-frame))
         (let ((event (if sequence (format "messages:%d" sequence) "messages")))
           (if defer-render
               (opencode-shell--schedule-render
