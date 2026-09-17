@@ -1856,17 +1856,18 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Store the authoritative current-session question snapshot ITEMS.
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-question-refresh-pending)
-  (setq opencode-shell--questions-pending
-        (opencode-shell--deduplicate-questions
-         (opencode-shell--session-questions items)))
-  (when (opencode-shell--human-interaction-blocked-p)
-    (setq opencode-shell--composer-visible nil)
-    (opencode-shell--start-polling))
-  (if defer-render
-      (opencode-shell--schedule-render "questions")
-    (opencode-shell--render-turns)
-    (opencode-shell--render-permissions)
-    (opencode-shell--log-lifecycle "questions")))
+  (let ((questions (opencode-shell--deduplicate-questions
+                    (opencode-shell--session-questions items))))
+    (unless (equal questions opencode-shell--questions-pending)
+      (setq opencode-shell--questions-pending questions)
+      (when (opencode-shell--human-interaction-blocked-p)
+        (setq opencode-shell--composer-visible nil)
+        (opencode-shell--start-polling))
+      (if defer-render
+          (opencode-shell--schedule-render "questions")
+        (opencode-shell--render-turns)
+        (opencode-shell--render-permissions)
+        (opencode-shell--log-lifecycle "questions")))))
 
 (defun opencode-shell--refresh-questions ()
   "Fetch `/question', deferring once when that request is in flight."
@@ -2038,21 +2039,23 @@ request settles."
   "Store session-scoped permission ITEMS and update their display.
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-permission-refresh-pending)
-  (setq opencode-shell--permissions
-        (seq-remove
-         (lambda (item)
-           (opencode-shell--resolved-permission
-            (opencode-shell--permission-id item)))
-         (opencode-shell--deduplicate-permissions
-          (opencode-shell--session-permissions items))))
-  (when (opencode-shell--permission-blocked-p)
-    (setq opencode-shell--composer-visible nil)
-    (opencode-shell--start-polling))
-  (if defer-render
-      (opencode-shell--schedule-render "permissions")
-    (opencode-shell--render-turns)
-    (opencode-shell--render-permissions)
-    (opencode-shell--log-lifecycle "permissions")))
+  (let ((permissions
+         (seq-remove
+          (lambda (item)
+            (opencode-shell--resolved-permission
+             (opencode-shell--permission-id item)))
+          (opencode-shell--deduplicate-permissions
+           (opencode-shell--session-permissions items)))))
+    (unless (equal permissions opencode-shell--permissions)
+      (setq opencode-shell--permissions permissions)
+      (when (opencode-shell--permission-blocked-p)
+        (setq opencode-shell--composer-visible nil)
+        (opencode-shell--start-polling))
+      (if defer-render
+          (opencode-shell--schedule-render "permissions")
+        (opencode-shell--render-turns)
+        (opencode-shell--render-permissions)
+        (opencode-shell--log-lifecycle "permissions")))))
 
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
@@ -2383,52 +2386,73 @@ When FORCE is non-nil, rebuild turn blocks during the next render."
         (opencode-shell--schedule-render opencode-shell--render-event
                                          opencode-shell--render-force)))
 
+(defun opencode-shell--transcript-state-signature ()
+  "Return the normalized transcript state that can affect presentation."
+  (list
+   (mapcar
+    (lambda (turn)
+      (list (opencode-shell--turn-id turn)
+            (opencode-shell--turn-server-user-id turn)
+            (opencode-shell--turn-user turn)
+            (opencode-shell--turn-assistant turn)
+            (copy-tree (opencode-shell--turn-parts turn))
+            (opencode-shell--turn-status turn)
+            (opencode-shell--turn-acknowledged turn)
+            (opencode-shell--turn-locally-settled turn)
+            (opencode-shell--turn-terminal-error turn)))
+    opencode-shell--turns)
+   opencode-shell--request-status
+   opencode-shell--submit-in-flight
+   opencode-shell--composer-visible))
+
 (defun opencode-shell--render-messages (messages &optional sequence defer-render)
   "Reconcile chronological message envelopes from MESSAGES.
 Render immediately unless DEFER-RENDER is non-nil."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
-    (when sequence (setq opencode-shell--message-applied-sequence sequence))
-    (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
-    (setq opencode-shell--request-status
-        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'thinking))
-                         opencode-shell--turns) "thinking")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
-                         opencode-shell--turns) "receiving")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'recovering))
-                         opencode-shell--turns) "recovering")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
-                         opencode-shell--turns) "waiting")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
-                         opencode-shell--turns) "error")
-               (t "idle")))
-    (when-let ((turn (seq-find
-                      (lambda (entry)
-                        (equal opencode-shell--submit-in-flight
-                               (opencode-shell--turn-id entry)))
-                      opencode-shell--turns)))
-      (when (eq (opencode-shell--turn-status turn) 'complete)
-        (unless (opencode-shell--permission-blocked-p)
-          (setq opencode-shell--submit-in-flight nil
-                opencode-shell--composer-visible t))))
-    (when (and (not (opencode-shell--permission-blocked-p))
-               (null opencode-shell--submit-in-flight)
-               (equal opencode-shell--request-status "idle"))
-      (opencode-shell--stop-polling))
-    (let ((event (if sequence (format "messages:%d" sequence) "messages")))
-      (if defer-render
-          (opencode-shell--schedule-render event)
-        (setq opencode-shell--render-dirty t
-              opencode-shell--render-event event)
-        (if (get-buffer-window (current-buffer) t)
-            (opencode-shell--flush-render)
-          ;; Direct callers, including deterministic tests and initial buffer
-          ;; construction, require an immediate render even without a window.
-          (let ((opencode-shell--render-dirty t))
-            (opencode-shell--render-turns)
-            (opencode-shell--log-lifecycle event)
-            (force-mode-line-update)
-            (setq opencode-shell--render-dirty nil
-                  opencode-shell--render-event nil)))))))
+    (let ((before (opencode-shell--transcript-state-signature)))
+      (when sequence (setq opencode-shell--message-applied-sequence sequence))
+      (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+      (setq opencode-shell--request-status
+            (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'thinking))
+                             opencode-shell--turns) "thinking")
+                  ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
+                             opencode-shell--turns) "receiving")
+                  ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'recovering))
+                             opencode-shell--turns) "recovering")
+                  ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
+                             opencode-shell--turns) "waiting")
+                  ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
+                             opencode-shell--turns) "error")
+                  (t "idle")))
+      (when-let ((turn (seq-find
+                        (lambda (entry)
+                          (equal opencode-shell--submit-in-flight
+                                 (opencode-shell--turn-id entry)))
+                        opencode-shell--turns)))
+        (when (eq (opencode-shell--turn-status turn) 'complete)
+          (unless (opencode-shell--permission-blocked-p)
+            (setq opencode-shell--submit-in-flight nil
+                  opencode-shell--composer-visible t))))
+      (when (and (not (opencode-shell--permission-blocked-p))
+                 (null opencode-shell--submit-in-flight)
+                 (equal opencode-shell--request-status "idle"))
+        (opencode-shell--stop-polling))
+      (unless (equal before (opencode-shell--transcript-state-signature))
+        (let ((event (if sequence (format "messages:%d" sequence) "messages")))
+          (if defer-render
+              (opencode-shell--schedule-render event)
+            (setq opencode-shell--render-dirty t
+                  opencode-shell--render-event event)
+            (if (get-buffer-window (current-buffer) t)
+                (opencode-shell--flush-render)
+              ;; Direct callers, including deterministic tests and initial buffer
+              ;; construction, require an immediate render even without a window.
+              (let ((opencode-shell--render-dirty t))
+                (opencode-shell--render-turns)
+                (opencode-shell--log-lifecycle event)
+                (force-mode-line-update))
+              (setq opencode-shell--render-dirty nil
+                    opencode-shell--render-event nil))))))))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
