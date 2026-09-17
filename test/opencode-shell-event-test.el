@@ -27,8 +27,10 @@
     (should (eq (plist-get unknown :kind) 'snapshot))
     (should (equal (plist-get unknown :session-id) "session-a"))
     (should (eq (plist-get unknown :reason) 'unsupported))
+    (should (eq (plist-get unknown :resource) 'messages))
     (should (eq (plist-get malformed :kind) 'snapshot))
     (should-not (plist-get malformed :session-id))
+    (should (eq (plist-get malformed :resource) 'all))
     (should (eq (plist-get malformed :reason) 'malformed))))
 
 (ert-deftest opencode-shell-event-coalesces-update-and-removal-by-entity ()
@@ -52,6 +54,36 @@
            '(:kind snapshot :session-id "s" :resource messages))
           (opencode-shell-event-identity
            '(:kind snapshot :session-id "s" :resource permissions)))))
+
+(ert-deftest opencode-shell-event-scopes-unsupported-hints-by-resource ()
+  (let ((permission
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"permission.updated\",\"properties\":{\"sessionID\":\"s\"}}")))
+        (question
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"question.asked\",\"properties\":{\"sessionID\":\"s\"}}"))))
+    (should (eq (plist-get permission :resource) 'permissions))
+    (should (eq (plist-get question :resource) 'questions))))
+
+(ert-deftest opencode-shell-event-queues-resource-specific-reconciliation ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--receive-application-event
+     '(:kind snapshot :type "permission.updated" :reason unsupported
+       :session-id "s" :resource permissions))
+    (should (alist-get '(event-reconcile permissions)
+                       opencode-shell-async--queue nil nil #'equal))
+    (should-not (alist-get '(event-reconcile messages)
+                           opencode-shell-async--queue nil nil #'equal))))
+
+(ert-deftest opencode-shell-event-resource-reconciliation-avoids-unrelated-requests ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (requests)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key &rest _) (push key requests))))
+        (opencode-shell--resync nil 'permissions))
+      (should (equal requests '(permissions))))))
 
 (ert-deftest opencode-shell-event-routes-session-scoped-events-only-to-their-subscriber ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))

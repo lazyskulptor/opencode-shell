@@ -2145,7 +2145,8 @@
         (should (seq-some
                  (lambda (part) (equal (opencode-shell--get part 'id) "p1"))
                  (opencode-shell--turn-parts (car opencode-shell--turns))))
-        (should (alist-get 'event-reconcile opencode-shell-async--queue))))))
+        (should (alist-get '(event-reconcile messages)
+                           opencode-shell-async--queue nil nil #'equal))))))
 
 (ert-deftest opencode-shell-large-snapshot-merge-count-is-linear ()
   (with-temp-buffer

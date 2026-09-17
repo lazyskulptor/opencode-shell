@@ -1962,11 +1962,12 @@ Return a plist containing affected turns and whether a full render is required."
              (opencode-shell--turn-locally-settled turn)
              (opencode-shell--turn-terminal-error turn))))
 
-(defun opencode-shell--schedule-event-reconciliation ()
-  "Coalesce one authoritative snapshot reconciliation after an unsafe event."
-  (opencode-shell-async-enqueue
-   (current-buffer) 'event-reconcile opencode-shell--generation
-   #'opencode-shell--resync nil))
+(defun opencode-shell--schedule-event-reconciliation (&optional resource)
+  "Coalesce an authoritative snapshot reconciliation for RESOURCE."
+  (let ((resource (or resource 'all)))
+    (opencode-shell-async-enqueue
+     (current-buffer) (list 'event-reconcile resource) opencode-shell--generation
+     #'opencode-shell--resync nil resource)))
 
 (defun opencode-shell--apply-message-event (event)
   "Apply validated message EVENT locally, returning non-nil on success."
@@ -2062,7 +2063,8 @@ Return a plist containing affected turns and whether a full render is required."
                    '(message-updated message-removed part-updated part-removed))
              (opencode-shell--apply-message-event event))
         (cl-incf opencode-shell--message-state-revision)
-      (opencode-shell--schedule-event-reconciliation))))
+      (opencode-shell--schedule-event-reconciliation
+       (plist-get event :resource)))))
 
 (defun opencode-shell--composer-text ()
   "Return the composer contents without properties."
@@ -2838,25 +2840,29 @@ non-nil, remove cached server messages absent from the snapshot."
        (force-mode-line-update)))
    nil nil))
 
-(defun opencode-shell--resync (&optional full)
-  "Resync polling state, and when FULL also metadata and capabilities."
+(defun opencode-shell--resync (&optional full resource)
+  "Resync RESOURCE, or all polling state when RESOURCE is nil or `all'.
+When FULL is non-nil, also refresh metadata and capabilities."
   (interactive (list t))
   (when full (opencode-shell--refresh-session-metadata))
-  (unless (alist-get 'messages opencode-shell--in-flight)
-    (let ((sequence (cl-incf opencode-shell--message-request-sequence))
-          (revision opencode-shell--message-state-revision))
-      (opencode-shell--guarded-request
-       'messages
-       "GET" (format "/session/%s/message" opencode-shell--session-id)
-       (lambda (messages)
-         (if (= revision opencode-shell--message-state-revision)
-             (opencode-shell--render-messages messages sequence t t)
-           (opencode-shell--schedule-event-reconciliation))))))
-  (opencode-shell--guarded-request
-   'permissions "GET" "/permission"
-   (lambda (items) (opencode-shell--receive-permissions items t))
-   nil #'opencode-shell--consume-permission-refresh-pending)
-  (opencode-shell--refresh-questions)
+  (when (memq resource '(nil all messages))
+    (unless (alist-get 'messages opencode-shell--in-flight)
+      (let ((sequence (cl-incf opencode-shell--message-request-sequence))
+            (revision opencode-shell--message-state-revision))
+        (opencode-shell--guarded-request
+         'messages
+         "GET" (format "/session/%s/message" opencode-shell--session-id)
+         (lambda (messages)
+           (if (= revision opencode-shell--message-state-revision)
+               (opencode-shell--render-messages messages sequence t t)
+             (opencode-shell--schedule-event-reconciliation 'messages)))))))
+  (when (memq resource '(nil all permissions))
+    (opencode-shell--guarded-request
+     'permissions "GET" "/permission"
+     (lambda (items) (opencode-shell--receive-permissions items t))
+     nil #'opencode-shell--consume-permission-refresh-pending))
+  (when (memq resource '(nil all questions))
+    (opencode-shell--refresh-questions))
   (when (and full
              (not opencode-shell--capabilities-loading))
     (let ((remaining 2) failed)

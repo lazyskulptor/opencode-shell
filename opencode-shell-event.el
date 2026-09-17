@@ -24,7 +24,14 @@
 (defun opencode-shell-event--snapshot (type reason &optional session-id)
   "Return a bounded snapshot hint for TYPE and REASON.
 When SESSION-ID is non-nil, scope the hint to that session."
-  (list :kind 'snapshot :type type :reason reason :session-id session-id))
+  (let ((resource
+         (cond ((and type (string-prefix-p "message." type)) 'messages)
+               ((and type (string-prefix-p "permission." type)) 'permissions)
+               ((and type (string-prefix-p "question." type)) 'questions)
+               ((and type (string-prefix-p "session." type)) 'messages)
+               (t 'all))))
+    (list :kind 'snapshot :type type :reason reason :session-id session-id
+          :resource resource)))
 
 (defun opencode-shell-event-decode (event)
   "Decode transport EVENT into a validated application event.
