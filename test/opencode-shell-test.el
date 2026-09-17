@@ -2056,6 +2056,71 @@
         (opencode-shell--render-messages changed 3 t)
         (should (= aggregates 1))))))
 
+(ert-deftest opencode-shell-authoritative-snapshot-repairs-missed-message-removal ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((initial
+           '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+              (parts . nil))
+             ((info . ((id . "a1") (role . "assistant")
+                       (sessionID . "s") (parentID . "u1")))
+              (parts . (((id . "tool") (type . "tool") (tool . "bash")
+                         (state . ((status . "running"))))))))))
+      (opencode-shell--render-messages initial 1)
+      (should (gethash "a1" opencode-shell--message-envelopes))
+      (opencode-shell--render-messages (list (car initial)) 2 nil t)
+      (should-not (gethash "a1" opencode-shell--message-envelopes))
+      (should-not (opencode-shell--turn-assistant-messages
+                   (car opencode-shell--turns)))
+      (should-not (string-match-p "TOOL> bash" (buffer-string))))))
+
+(ert-deftest opencode-shell-stale-in-flight-snapshot-cannot-overwrite-event-delta ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+        (parts . nil))
+       ((info . ((id . "a1") (role . "assistant")
+                 (sessionID . "s") (parentID . "u1")))
+        (parts . nil))) 1)
+    (let (message-callback)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path callback &rest _)
+                   (when (eq key 'messages) (setq message-callback callback))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore))
+        (opencode-shell--resync)
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated" :session-id "s"
+           :message-id "a1" :part-id "p1"
+           :part ((id . "p1") (sessionID . "s") (messageID . "a1")
+                  (type . "tool") (tool . "bash")
+                  (state . ((status . "running"))))))
+        (funcall message-callback
+                 '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+                    (parts . nil))
+                   ((info . ((id . "a1") (role . "assistant")
+                             (sessionID . "s") (parentID . "u1")))
+                    (parts . nil))))
+        (should (seq-some
+                 (lambda (part) (equal (opencode-shell--get part 'id) "p1"))
+                 (opencode-shell--turn-parts (car opencode-shell--turns))))
+        (should (alist-get 'event-reconcile opencode-shell-async--queue))))))
+
+(ert-deftest opencode-shell-large-snapshot-merge-count-is-linear ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((messages (opencode-shell-test--large-message-snapshot 80))
+           (original (symbol-function 'opencode-shell--merge-envelope))
+           (merges 0))
+      (opencode-shell--render-messages messages 1)
+      (cl-letf (((symbol-function 'opencode-shell--merge-envelope)
+                 (lambda (known incoming)
+                   (cl-incf merges)
+                   (funcall original known incoming))))
+        (opencode-shell--render-messages messages 2 t))
+      (should (<= merges (* 2 (length messages)))))))
+
 (ert-deftest opencode-shell-large-snapshot-updates-only-the-changed-response ()
   (with-temp-buffer
     (opencode-shell-mode)

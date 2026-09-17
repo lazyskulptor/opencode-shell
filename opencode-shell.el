@@ -498,6 +498,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--message-envelopes nil)
 (defvar-local opencode-shell--message-order nil)
 (defvar-local opencode-shell--normalized-changed-turns nil)
+(defvar-local opencode-shell--message-state-revision 0)
 (defvar-local opencode-shell--submit-in-flight nil)
 (defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
@@ -1385,6 +1386,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
               opencode-shell--message-envelopes (make-hash-table :test #'equal)
               opencode-shell--message-order nil
               opencode-shell--normalized-changed-turns nil
+              opencode-shell--message-state-revision 0
               opencode-shell--render-dirty-turns nil
               opencode-shell--permissions nil
               opencode-shell--request-status "idle")
@@ -1760,7 +1762,14 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
 (defun opencode-shell--normalize-turns (messages)
   "Reconcile server MESSAGES into stable buffer-local turn records."
   (let ((old opencode-shell--turns) observed current used changed
-        (touched (make-hash-table :test #'eq)))
+        (touched (make-hash-table :test #'eq))
+        (turn-index (make-hash-table :test #'equal))
+        (assistant-indexes (make-hash-table :test #'eq)))
+    (dolist (turn old)
+      (when-let ((id (opencode-shell--turn-id turn)))
+        (puthash id turn turn-index))
+      (when-let ((id (opencode-shell--turn-server-user-id turn)))
+        (puthash id turn turn-index)))
     (dolist (envelope messages)
       (let* ((info (opencode-shell--get envelope 'info))
              (role (format "%s" (or (opencode-shell--get info 'role) "")))
@@ -1768,10 +1777,10 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
              (parent (or (opencode-shell--get info 'parentID)
                          (opencode-shell--get info 'parentId))))
         (cond
-         ((equal role "user")
-          (let* ((text (opencode-shell--message-text envelope))
-                  (turn (or (opencode-shell--turn-by-id id old)
-                           (seq-find
+          ((equal role "user")
+           (let* ((text (opencode-shell--message-text envelope))
+                   (turn (or (and id (gethash id turn-index))
+                            (seq-find
                             (lambda (candidate)
                               (and (null (opencode-shell--turn-server-user-id candidate))
                                    (not (memq candidate used))
@@ -1789,21 +1798,40 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                           'complete 'waiting)))
               (unless (equal before (opencode-shell--turn-state-signature turn))
                 (cl-pushnew turn changed :test #'eq)))
+            (when id (puthash id turn turn-index))
             (setq current turn)
             (push turn used)
             (push turn observed)))
           ((equal role "assistant")
-           (let* ((turn (or (and parent (opencode-shell--turn-by-id parent (append observed old)))
-                             current)))
-            (when turn
-              (let* ((messages (opencode-shell--turn-assistant-messages turn))
-                     (entry (assoc id messages))
+            (let* ((turn (or (and parent (gethash parent turn-index))
+                              current)))
+             (when turn
+               (let* ((messages (opencode-shell--turn-assistant-messages turn))
+                      (state
+                       (or (gethash turn assistant-indexes)
+                           (let ((index (make-hash-table :test #'equal)))
+                             (dolist (entry messages)
+                               (puthash (car entry) entry index))
+                             (let ((value (list :index index :tail (last messages))))
+                               (puthash turn value assistant-indexes)
+                               value))))
+                      (index (plist-get state :index))
+                      (entry (and id (gethash id index)))
                      (merged (if entry
                                  (opencode-shell--merge-envelope (cdr entry) envelope)
                                envelope)))
                 (unless (and entry (equal (cdr entry) merged))
-                  (if entry (setcdr entry merged)
-                    (setq messages (append messages (list (cons id merged)))))
+                  (if entry
+                      (setcdr entry merged)
+                    (let ((new-entry (cons id merged))
+                          (tail (plist-get state :tail)))
+                      (if tail
+                          (progn
+                            (setcdr tail (list new-entry))
+                            (setf (plist-get state :tail) (cdr tail)))
+                        (setq messages (list new-entry))
+                        (setf (plist-get state :tail) messages))
+                      (when id (puthash id new-entry index))))
                   (setf (opencode-shell--turn-assistant-messages turn) messages)
                    (puthash turn t touched)))))))))
     (maphash
@@ -1847,10 +1875,42 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
       (puthash id merged opencode-shell--message-envelopes))
     merged))
 
-(defun opencode-shell--cache-message-snapshot (messages)
-  "Merge chronological MESSAGES into the buffer-local message index."
-  (dolist (envelope messages)
-    (opencode-shell--cache-message-envelope envelope)))
+(defun opencode-shell--cache-message-snapshot (messages &optional authoritative)
+  "Merge chronological MESSAGES into the message index.
+When AUTHORITATIVE is non-nil, remove cached server state absent from MESSAGES.
+Return a plist containing affected turns and whether a full render is required."
+  (let ((ids (delq nil (mapcar #'opencode-shell--message-envelope-id messages)))
+        changed force)
+    (when authoritative
+      (let ((present (make-hash-table :test #'equal)))
+        (dolist (id ids) (puthash id t present))
+        (let (removed)
+          (maphash (lambda (id _)
+                     (unless (gethash id present) (push id removed)))
+                   opencode-shell--message-envelopes)
+          (dolist (id removed)
+            (remhash id opencode-shell--message-envelopes)))
+        (setq opencode-shell--message-order ids)
+        (let ((kept
+               (seq-filter
+                (lambda (turn)
+                  (let ((server-id (opencode-shell--turn-server-user-id turn)))
+                    (or (null server-id) (gethash server-id present))))
+                opencode-shell--turns)))
+          (unless (= (length kept) (length opencode-shell--turns))
+            (setq force t
+                  opencode-shell--turns kept)))
+        (dolist (turn opencode-shell--turns)
+          (let* ((known (opencode-shell--turn-assistant-messages turn))
+                 (kept (seq-filter (lambda (entry) (gethash (car entry) present))
+                                   known)))
+            (unless (= (length known) (length kept))
+              (setf (opencode-shell--turn-assistant-messages turn) kept)
+              (opencode-shell--aggregate-turn turn)
+              (push turn changed))))))
+    (dolist (envelope messages)
+      (opencode-shell--cache-message-envelope envelope))
+    (list :changed-turns changed :force force)))
 
 (defun opencode-shell--cached-assistants-for-parent (parent-id)
   "Return cached assistant envelopes belonging to PARENT-ID in order."
@@ -1982,9 +2042,10 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
 
 (defun opencode-shell--receive-application-event (event)
   "Apply decoded application EVENT or reconcile when it is not safe locally."
-  (unless (and (memq (plist-get event :kind)
-                     '(message-updated message-removed part-updated part-removed))
-               (opencode-shell--apply-message-event event))
+  (if (and (memq (plist-get event :kind)
+                 '(message-updated message-removed part-updated part-removed))
+           (opencode-shell--apply-message-event event))
+      (cl-incf opencode-shell--message-state-revision)
     (opencode-shell--schedule-event-reconciliation)))
 
 (defun opencode-shell--composer-text ()
@@ -2646,23 +2707,34 @@ CHANGED-TURNS into the response blocks pending incremental update."
              (equal opencode-shell--request-status "idle"))
     (opencode-shell--stop-polling)))
 
-(defun opencode-shell--render-messages (messages &optional sequence defer-render)
+(defun opencode-shell--render-messages
+    (messages &optional sequence defer-render authoritative)
   "Reconcile chronological message envelopes from MESSAGES.
-Render immediately unless DEFER-RENDER is non-nil."
+Render immediately unless DEFER-RENDER is non-nil.  When AUTHORITATIVE is
+non-nil, remove cached server messages absent from the snapshot."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
-    (let ((before (opencode-shell--message-lifecycle-signature)))
+    (let ((before (opencode-shell--message-lifecycle-signature))
+          cache-result)
       (when sequence (setq opencode-shell--message-applied-sequence sequence))
-      (opencode-shell--cache-message-snapshot messages)
+      (setq cache-result
+            (opencode-shell--cache-message-snapshot messages authoritative))
       (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+      (setq opencode-shell--normalized-changed-turns
+            (seq-uniq
+             (append (plist-get cache-result :changed-turns)
+                     opencode-shell--normalized-changed-turns)
+             #'eq))
       (opencode-shell--update-message-lifecycle-state)
       (when (or opencode-shell--normalized-changed-turns
                 (not (equal before (opencode-shell--message-lifecycle-signature))))
         (let ((event (if sequence (format "messages:%d" sequence) "messages")))
           (if defer-render
               (opencode-shell--schedule-render
-               event nil opencode-shell--normalized-changed-turns)
+               event (plist-get cache-result :force)
+               opencode-shell--normalized-changed-turns)
             (setq opencode-shell--render-dirty t
                   opencode-shell--render-event event
+                  opencode-shell--render-force (plist-get cache-result :force)
                   opencode-shell--render-dirty-turns
                   opencode-shell--normalized-changed-turns)
             (if (get-buffer-window (current-buffer) t)
@@ -2671,7 +2743,8 @@ Render immediately unless DEFER-RENDER is non-nil."
               ;; construction, require an immediate render even without a window.
               (let ((opencode-shell--render-dirty t))
                 (opencode-shell--render-turns
-                 nil opencode-shell--normalized-changed-turns)
+                 (plist-get cache-result :force)
+                 opencode-shell--normalized-changed-turns)
                 (opencode-shell--log-lifecycle event)
                 (force-mode-line-update))
               (setq opencode-shell--render-dirty nil
@@ -2744,11 +2817,15 @@ Render immediately unless DEFER-RENDER is non-nil."
   (interactive (list t))
   (when full (opencode-shell--refresh-session-metadata))
   (unless (alist-get 'messages opencode-shell--in-flight)
-    (let ((sequence (cl-incf opencode-shell--message-request-sequence)))
+    (let ((sequence (cl-incf opencode-shell--message-request-sequence))
+          (revision opencode-shell--message-state-revision))
       (opencode-shell--guarded-request
        'messages
        "GET" (format "/session/%s/message" opencode-shell--session-id)
-        (lambda (messages) (opencode-shell--render-messages messages sequence t)))))
+       (lambda (messages)
+         (if (= revision opencode-shell--message-state-revision)
+             (opencode-shell--render-messages messages sequence t t)
+           (opencode-shell--schedule-event-reconciliation))))))
   (opencode-shell--guarded-request
    'permissions "GET" "/permission"
    (lambda (items) (opencode-shell--receive-permissions items t))
