@@ -1,9 +1,49 @@
 # opencode-shell
 
-Unofficial Emacs client for sessions owned by an OpenCode 1.18.30 HTTP server.
-It is an independent early beta workflow, not an ACP bridge.
+[![License: MIT](https://img.shields.io/github/license/lazyskulptor/opencode-shell)](LICENSE)
+[![Emacs 27.1+](https://img.shields.io/badge/Emacs-27.1%2B-7F5AB6?logo=gnu-emacs&logoColor=white)](https://www.gnu.org/software/emacs/)
+[![OpenCode 1.18.30](https://img.shields.io/badge/OpenCode-1.18.30-111111)](https://opencode.ai/)
 
-## Development install
+An unofficial Emacs client for sessions owned by an OpenCode 1.18.30 HTTP
+server. Keep OpenCode conversations, approvals, questions, and project-scoped
+sessions in an editor-native workflow. This is an independent early-beta client,
+not an ACP bridge.
+
+## Highlights
+
+- Browse, create, resume, fork, and relocate project-scoped OpenCode sessions.
+- Write prompts in a multiline Emacs composer while completed transcript regions
+  remain read-only.
+- Answer pending permissions and questions inline without losing the current
+  draft.
+- Use validated SSE message/part deltas for responsive updates, with bounded
+  asynchronous polling and authoritative snapshot recovery.
+- Protect editor state: spinner updates, unchanged snapshots, and hidden-buffer
+  reconciliation preserve text, point, markers, viewport, draft, and undo history.
+- Connect to local or remote profiles with directory translation, auth-source
+  lookup, and safe local-server lifecycle controls.
+
+## Quick start
+
+1. Start an OpenCode 1.18.30-compatible HTTP server. The default local endpoint
+   is `http://127.0.0.1:4199`.
+2. Clone this repository and add its directory to `load-path`.
+3. Evaluate `(require 'opencode-shell)`.
+4. Run `M-x opencode-shell` from a project directory, select a server, then open
+   or create a session.
+
+For a local development checkout, evaluate the following in Emacs:
+
+```elisp
+(add-to-list 'load-path "/path/to/opencode-shell")
+(require 'opencode-shell)
+```
+
+Use `M-x opencode-shell-log` to inspect privacy-safe lifecycle diagnostics when
+troubleshooting. See [Contributing](CONTRIBUTING.md) for development workflow and
+[the async runtime design](docs/async-runtime.md) for synchronization guarantees.
+
+## Installation and configuration
 
 Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
 original single-server setup, the local endpoint defaults to
@@ -245,3 +285,12 @@ writable, and repeated spinner frames or unchanged polling do not move the curso
 scroll the window, alter undo behavior, or erase a draft being edited. Then leave
 the transcript hidden for one response update and confirm reopening it renders the
 latest snapshot once.
+
+## Contributing
+
+Bug reports, documentation improvements, tests, and focused fixes are welcome.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request.
+
+## License
+
+Distributed under the [MIT License](LICENSE).
