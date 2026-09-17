@@ -167,6 +167,44 @@
       (set-window-start window original-start)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest opencode-shell-acceptance-long-session-delta-keeps-spinner-live ()
+  (let* ((buffer (generate-new-buffer " *accept-long-delta*"))
+         (window (selected-window))
+         (original-buffer (window-buffer window))
+         (original-update (symbol-function 'opencode-shell--update-turn-response))
+         (updates 0))
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "large-session")
+            (opencode-shell--render-messages
+             (opencode-shell-test--large-message-snapshot 40) 1)
+            (let ((first-frame
+                   (overlay-get (car opencode-shell--spinner-overlays) 'display)))
+              (cl-letf (((symbol-function 'opencode-shell--update-turn-response)
+                         (lambda (turn)
+                           (cl-incf updates)
+                           (funcall original-update turn))))
+                (opencode-shell--receive-application-event
+                 '(:kind part-updated :type "message.part.updated"
+                   :session-id "large-session"
+                   :message-id "large-active-assistant" :part-id "large-tool"
+                   :part ((id . "large-tool") (sessionID . "large-session")
+                          (messageID . "large-active-assistant") (type . "tool")
+                          (tool . "bash") (state . ((status . "running"))))))
+                (opencode-shell--animation-tick)
+                (opencode-shell-async-drain buffer))
+              (should (= updates 1))
+              (should (string-match-p "TOOL> bash" (buffer-string)))
+              (should opencode-shell--spinner-overlays)
+              (should-not
+               (equal first-frame
+                       (overlay-get (car opencode-shell--spinner-overlays) 'display))))))
+      (set-window-buffer window original-buffer)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (ert-deftest opencode-shell-acceptance-shared-runtime-coalesces-and-falls-back ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
         (first (generate-new-buffer " *accept-runtime-1*"))

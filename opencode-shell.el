@@ -482,6 +482,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--render-force nil)
+(defvar-local opencode-shell--render-dirty-turns nil)
 (defvar-local opencode-shell--generation 0)
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
@@ -1384,6 +1385,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
               opencode-shell--message-envelopes (make-hash-table :test #'equal)
               opencode-shell--message-order nil
               opencode-shell--normalized-changed-turns nil
+              opencode-shell--render-dirty-turns nil
               opencode-shell--permissions nil
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t)
@@ -1974,7 +1976,8 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
       (unless (equal before (and (not (eq turn t))
                                  (opencode-shell--turn-state-signature turn)))
         (opencode-shell--schedule-render
-         (format "event:%s" (or (plist-get event :type) kind)) force))
+         (format "event:%s" (or (plist-get event :type) kind)) force
+         (and (not (eq turn t)) (list turn))))
       t)))
 
 (defun opencode-shell--receive-application-event (event)
@@ -2464,7 +2467,9 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (setq opencode-shell--spinner-overlays
         (seq-filter #'overlay-buffer opencode-shell--spinner-overlays))
   (dolist (overlay opencode-shell--spinner-overlays)
-    (overlay-put overlay 'display (opencode-shell--spinner-frame))))
+    (overlay-put overlay 'display (opencode-shell--spinner-frame)))
+  (when opencode-shell--spinner-overlays
+    (force-window-update (current-buffer))))
 
 (defun opencode-shell--animation-tick ()
   "Advance one UI-only spinner frame without issuing network requests."
@@ -2473,9 +2478,10 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
              (length opencode-shell--spinner-frames)))
   (opencode-shell--render-status-animation))
 
-(defun opencode-shell--render-turns (&optional force)
+(defun opencode-shell--render-turns (&optional force changed-turns)
   "Render immutable turn blocks without changing composer bytes or point.
-When FORCE is non-nil, rebuild every turn so anchored event positions settle."
+When FORCE is non-nil, rebuild every turn so anchored event positions settle.
+Otherwise update only CHANGED-TURNS when that list is non-nil."
   (opencode-shell--without-user-undo
    (let* ((composer-offset (and (opencode-shell--in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
@@ -2496,8 +2502,9 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
       (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
       (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
       (when append-only
-        (dolist (turn opencode-shell--rendered-turns)
-          (save-excursion (opencode-shell--update-turn-response turn))))
+        (dolist (turn (or changed-turns opencode-shell--rendered-turns))
+          (when (memq turn opencode-shell--rendered-turns)
+            (save-excursion (opencode-shell--update-turn-response turn)))))
       (if append-only
           (save-excursion
             (when (< known-count (length opencode-shell--turns))
@@ -2552,20 +2559,25 @@ When FORCE is non-nil, rebuild every turn so anchored event positions settle."
   (when (and opencode-shell--render-dirty
              (get-buffer-window (current-buffer) t))
     (let ((event opencode-shell--render-event)
-          (force opencode-shell--render-force))
+          (force opencode-shell--render-force)
+          (changed-turns opencode-shell--render-dirty-turns))
       (setq opencode-shell--render-dirty nil
             opencode-shell--render-event nil
-            opencode-shell--render-force nil)
-      (opencode-shell--render-turns force)
+            opencode-shell--render-force nil
+            opencode-shell--render-dirty-turns nil)
+      (opencode-shell--render-turns force changed-turns)
       (opencode-shell--log-lifecycle event)
       (force-mode-line-update))))
 
-(defun opencode-shell--schedule-render (&optional event force)
+(defun opencode-shell--schedule-render (&optional event force changed-turns)
   "Mark presentation dirty and coalesce visible rendering under EVENT.
-When FORCE is non-nil, rebuild turn blocks during the next render."
+When FORCE is non-nil, rebuild turn blocks during the next render.  Merge
+CHANGED-TURNS into the response blocks pending incremental update."
   (setq opencode-shell--render-dirty t
         opencode-shell--render-event (or event opencode-shell--render-event)
-        opencode-shell--render-force (or force opencode-shell--render-force))
+        opencode-shell--render-force (or force opencode-shell--render-force)
+        opencode-shell--render-dirty-turns
+        (seq-uniq (append opencode-shell--render-dirty-turns changed-turns) #'eq))
   (when (get-buffer-window (current-buffer) t)
     (opencode-shell-async-enqueue
      (current-buffer) 'render opencode-shell--generation
@@ -2578,7 +2590,8 @@ When FORCE is non-nil, rebuild turn blocks during the next render."
   (when (and opencode-shell--render-dirty
              (get-buffer-window (current-buffer) t))
         (opencode-shell--schedule-render opencode-shell--render-event
-                                         opencode-shell--render-force)))
+                                         opencode-shell--render-force
+                                         opencode-shell--render-dirty-turns)))
 
 (defun opencode-shell--transcript-state-signature ()
   "Return the normalized transcript state that can affect presentation."
@@ -2646,19 +2659,24 @@ Render immediately unless DEFER-RENDER is non-nil."
                 (not (equal before (opencode-shell--message-lifecycle-signature))))
         (let ((event (if sequence (format "messages:%d" sequence) "messages")))
           (if defer-render
-              (opencode-shell--schedule-render event)
+              (opencode-shell--schedule-render
+               event nil opencode-shell--normalized-changed-turns)
             (setq opencode-shell--render-dirty t
-                  opencode-shell--render-event event)
+                  opencode-shell--render-event event
+                  opencode-shell--render-dirty-turns
+                  opencode-shell--normalized-changed-turns)
             (if (get-buffer-window (current-buffer) t)
                 (opencode-shell--flush-render)
               ;; Direct callers, including deterministic tests and initial buffer
               ;; construction, require an immediate render even without a window.
               (let ((opencode-shell--render-dirty t))
-                (opencode-shell--render-turns)
+                (opencode-shell--render-turns
+                 nil opencode-shell--normalized-changed-turns)
                 (opencode-shell--log-lifecycle event)
                 (force-mode-line-update))
               (setq opencode-shell--render-dirty nil
-                    opencode-shell--render-event nil))))))))
+                    opencode-shell--render-event nil
+                    opencode-shell--render-dirty-turns nil))))))))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
