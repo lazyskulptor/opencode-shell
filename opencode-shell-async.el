@@ -55,15 +55,15 @@
   (prog1 (gethash key opencode-shell-async--runtimes)
     (remhash key opencode-shell-async--runtimes)))
 
-(defun opencode-shell-async--deliver-runtime (runtime reason)
-  "Coalesce RUNTIME subscriber callbacks for REASON."
+(defun opencode-shell-async--deliver-runtime (runtime _reason)
+  "Coalesce RUNTIME subscriber callbacks under one wake key."
   (maphash
    (lambda (buffer callback)
      (if (not (buffer-live-p buffer))
          (remhash buffer (plist-get runtime :subscribers))
        (with-current-buffer buffer
-         (opencode-shell-async-enqueue
-          buffer (list 'runtime reason) opencode-shell--generation callback))))
+          (opencode-shell-async-enqueue
+           buffer 'runtime-wake opencode-shell--generation callback))))
    (plist-get runtime :subscribers)))
 
 (defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)

@@ -50,8 +50,9 @@ composer noticeably pause.
 ## Lifecycle
 
 Opening a live transcript subscribes it to its profile runtime. The first
-subscriber starts SSE or polling fallback. Events schedule keyed snapshot reads;
-periodic low-frequency reconciliation covers lost events. The final unsubscribe,
+subscriber starts SSE or polling fallback. Event and timer signals share one
+buffer-local runtime-wake key, so adjacent signals collapse into one snapshot
+read; periodic low-frequency reconciliation covers lost events. The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.
 
@@ -59,7 +60,9 @@ Protocol/configuration errors switch directly to polling. Transport closure and
 header timeout reconnect with exponential backoff until the bounded failure
 budget opens the circuit. A successful parsed event resets that budget. Runtime
 logs include only the error type/reason and circuit state, never event data,
-headers, URLs, directories, credentials, or response bodies.
+headers, URLs, directories, credentials, or response bodies. Successful routine
+message, permission, and question snapshots do not append per-request log lines;
+failures and semantic lifecycle transitions remain visible.
 
 ## Review checklist
 

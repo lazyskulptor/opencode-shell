@@ -619,6 +619,11 @@ and lifecycle keys."
     (json-parse-buffer :object-type 'alist :array-type 'list
                        :null-object nil :false-object nil)))
 
+(defun opencode-shell--routine-snapshot-path-p (path)
+  "Return non-nil when successful PATH polling should stay out of logs."
+  (or (member path '("/permission" "/question"))
+      (string-match-p "/session/[^/]+/message\\'" path)))
+
 (defun opencode-shell--request (method path callback &optional body params error-callback)
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
 BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
@@ -642,8 +647,8 @@ called after a transport, status, or decoding failure."
          (request-generation opencode-shell--generation)
          (request-id (cl-incf opencode-shell--request-log-counter))
          (started (float-time))
-         (poll-p (string-match-p "/session/[^/]+/message\\'" path)))
-    (when (and opencode-shell-log-requests (not poll-p))
+         (quiet-success (opencode-shell--routine-snapshot-path-p path)))
+    (when (and opencode-shell-log-requests (not quiet-success))
       (opencode-shell--log "OpenCode API #%d → %s %s" request-id method path))
     (url-retrieve
      (opencode-shell--url path params)
@@ -684,7 +689,8 @@ called after a transport, status, or decoding failure."
                                       (with-current-buffer origin
                                         (= request-generation opencode-shell--generation)))
                             (with-current-buffer origin
-                              (when opencode-shell-log-requests
+                              (when (and opencode-shell-log-requests
+                                         (not quiet-success))
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
                                                      request-id code (- (float-time) started) method path))
                                (opencode-shell-async-enqueue
@@ -2469,7 +2475,7 @@ Render immediately unless DEFER-RENDER is non-nil."
        (lambda ()
          (when (= generation opencode-shell--generation)
            (setf (alist-get key opencode-shell--in-flight) nil)
-            (when error-callback (funcall error-callback))))))))
+           (when error-callback (funcall error-callback))))))))
 
 (defun opencode-shell--question-prompt (question)
   "Return a readable answer prompt for QUESTION."

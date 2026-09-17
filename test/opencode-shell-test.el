@@ -1088,6 +1088,40 @@
         (funcall failed)
         (should-not (alist-get 'messages opencode-shell--in-flight))))))
 
+(ert-deftest opencode-shell-routine-snapshot-paths-are-classified ()
+  (dolist (path '("/session/s/message" "/permission" "/question"))
+    (should (opencode-shell--routine-snapshot-path-p path)))
+  (dolist (path '("/session/status" "/session" "/provider" "/agent"))
+    (should-not (opencode-shell--routine-snapshot-path-p path))))
+
+(ert-deftest opencode-shell-routine-snapshot-success-is-quiet-but-failure-is-logged ()
+  (with-temp-buffer
+    (let ((opencode-shell-log-requests t)
+          logs)
+      (cl-letf (((symbol-function 'opencode-shell--log)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) logs)))
+                ((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (with-temp-buffer
+                     (insert "HTTP/1.1 200 OK\r\n\r\n[]")
+                     (setq-local url-http-response-status 200)
+                     (funcall callback nil)))))
+        (opencode-shell--request "GET" "/permission" #'ignore)
+        (opencode-shell-async-drain (current-buffer)))
+      (should-not logs)
+      (cl-letf (((symbol-function 'opencode-shell--log)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) logs)))
+                ((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (with-temp-buffer
+                     (funcall callback '(:error (error connection-failed)))))))
+        (opencode-shell--request "GET" "/permission" #'ignore))
+      (should (seq-some (lambda (line)
+                          (string-match-p "transport-error" line))
+                        logs)))))
+
 (ert-deftest opencode-shell-request-ignores-killed-origin ()
   (let ((origin (generate-new-buffer " *oc-dead-origin*")) retrieve-callback called)
     (cl-letf (((symbol-function 'url-retrieve)
@@ -2400,6 +2434,7 @@
                     ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
             (opencode-shell-async--transport-event 'server 'current '(:data "one"))
             (opencode-shell-async--transport-event 'server 'current '(:data "two"))
+            (opencode-shell-async--poll-runtime 'server)
             (dolist (buffer (list first second))
               (with-current-buffer buffer
                 (should (= (length opencode-shell-async--queue) 1))))))
