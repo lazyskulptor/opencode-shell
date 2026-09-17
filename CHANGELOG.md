@@ -29,3 +29,8 @@
   strict interval validation, and stale-connection suppression.
 - Document asynchronous runtime invariants that prohibit synchronous I/O and
   callback-driven buffer rendering on interactive hot paths.
+- Keep polling and animation presentation-only for unchanged snapshots: use a
+  fixed-width overlay spinner and preserve transcript text, markers, cursor,
+  viewport, draft, and undo state.
+- Coalesce adjacent SSE and reconciliation wakes, suppress successful routine
+  snapshot request logs, and retain errors plus semantic lifecycle diagnostics.

@@ -22,5 +22,33 @@
     "data: {\"type\":\"session.idle\"}\n\n")
   "Payload-free event burst used to verify wake-up coalescing.")
 
+(defconst opencode-shell-test--active-transcript-snapshot
+  '(((info . ((id . "user-active") (role . "user")))
+     (parts . (((type . "text") (text . "질문")))))
+    ((info . ((id . "assistant-active") (role . "assistant")
+              (parentID . "user-active")))
+     (parts . (((id . "assistant-active-text") (type . "text")
+                (text . "응답 중"))))))
+  "Active message snapshot used by cursor-stability acceptance tests.")
+
+(defconst opencode-shell-test--changed-transcript-snapshot
+  '(((info . ((id . "user-active") (role . "user")))
+     (parts . (((type . "text") (text . "질문")))))
+    ((info . ((id . "assistant-active") (role . "assistant")
+              (parentID . "user-active")))
+     (parts . (((id . "assistant-active-text") (type . "text")
+                (text . "새 응답"))))))
+  "Changed message snapshot used to verify one coalesced render.")
+
+(defconst opencode-shell-test--pending-permission-snapshot
+  '(((id . "permission-active") (sessionID . "acceptance-stability")
+     (permission . "bash")))
+  "Pending permission snapshot for stability acceptance tests.")
+
+(defconst opencode-shell-test--pending-question-snapshot
+  '(((id . "question-active") (sessionID . "acceptance-stability")
+     (questions . (((question . "Continue?"))))))
+  "Pending question snapshot for stability acceptance tests.")
+
 (provide 'completion-polling-regression)
 ;;; completion-polling-regression.el ends here

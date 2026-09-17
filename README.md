@@ -76,16 +76,17 @@ read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear with the generated session title in the transcript header
 and affect subsequent prompt payloads. The title updates on session open and an
 explicit `g` resync when the session snapshot reports OpenCode's generated title.
-Each prompt carries a stable message ID. Periodic history polling is the sole
-transcript data path and reconciles responses without deleting known history.
-Each recurring poll is limited to message history, session status, and pending
-permissions; session metadata and model/agent capabilities are full-resync data.
+Each prompt carries a stable message ID. SSE events wake authoritative snapshot
+reconciliation, with periodic polling retained for fallback and recovery. Each
+recurring reconciliation is limited to message history and pending permissions
+and questions; session metadata and model/agent capabilities are full-resync data.
 The transcript shows sending, waiting, receiving, recovering, aborting, or error
 state and never replaces an already completed response with stale data. Pending
-status uses a right-growing progress animation that advances on the UI-only
-`opencode-shell-animation-interval` (0.2 seconds by default). It restarts from
-its first frame for each network poll and does not issue requests. Reasoning-only
-updates show `Thinking`; text or tool activity shows `Receiving`.
+status uses a fixed-width spinner that advances on the UI-only
+`opencode-shell-animation-interval` (0.2 seconds by default). Spinner frames use
+overlay presentation, so they do not change transcript bytes, markers, point, or
+undo history and do not issue requests. Reasoning-only updates show `Thinking`;
+text or tool activity shows `Receiving`.
 Assistant completion comes from the matching message's `time.completed`
 metadata together with either a genuinely terminal `finish` value or a
 terminal `error`; `step-finish` is retained only as compatible evidence when
@@ -108,9 +109,9 @@ other Markdown stays unchanged, and each turn retains the verbatim source.
 
 API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
 session exists and in a session-specific log buffer afterwards. Open the relevant
-buffer with `M-x opencode-shell-log`. Non-poll requests log their start; all
-outcomes log method, path, status, and duration. Successful message-history polls
-emit only their outcome to limit noise. Customize
+buffer with `M-x opencode-shell-log`. Non-routine requests log their start and
+outcome. Successful message, permission, and question snapshots stay out of the
+log; failures and semantic lifecycle transitions remain visible. Customize
 `opencode-shell-log-requests` to disable logs. Bodies, query parameters,
 authentication headers, and error response bodies are never logged.
 Model completion is limited to providers reported as connected by the server;
@@ -174,7 +175,8 @@ For polling diagnostics, leave `opencode-shell-log-requests` enabled and run
 `M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted
 when state changes and name the local blockers, completion metadata, tool-state
 counts, pending permission count, and submit reconciliation state. Routine
-unchanged polls are coalesced. Logs intentionally exclude message/reasoning text,
+unchanged snapshots are semantic no-ops, and adjacent SSE/timer wakes are
+coalesced into one reconciliation. Logs intentionally exclude message/reasoning text,
 tool input/output, permission descriptions and patterns, request bodies, query
 parameters, directories, authorization values, and server error bodies.
 The network cadence remains controlled independently by
@@ -235,4 +237,7 @@ For a live check, restart Emacs, close old OpenCode transcript buffers, open or
 create a localhost session, enter insert state with several of `i`, `a`, `A`,
 `o`, and `O`, then submit two multiline Korean/Markdown prompts. Confirm each
 submitted prompt and response is read-only, the bottom composer remains
-writable, and polling does not move or erase a draft being edited.
+writable, and repeated spinner frames or unchanged polling do not move the cursor,
+scroll the window, alter undo behavior, or erase a draft being edited. Then leave
+the transcript hidden for one response update and confirm reopening it renders the
+latest snapshot once.

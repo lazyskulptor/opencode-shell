@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'opencode-shell)
+(require 'completion-polling-regression)
 
 (defun opencode-shell-acceptance--messages (count)
   "Return COUNT complete chronological conversation turns."
@@ -87,6 +88,84 @@
         (should (= tick (buffer-chars-modified-tick)))
         (should (= position (point)))
         (should-not opencode-shell--render-dirty)))))
+
+(ert-deftest opencode-shell-acceptance-polling-preserves-editor-state-and-renders-changes-once ()
+  (let* ((buffer (generate-new-buffer " *accept-stable-editor*"))
+         (window (selected-window))
+         (original-buffer (window-buffer window))
+         (original-start (window-start window)))
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "acceptance-stability")
+            (opencode-shell--render-messages
+             opencode-shell-test--active-transcript-snapshot 1)
+            (opencode-shell--receive-permissions
+             opencode-shell-test--pending-permission-snapshot)
+            (opencode-shell--receive-questions
+             opencode-shell-test--pending-question-snapshot)
+            (goto-char opencode-shell--composer-start)
+            (insert "작성 중인 초안")
+            (goto-char (+ opencode-shell--composer-start 4))
+            (set-window-start window (point-min))
+            (let ((text (buffer-string))
+                  (tick (buffer-chars-modified-tick))
+                  (position (point))
+                  (viewport (window-start window))
+                  (undo (copy-tree buffer-undo-list))
+                  (composer (marker-position opencode-shell--composer-start))
+                  (response (marker-position
+                             (opencode-shell--turn-response-begin
+                              (car opencode-shell--turns)))))
+              (dotimes (_ 3)
+                (opencode-shell--render-messages
+                 opencode-shell-test--active-transcript-snapshot 2 t)
+                (opencode-shell--receive-permissions
+                 opencode-shell-test--pending-permission-snapshot t)
+                (opencode-shell--receive-questions
+                 opencode-shell-test--pending-question-snapshot t)
+                (opencode-shell--animation-tick))
+              (opencode-shell-async-drain buffer)
+              (should (equal text (buffer-string)))
+              (should (= tick (buffer-chars-modified-tick)))
+              (should (= position (point)))
+              (should (= viewport (window-start window)))
+              (should (equal undo buffer-undo-list))
+              (should (= composer (marker-position opencode-shell--composer-start)))
+              (should (= response
+                         (marker-position
+                          (opencode-shell--turn-response-begin
+                           (car opencode-shell--turns))))))
+            (opencode-shell--render-messages
+             opencode-shell-test--changed-transcript-snapshot 3 t)
+            (opencode-shell--receive-permissions nil t)
+            (opencode-shell--receive-questions nil t)
+            (should (= (length opencode-shell-async--queue) 1))
+            (opencode-shell-async-drain buffer)
+            (should (equal (opencode-shell--turn-assistant
+                            (car opencode-shell--turns))
+                           "새 응답"))
+            (should (equal (opencode-shell--composer-text) "작성 중인 초안"))
+            (should-not opencode-shell--permissions)
+            (should-not opencode-shell--questions-pending)
+            (let ((visible-text (buffer-string)))
+              (set-window-buffer window original-buffer)
+              (opencode-shell--receive-permissions
+               opencode-shell-test--pending-permission-snapshot t)
+              (should opencode-shell--render-dirty)
+              (should (equal visible-text (buffer-string)))
+              (set-window-buffer window buffer)
+              (opencode-shell--render-if-visible)
+              (opencode-shell-async-drain buffer)
+              (should (equal opencode-shell--permissions
+                             opencode-shell-test--pending-permission-snapshot))
+              (should (string-match-p "bash" (buffer-string)))
+              (should-not opencode-shell--render-dirty))))
+      (set-window-buffer window original-buffer)
+      (set-window-start window original-start)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest opencode-shell-acceptance-shared-runtime-coalesces-and-falls-back ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
