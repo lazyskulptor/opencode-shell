@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'opencode-shell-event)
 (require 'opencode-shell-async)
+(require 'opencode-shell)
 (require 'completion-polling-regression)
 
 (ert-deftest opencode-shell-event-decodes-v1-message-and-part-events ()
@@ -65,6 +66,69 @@
       (when (buffer-live-p first) (kill-buffer first))
       (when (buffer-live-p second) (kill-buffer second))
       (remhash 'server opencode-shell-async--runtimes))))
+
+(ert-deftest opencode-shell-event-applies-message-and-part-deltas-without-snapshot ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "user-active") (sessionID . "session-a")
+                 (role . "user")))
+        (parts . (((id . "user-text") (type . "text") (text . "question")))))
+       ((info . ((id . "assistant-active") (sessionID . "session-a")
+                 (role . "assistant") (parentID . "user-active")))
+        (parts . nil))) 1)
+    (let ((snapshot-count 0)
+          (part-event
+           (opencode-shell-event-decode
+            (list :data opencode-shell-test--part-updated-event))))
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf snapshot-count)))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+        (opencode-shell--receive-application-event part-event)
+        (opencode-shell-async-drain (current-buffer))
+        (should (zerop snapshot-count))
+        (should (opencode-shell--turn-parts (car opencode-shell--turns)))
+        (should (string-match-p "TOOL> bash" (buffer-string)))
+        (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                    'receiving))
+        (opencode-shell--receive-application-event part-event)
+        (should-not opencode-shell-async--queue)
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated"
+           :session-id "session-a" :message-id "missing" :part-id "p"
+           :part ((id . "p") (messageID . "missing") (type . "text"))))
+        (opencode-shell-async-drain (current-buffer))
+        (should (= snapshot-count 1))))))
+
+(ert-deftest opencode-shell-event-delta-completion-matches-snapshot-lifecycle ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "user-active") (sessionID . "session-a")
+                 (role . "user"))) (parts . nil))
+       ((info . ((id . "assistant-active") (sessionID . "session-a")
+                 (role . "assistant") (parentID . "user-active")))
+        (parts . (((id . "part-active") (sessionID . "session-a")
+                   (messageID . "assistant-active") (type . "tool")
+                   (tool . "bash") (state . ((status . "running")))))))) 1)
+    (opencode-shell--receive-application-event
+     '(:kind message-updated :type "message.updated" :session-id "session-a"
+       :message-id "assistant-active"
+       :info ((id . "assistant-active") (sessionID . "session-a")
+              (role . "assistant") (parentID . "user-active")
+               (finish . "stop") (time . ((completed . 2))))))
+    (opencode-shell--receive-application-event
+     '(:kind part-updated :type "message.part.updated" :session-id "session-a"
+       :message-id "assistant-active" :part-id "part-active"
+       :part ((id . "part-active") (sessionID . "session-a")
+              (messageID . "assistant-active") (type . "tool") (tool . "bash")
+              (state . ((status . "completed"))))))
+    (opencode-shell-async-drain (current-buffer))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                'complete))
+    (should (equal opencode-shell--request-status "idle"))))
 
 (provide 'opencode-shell-event-test)
 ;;; opencode-shell-event-test.el ends here
