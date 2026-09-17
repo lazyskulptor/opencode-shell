@@ -1866,11 +1866,15 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Return ENVELOPE's stable message ID."
   (opencode-shell--get (opencode-shell--get envelope 'info) 'id))
 
-(defun opencode-shell--cache-message-envelope (envelope)
-  "Merge ENVELOPE into the buffer-local message index and return the result."
+(defun opencode-shell--ensure-message-cache ()
+  "Ensure the current transcript owns an initialized message cache."
   (unless (hash-table-p opencode-shell--message-envelopes)
     (setq opencode-shell--message-envelopes (make-hash-table :test #'equal)
-          opencode-shell--message-order nil))
+          opencode-shell--message-order nil)))
+
+(defun opencode-shell--cache-message-envelope (envelope)
+  "Merge ENVELOPE into the buffer-local message index and return the result."
+  (opencode-shell--ensure-message-cache)
   (let* ((id (opencode-shell--message-envelope-id envelope))
          (known (and id (gethash id opencode-shell--message-envelopes)))
          (merged (if known (opencode-shell--merge-envelope known envelope) envelope)))
@@ -1885,6 +1889,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Merge chronological MESSAGES into the message index.
 When AUTHORITATIVE is non-nil, remove cached server state absent from MESSAGES.
 Return a plist containing affected turns and whether a full render is required."
+  (opencode-shell--ensure-message-cache)
   (let ((ids (delq nil (mapcar #'opencode-shell--message-envelope-id messages)))
         changed force)
     (when authoritative
@@ -2048,11 +2053,13 @@ Return a plist containing affected turns and whether a full render is required."
 
 (defun opencode-shell--receive-application-event (event)
   "Apply decoded application EVENT or reconcile when it is not safe locally."
-  (if (and (memq (plist-get event :kind)
-                 '(message-updated message-removed part-updated part-removed))
-           (opencode-shell--apply-message-event event))
-      (cl-incf opencode-shell--message-state-revision)
-    (opencode-shell--schedule-event-reconciliation)))
+  (when (derived-mode-p 'opencode-shell-mode)
+    (opencode-shell--ensure-message-cache)
+    (if (and (memq (plist-get event :kind)
+                   '(message-updated message-removed part-updated part-removed))
+             (opencode-shell--apply-message-event event))
+        (cl-incf opencode-shell--message-state-revision)
+      (opencode-shell--schedule-event-reconciliation))))
 
 (defun opencode-shell--composer-text ()
   "Return the composer contents without properties."
@@ -2760,17 +2767,20 @@ non-nil, remove cached server messages absent from the snapshot."
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
   (unless (alist-get key opencode-shell--in-flight)
-    (let ((generation opencode-shell--generation))
+    (let ((generation opencode-shell--generation)
+          (request-mode major-mode))
       (setf (alist-get key opencode-shell--in-flight) t)
       (opencode-shell--request
        method path
        (lambda (value)
-         (when (= generation opencode-shell--generation)
+         (when (and (eq major-mode request-mode)
+                    (= generation opencode-shell--generation))
            (setf (alist-get key opencode-shell--in-flight) nil)
            (funcall callback value)))
        body nil
        (lambda ()
-         (when (= generation opencode-shell--generation)
+         (when (and (eq major-mode request-mode)
+                    (= generation opencode-shell--generation))
            (setf (alist-get key opencode-shell--in-flight) nil)
            (when error-callback (funcall error-callback))))))))
 

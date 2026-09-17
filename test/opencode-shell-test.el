@@ -2074,6 +2074,17 @@
                    (car opencode-shell--turns)))
       (should-not (string-match-p "TOOL> bash" (buffer-string))))))
 
+(ert-deftest opencode-shell-authoritative-snapshot-recovers-a-nil-message-cache ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--message-envelopes nil)
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+        (parts . nil)))
+     1 nil t)
+    (should (hash-table-p opencode-shell--message-envelopes))
+    (should (gethash "u1" opencode-shell--message-envelopes))))
+
 (ert-deftest opencode-shell-stale-in-flight-snapshot-cannot-overwrite-event-delta ()
   (with-temp-buffer
     (opencode-shell-mode)

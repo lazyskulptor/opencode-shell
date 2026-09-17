@@ -130,5 +130,34 @@
                 'complete))
     (should (equal opencode-shell--request-status "idle"))))
 
+(ert-deftest opencode-shell-event-recovers-a-live-transcript-with-a-nil-cache ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--message-envelopes nil
+          opencode-shell--session-id "session-a")
+    (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+              ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+              ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+      (opencode-shell--receive-application-event
+       '(:kind message-updated :type "message.updated" :session-id "session-a"
+         :message-id "user-live"
+         :info ((id . "user-live") (sessionID . "session-a") (role . "user"))))
+      (should (hash-table-p opencode-shell--message-envelopes))
+      (should (gethash "user-live" opencode-shell--message-envelopes)))))
+
+(ert-deftest opencode-shell-event-drops-delivery-after-major-mode-transition ()
+  (let ((buffer (generate-new-buffer " *event-mode-transition*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (opencode-shell-mode)
+          (setq opencode-shell--message-envelopes nil)
+          (fundamental-mode)
+          (opencode-shell--receive-application-event
+           '(:kind message-updated :type "message.updated" :session-id "s"
+             :message-id "stale"
+             :info ((id . "stale") (sessionID . "s") (role . "user"))))
+          (should-not opencode-shell--message-envelopes))
+      (kill-buffer buffer))))
+
 (provide 'opencode-shell-event-test)
 ;;; opencode-shell-event-test.el ends here
