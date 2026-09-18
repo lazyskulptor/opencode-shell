@@ -24,6 +24,7 @@
 (require 'project)
 (require 'opencode-shell-render)
 (require 'opencode-shell-async)
+(require 'opencode-shell-state)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
@@ -626,9 +627,7 @@ profiles make the result ambiguous."
     (t :inherit default))
   "Subtle background face for the writable composer." :group 'opencode-shell)
 
-(cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
-  id server-user-id user assistant parts assistant-messages status acknowledged user-begin user-end
-  response-begin response-end terminal-error locally-settled)
+
 
 (defun opencode-shell--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -2927,17 +2926,10 @@ CHANGED-TURNS into the response blocks pending incremental update."
 (defun opencode-shell--update-message-lifecycle-state ()
   "Derive request and composer lifecycle state from normalized turns."
   (setq opencode-shell--request-status
-        (cond ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'thinking))
-                         opencode-shell--turns) "thinking")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'receiving))
-                         opencode-shell--turns) "receiving")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'recovering))
-                         opencode-shell--turns) "recovering")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'waiting))
-                         opencode-shell--turns) "waiting")
-              ((seq-some (lambda (turn) (eq (opencode-shell--turn-status turn) 'error))
-                         opencode-shell--turns) "error")
-              (t "idle")))
+        (symbol-name
+         (opencode-shell-state-request-phase
+          (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+          opencode-shell--submit-in-flight)))
   (when-let ((turn (seq-find
                     (lambda (entry)
                       (equal opencode-shell--submit-in-flight
@@ -2948,9 +2940,11 @@ CHANGED-TURNS into the response blocks pending incremental update."
         (setq opencode-shell--submit-in-flight nil
               opencode-shell--composer-visible t))))
   (when (and (not (opencode-shell--permission-blocked-p))
-             (null opencode-shell--submit-in-flight)
-             (equal opencode-shell--request-status "idle"))
+             (not (opencode-shell-state-polling-needed-p
+                   (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+                   opencode-shell--submit-in-flight)))
     (opencode-shell--stop-polling)))
+
 
 (defun opencode-shell--render-messages
     (messages &optional sequence defer-render authoritative)

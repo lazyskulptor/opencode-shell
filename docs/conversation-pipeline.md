@@ -30,7 +30,8 @@ opencode-shell-interaction.el   opencode-shell-response.el
                  opencode-shell.el
 ```
 
-`opencode-shell-state.el` stays pure and has no package-module dependency.
+`opencode-shell-state.el` stays pure and has no package-module dependency. It
+owns the turn record plus terminality, aggregate phase, and polling predicates.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
