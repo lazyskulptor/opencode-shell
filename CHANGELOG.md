@@ -48,3 +48,6 @@
 - Separate and subtly highlight the multiline composer below `Prompt>`, preserve
   native Evil editing inside it, and reject edits elsewhere without relocating
   point or allowing writes while the composer is hidden.
+- Let Evil normal-state movement reach an empty composer through a transcript-
+  local end-of-line policy, and retain the composer background on submitted user
+  prompt bodies.

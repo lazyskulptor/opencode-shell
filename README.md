@@ -110,9 +110,11 @@ use `T` to show or hide them without deleting their server history. `RET` uses
 the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
 and status requests. A transcript buffer has a subtly highlighted multiline
-composer on the line below the read-only `Prompt>` label; `RET` inserts a
-newline, while `C-c C-c` or `s-RET` submits it. Submitted prompts and polled
-responses above the composer are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
+    composer on the line below the read-only `Prompt>` label; `RET` inserts a
+    newline, while `C-c C-c` or `s-RET` submits it. Evil normal-state movement
+    can land on an empty composer without adding placeholder text. Submitted
+    prompts retain the composer's background and, like polled responses above
+    the composer, are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear with the generated session title in the transcript header
 and affect subsequent prompt payloads. The title updates on session open and an
 explicit `g` resync when the session snapshot reports OpenCode's generated title.
@@ -185,7 +187,8 @@ In transcript Evil normal state, `?` opens this help and `RET` submits the
 composer. Insert state keeps `?` as text input and `RET` as a newline. Native
 Evil edits such as `dd`, `I`, `A`, `o`, and `O` retain their standard behavior
 inside the composer. Entering insert state does not move point; editing from the
-transcript reports that the transcript is read-only.
+    transcript reports that the transcript is read-only. The Evil end-of-line
+    policy is local to transcript buffers and does not change other buffers.
 
 Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
 `C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`

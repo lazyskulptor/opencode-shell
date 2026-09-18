@@ -1433,13 +1433,21 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       'rear-nonsticky
                       '(read-only opencode-shell-composer-label))))
 
-(defun opencode-shell--composer-overlay-modified (overlay after &rest _ignored)
-  "Keep the empty-composer display line in sync with OVERLAY."
-  (when after
-    (overlay-put overlay 'after-string
-                 (when (= (overlay-start overlay) (overlay-end overlay))
-                   (propertize "\n" 'face
-                               'opencode-shell-composer-face)))))
+(defun opencode-shell--ensure-composer-newline (&rest _ignored)
+  "Restore the structural trailing composer newline after user edits."
+  (when (and (not opencode-shell--internal-edit)
+             (opencode-shell--composer-visible-p)
+             (markerp opencode-shell--composer-start)
+             (marker-position opencode-shell--composer-start)
+             (or (= opencode-shell--composer-start (point-max))
+                 (not (eq (char-before (point-max)) ?\n))))
+    (opencode-shell--without-user-undo
+      (let ((opencode-shell--internal-edit t)
+            (inhibit-read-only t)
+            (position (point)))
+        (goto-char (point-max))
+        (insert "\n")
+        (goto-char position)))))
 
 (defun opencode-shell--refresh-composer-overlay ()
   "Show the composer background exactly over the visible editable region."
@@ -1455,15 +1463,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       opencode-shell--composer-start (point-max))
         (overlay-put opencode-shell--composer-overlay
                      'face 'opencode-shell-composer-face)
-        (dolist (property '(modification-hooks insert-in-front-hooks
-                              insert-behind-hooks))
-          (overlay-put opencode-shell--composer-overlay property
-                       '(opencode-shell--composer-overlay-modified)))
-        (overlay-put opencode-shell--composer-overlay 'after-string
-                     (when (= (overlay-start opencode-shell--composer-overlay)
-                              (overlay-end opencode-shell--composer-overlay))
-                       (propertize "\n" 'face
-                                   'opencode-shell-composer-face))))
+        (overlay-put opencode-shell--composer-overlay 'after-string nil))
     (when (overlayp opencode-shell--composer-overlay)
       (delete-overlay opencode-shell--composer-overlay))
     (setq opencode-shell--composer-overlay nil)))
@@ -1493,12 +1493,14 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           opencode-shell--permission-end (copy-marker (point) nil)
           opencode-shell--permission-status-begin (copy-marker (point) nil)
            opencode-shell--permission-status-end (copy-marker (point) nil)))
+    (insert "\n")
   (opencode-shell--refresh-composer-overlay)
   (opencode-shell--configure-evil-buffer)
   ;; Mode-owned scaffolding must never become the first undoable transcript edit.
   (setq buffer-undo-list nil)
-  (goto-char (point-max))
+  (goto-char opencode-shell--composer-start)
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
+  (add-hook 'after-change-functions #'opencode-shell--ensure-composer-newline nil t)
   (add-hook 'evil-insert-state-entry-hook
             #'opencode-shell--guard-evil-insert-state nil t)
   (add-hook 'window-configuration-change-hook
@@ -2192,8 +2194,12 @@ Return a plist containing affected turns and whether a full render is required."
        (plist-get event :resource)))))
 
 (defun opencode-shell--composer-text ()
-  "Return the composer contents without properties."
-  (buffer-substring-no-properties opencode-shell--composer-start (point-max)))
+  "Return composer contents without properties or its structural newline."
+  (let ((end (if (and (> (point-max) opencode-shell--composer-start)
+                      (eq (char-before (point-max)) ?\n))
+                 (1- (point-max))
+               (point-max))))
+    (buffer-substring-no-properties opencode-shell--composer-start end)))
 
 (defun opencode-shell--composer-visible-p ()
   "Return non-nil when the prompt composer should be displayed."
@@ -2467,7 +2473,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (let ((inhibit-read-only t))
       (delete-region opencode-shell--composer-start (point-max))
       (goto-char opencode-shell--composer-start)
-      (insert text)
+      (insert text "\n")
       (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
   (opencode-shell--refresh-composer-overlay))
 
@@ -2479,34 +2485,50 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                         (opencode-shell--turn-response-end turn)))
     (when (markerp marker) (set-marker marker nil))))
 
+(defun opencode-shell--insert-user-prompt (turn)
+  "Insert TURN's immutable user prompt and return its bounds."
+  (let ((begin (point))
+        (body (or (opencode-shell--turn-user turn) "")))
+    (insert (propertize "USER>\n"
+                        'font-lock-face 'opencode-shell-user-face
+                        'rear-nonsticky '(font-lock-face)))
+    (let ((body-begin (point)))
+      (insert (propertize body 'face 'opencode-shell-composer-face)
+              (propertize "\n" 'face 'opencode-shell-composer-face))
+      (let ((background (make-overlay body-begin (point) nil nil t)))
+        (overlay-put background 'face 'opencode-shell-composer-face)
+        (overlay-put background 'priority 1)
+        (overlay-put background 'evaporate t)))
+    (insert "\n")
+    (cons begin (point))))
+
 (defun opencode-shell--insert-turn-blocks (turn)
   "Insert immutable user and response blocks for TURN before the composer."
-  (let ((user-begin (point)))
-    (insert (propertize "USER>\n" 'font-lock-face 'opencode-shell-user-face
-                        'rear-nonsticky '(font-lock-face))
-            (or (opencode-shell--turn-user turn) "") "\n\n")
-    (let ((user-end (point)))
-      (opencode-shell--insert-permission-results
-       (opencode-shell--turn-id turn))
-      (let ((response-begin (point)))
+  (pcase-let ((`(,user-begin . ,user-end)
+               (opencode-shell--insert-user-prompt turn)))
+    (opencode-shell--insert-permission-results (opencode-shell--turn-id turn))
+    (let ((response-begin (point)))
       (insert (opencode-shell--tool-name-display turn))
       (if (eq (opencode-shell--turn-status turn) 'complete)
           (let ((answer (opencode-shell--assistant-display-text turn)))
-          (insert (propertize "ASSISTANT>\n" 'face 'opencode-shell-assistant-face)
-                  (or answer "")
-                  (opencode-shell--turn-terminal-error-suffix turn)
-                  "\n\n"))
-        (insert (propertize
-     (pcase (opencode-shell--turn-status turn)
-       ('sending (opencode-shell--status-display "Sending"))
-       ('thinking (opencode-shell--status-display "Thinking"))
-       ('receiving (opencode-shell--status-display "Receiving"))
-       ('recovering (opencode-shell--status-display "Recovering"))
-       ('aborting (opencode-shell--status-display "Aborting"))
-       ('error "Request state is uncertain; resync with g r\n\n")
-       (_ (opencode-shell--status-display "Waiting for response")))
-                 'face (if (eq (opencode-shell--turn-status turn) 'error)
-                           'opencode-shell-error-face 'opencode-shell-waiting-face))))
+            (insert (propertize "ASSISTANT>\n" 'face
+                                'opencode-shell-assistant-face)
+                    (or answer "")
+                    (opencode-shell--turn-terminal-error-suffix turn)
+                    "\n\n"))
+        (insert
+         (propertize
+          (pcase (opencode-shell--turn-status turn)
+            ('sending (opencode-shell--status-display "Sending"))
+            ('thinking (opencode-shell--status-display "Thinking"))
+            ('receiving (opencode-shell--status-display "Receiving"))
+            ('recovering (opencode-shell--status-display "Recovering"))
+            ('aborting (opencode-shell--status-display "Aborting"))
+            ('error "Request state is uncertain; resync with g r\n\n")
+            (_ (opencode-shell--status-display "Waiting for response")))
+          'face (if (eq (opencode-shell--turn-status turn) 'error)
+                    'opencode-shell-error-face
+                  'opencode-shell-waiting-face))))
       (let ((response-end (point)))
         (add-text-properties user-begin user-end
                              '(read-only t rear-nonsticky (read-only face)))
@@ -2514,8 +2536,10 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                              '(read-only t rear-nonsticky (read-only face)))
         (setf (opencode-shell--turn-user-begin turn) (copy-marker user-begin)
               (opencode-shell--turn-user-end turn) (copy-marker user-end)
-               (opencode-shell--turn-response-begin turn) (copy-marker response-begin)
-               (opencode-shell--turn-response-end turn) (copy-marker response-end)))))))
+              (opencode-shell--turn-response-begin turn)
+              (copy-marker response-begin)
+              (opencode-shell--turn-response-end turn)
+              (copy-marker response-end))))))
 
 (defun opencode-shell--turn-rendered-p (turn)
   "Return non-nil when TURN owns valid rendered markers in this buffer."
@@ -2759,7 +2783,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
       (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
       (save-excursion
         (goto-char (max (point-min)
-                        (- (point-max) (length composer-text))))
+                        (- (point-max) 1 (length composer-text))))
         (set-marker opencode-shell--transcript-end (point))
         (set-marker opencode-shell--permission-begin (point))
          (set-marker opencode-shell--permission-end (point))
