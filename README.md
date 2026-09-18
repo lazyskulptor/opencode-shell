@@ -114,7 +114,9 @@ and status requests. A transcript buffer has a subtly highlighted multiline
     newline, while `C-c C-c` or `s-RET` submits it. Evil normal-state movement
     can land on an empty composer without adding placeholder text. Submitted
     prompts retain the composer's background and, like polled responses above
-    the composer, are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
+    the composer, are read-only. `C-n` and `C-p` move to the next and previous
+    submitted `USER>` prompt without wrapping; an Evil move enters normal state.
+    Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear with the generated session title in the transcript header
 and affect subsequent prompt payloads. The title updates on session open and an
 explicit `g` resync when the session snapshot reports OpenCode's generated title.

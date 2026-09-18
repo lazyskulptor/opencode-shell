@@ -74,7 +74,8 @@ and lifecycle keys."
     opencode-shell--submit opencode-shell--abort opencode-shell--permissions
     opencode-shell--permission-allow-once
     opencode-shell--permission-allow-always
-    opencode-shell--permission-reject opencode-shell--questions)
+    opencode-shell--permission-reject opencode-shell--questions
+    opencode-shell--previous-turn opencode-shell--next-turn)
   "Private interactive commands used only by OpenCode mode maps.")
 (defvar-local opencode-shell--profile nil)
 (defvar-local opencode-shell--base-url nil)
@@ -1304,6 +1305,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
    ["Options"
     ("m" "Model" opencode-shell--select-model)
     ("A" "Agent" opencode-shell--select-agent)
+    ("n" "Next prompt" opencode-shell--next-turn)
+    ("P" "Previous prompt" opencode-shell--previous-turn)
     ("p" "Permission" opencode-shell--permissions)
     ("q" "Question" opencode-shell--questions)]
    ["Global"
@@ -1326,6 +1329,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (define-key map (kbd "C-c C-n") #'opencode-shell--permission-reject)
     (define-key map (kbd "C-c C-q") #'opencode-shell--questions)
     (define-key map (kbd "C-c C-h") #'describe-mode)
+    (define-key map (kbd "C-n") #'opencode-shell--next-turn)
+    (define-key map (kbd "C-p") #'opencode-shell--previous-turn)
     map))
 
 (defvar opencode-shell-permission-map
@@ -1354,6 +1359,42 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Return non-nil when point is in the visible writable composer."
   (and (opencode-shell--composer-visible-p)
        (opencode-shell--point-in-composer-p)))
+
+(defun opencode-shell--turn-navigation-target (direction)
+  "Return the nearest live turn prompt position in DIRECTION from point."
+  (let ((position (point)) candidates)
+    (dolist (turn opencode-shell--turns)
+      (when-let ((marker (opencode-shell--turn-user-begin turn)))
+        (when (and (marker-position marker)
+                   (eq (marker-buffer marker) (current-buffer)))
+          (let ((candidate (marker-position marker)))
+            (when (if (eq direction 'next)
+                      (> candidate position)
+                    (< candidate position))
+              (push candidate candidates))))))
+    (if (eq direction 'next)
+        (and candidates (apply #'min candidates))
+      (and candidates (apply #'max candidates)))))
+
+(defun opencode-shell--move-turn (direction)
+  "Move to the nearest rendered user prompt in DIRECTION."
+  (if-let ((target (opencode-shell--turn-navigation-target direction)))
+      (progn
+        (when (and (bound-and-true-p evil-local-mode)
+                   (fboundp 'evil-normal-state))
+          (evil-normal-state))
+        (goto-char target))
+    (user-error "No %s submitted prompt" direction)))
+
+(defun opencode-shell--previous-turn ()
+  "Move to the previous rendered user prompt."
+  (interactive)
+  (opencode-shell--move-turn 'previous))
+
+(defun opencode-shell--next-turn ()
+  "Move to the next rendered user prompt."
+  (interactive)
+  (opencode-shell--move-turn 'next))
 
 (defun opencode-shell--protect-transcript (begin end)
   "Reject user edits outside or crossing the visible composer boundary."
@@ -3348,6 +3389,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (user-error "OpenCode transcript is read-only")))
 
 (defvar evil-move-beyond-eol nil)
+(defvar evil-local-mode)
 
 (defun opencode-shell--configure-evil-buffer ()
   "Apply Evil policy local to an OpenCode transcript buffer."
@@ -3381,13 +3423,17 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "g r") #'opencode-shell--resync
     (kbd "?") #'opencode-shell-help
     (kbd "o") #'opencode-shell--evil-open-below
+    (kbd "C-n") #'opencode-shell--next-turn
+    (kbd "C-p") #'opencode-shell--previous-turn
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
     (kbd "C-c C-m") #'opencode-shell--select-agent)
   (evil-define-key* 'insert opencode-shell-mode-map
     (kbd "?") #'self-insert-command
     (kbd "RET") #'newline
-    (kbd "<return>") #'newline)
+    (kbd "<return>") #'newline
+    (kbd "C-n") #'opencode-shell--next-turn
+    (kbd "C-p") #'opencode-shell--previous-turn)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
     (kbd "RET") #'opencode-shell--open-at-point
     (kbd "g r") #'opencode-shell--refresh
