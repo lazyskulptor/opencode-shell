@@ -26,6 +26,7 @@
 (require 'opencode-shell-async)
 (require 'opencode-shell-state)
 (require 'opencode-shell-interaction)
+(require 'opencode-shell-response)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
@@ -1675,13 +1676,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--part-text (part)
   "Return display text for message PART."
-  (pcase (opencode-shell--get part 'type)
-    ("text" (or (opencode-shell--get part 'text) ""))
-    ((or "tool" "tool_use" "tool-result")
-     (format "[tool %s: %s]" (or (opencode-shell--get part 'tool) "")
-             (or (opencode-shell--get (opencode-shell--get part 'state) 'status)
-                 (opencode-shell--get part 'status) "pending")))
-    (_ "")))
+  (opencode-shell-response-part-display-text part))
 
 (defun opencode-shell--message-text (envelope)
   "Return exact visible text from ENVELOPE's text parts."
@@ -1735,16 +1730,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--terminal-part-p (part)
   "Return non-nil when PART authoritatively ends an assistant turn."
-  (equal (format "%s" (opencode-shell--get part 'type)) "step-finish"))
+  (opencode-shell-response-terminal-part-p part))
 
 (defun opencode-shell--running-tool-part-p (part)
   "Return non-nil when PART describes an unsettled tool invocation."
-  (let ((type (format "%s" (opencode-shell--get part 'type)))
-        (status (format "%s" (or (opencode-shell--get
-                                   (opencode-shell--get part 'state) 'status)
-                                  (opencode-shell--get part 'status) ""))))
-    (and (member type '("tool" "tool_use" "tool-result"))
-         (not (member status '("completed" "error"))))))
+  (opencode-shell-response-running-tool-p part))
 
 (defun opencode-shell--continuation-finish-p (finish)
   "Return non-nil when FINISH indicates more assistant steps will follow.
@@ -1766,14 +1756,9 @@ error, or nil."
 
 (defun opencode-shell--assistant-envelope-complete-p (envelope)
   "Return non-nil when ENVELOPE contains authoritative completion evidence."
-  (let* ((info (opencode-shell--get envelope 'info))
-         (parts (opencode-shell--get envelope 'parts))
-         (finish (opencode-shell--get info 'finish)))
-    (and (not (seq-some #'opencode-shell--running-tool-part-p parts))
-         (not (opencode-shell--continuation-finish-p finish))
-         (or (and (opencode-shell--get (opencode-shell--get info 'time) 'completed)
-                  (or finish (opencode-shell--get info 'error)))
-             (and (null finish) (seq-some #'opencode-shell--terminal-part-p parts))))))
+  (opencode-shell-response-envelope-complete-p
+   (opencode-shell--get envelope 'info)
+   (opencode-shell--get envelope 'parts)))
 
 (defun opencode-shell--lifecycle-id (value)
   "Return VALUE as bounded operational metadata."
@@ -1781,13 +1766,7 @@ error, or nil."
 
 (defun opencode-shell--part-state-label (part)
   "Return a payload-free type and status label for PART."
-  (let* ((type (format "%s" (or (opencode-shell--get part 'type) "unknown")))
-         (state (opencode-shell--get part 'state))
-         (status (or (opencode-shell--get state 'status)
-                     (opencode-shell--get part 'status))))
-    (if (member type '("tool" "tool_use" "tool-result"))
-        (format "%s:%s" type (or status "unknown"))
-      type)))
+  (opencode-shell-response-part-state-label part))
 
 (defun opencode-shell--count-labels (labels)
   "Return sorted occurrence counts for payload-free LABELS."
@@ -1863,15 +1842,7 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
 
 (defun opencode-shell--response-phase (turn)
   "Return the nonterminal response phase for TURN's authoritative parts."
-  (let ((parts (opencode-shell--turn-parts turn)))
-    (cond ((seq-some (lambda (part)
-                       (member (format "%s" (opencode-shell--get part 'type))
-                               '("text" "tool" "tool_use" "tool-result")))
-                     parts) 'receiving)
-          ((seq-some (lambda (part)
-                       (equal (format "%s" (opencode-shell--get part 'type)) "reasoning"))
-                     parts) 'thinking)
-          (t 'waiting))))
+  (opencode-shell-response-phase (opencode-shell--turn-parts turn)))
 
 (defun opencode-shell--turn-by-server-id (id turns)
   "Find the turn with server user ID ID in TURNS."
@@ -2655,17 +2626,12 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 
 (defun opencode-shell--tool-name-display (turn)
   "Return payload-free tool names observed in TURN."
-  (let (names)
-    (dolist (part (opencode-shell--turn-parts turn))
-      (when (member (format "%s" (opencode-shell--get part 'type))
-                    '("tool" "tool_use" "tool-result"))
-        (when-let ((name (or (opencode-shell--get part 'tool)
-                             (opencode-shell--get part 'name))))
-          (cl-pushnew (format "%s" name) names :test #'equal))))
+  (let ((names (opencode-shell-response-tool-names
+                (opencode-shell--turn-parts turn))))
     (if names
         (propertize
          (concat (mapconcat (lambda (name) (format "TOOL> %s" name))
-                            (nreverse names) "\n")
+                            names "\n")
                  "\n\n")
          'font-lock-face 'shadow)
       "")))

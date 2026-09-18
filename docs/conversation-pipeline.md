@@ -46,6 +46,11 @@ anchors, refreshes, logs, and user messages remain explicit in
 `opencode-shell.el`. Permission and question operations may run concurrently,
 but duplicate operations of the same kind are rejected. Their endpoint,
 payload, confirmation, refreshes, and user-message policies remain separate.
+`opencode-shell-response.el` is the single payload-free adapter for raw assistant
+parts. It normalizes tool spellings, name/status fallbacks, text/reasoning,
+terminal evidence, response phase, completion blockers, lifecycle labels, and
+ordered tool names. Network payloads stay in observations; presentation and
+logs consume only these neutral helpers.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
