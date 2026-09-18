@@ -25,6 +25,7 @@
 (require 'opencode-shell-render)
 (require 'opencode-shell-async)
 (require 'opencode-shell-state)
+(require 'opencode-shell-interaction)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
@@ -547,7 +548,7 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--permission-end nil)
 (defvar-local opencode-shell--permission-status-begin nil)
 (defvar-local opencode-shell--permission-status-end nil)
-(defvar-local opencode-shell--permission-sending nil)
+(defvar-local opencode-shell--interaction-state nil)
 (defvar-local opencode-shell--resolved-permissions nil)
 (defvar-local opencode-shell--permission-refresh-pending nil)
 (defvar-local opencode-shell--questions-pending nil)
@@ -1197,7 +1198,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (unless (and (derived-mode-p 'opencode-shell-mode) opencode-shell--session-id)
     (user-error "No OpenCode session in this buffer"))
   (when (or opencode-shell--submit-in-flight
-            opencode-shell--permission-sending
+            (opencode-shell-interaction-active-p opencode-shell--interaction-state)
             opencode-shell--question-sending
             opencode-shell--permissions
             opencode-shell--questions-pending
@@ -1844,7 +1845,9 @@ error, or nil."
                  (mapcar #'opencode-shell--part-state-label parts)) "none")
             (opencode-shell--status opencode-shell--session-id)
             (length opencode-shell--permissions)
-            (if opencode-shell--permission-sending "yes" "no")
+            (if (opencode-shell-interaction-active-p
+                  opencode-shell--interaction-state 'permission)
+                 "yes" "no")
             (opencode-shell--lifecycle-id opencode-shell--submit-in-flight)
             (if submit-turn "yes" "no")
             opencode-shell--request-status
@@ -2280,7 +2283,8 @@ This compatibility adapter remains true until hydration is tracked explicitly."
 
 (defun opencode-shell--human-interaction-blocked-p ()
   "Return non-nil while a human interaction blocks new input."
-  (or opencode-shell--permissions opencode-shell--permission-sending
+  (or opencode-shell--permissions
+      (opencode-shell-interaction-active-p opencode-shell--interaction-state)
       opencode-shell--questions-pending opencode-shell--question-sending))
 
 (defalias 'opencode-shell--permission-blocked-p
@@ -3261,43 +3265,59 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (unless opencode-shell--permissions (user-error "No pending permission"))
   (goto-char opencode-shell--permission-begin))
 
+(defun opencode-shell--interaction-request (kind id method path success
+                                                    &optional body failure)
+  "Send a KIND request for ID and settle only its matching callback."
+  (setq opencode-shell--interaction-state
+        (opencode-shell-interaction-begin
+         opencode-shell--interaction-state kind id))
+  (opencode-shell--request
+   method path
+   (lambda (result)
+     (when (opencode-shell-interaction-matches-p
+            opencode-shell--interaction-state kind id)
+       (setq opencode-shell--interaction-state
+             (opencode-shell-interaction-finish
+              opencode-shell--interaction-state kind id))
+       (funcall success result)))
+   body nil
+   (lambda ()
+     (when (opencode-shell-interaction-matches-p
+            opencode-shell--interaction-state kind id)
+       (setq opencode-shell--interaction-state
+             (opencode-shell-interaction-finish
+              opencode-shell--interaction-state kind id))
+       (when failure (funcall failure))))))
+
 (defun opencode-shell--permission-reply (reply)
   "Send REPLY for the inline permission at point."
   (let* ((item (opencode-shell--permission-at-point))
          (id (opencode-shell--permission-id item)))
-    (when opencode-shell--permission-sending
-      (user-error "Permission reply already in progress"))
-    (setq opencode-shell--permission-sending id)
     (opencode-shell--log-lifecycle "permission-reply" t)
-    (opencode-shell--request
-     "POST" (format "/permission/%s/reply" id)
+    (opencode-shell--interaction-request
+     'permission id "POST" (format "/permission/%s/reply" id)
      (lambda (_)
-        (unless (opencode-shell--resolved-permission id)
-          (let ((record `((id . ,id) (reply . ,reply)
-                          (description . ,(opencode-shell--permission-description item))
-                          (after-turn-id . ,(when-let ((turn (car (last opencode-shell--turns))))
-                                              (opencode-shell--turn-id turn))))))
-             (setq opencode-shell--resolved-permissions
-                   (append opencode-shell--resolved-permissions (list record)))))
-       (when (equal opencode-shell--permission-sending id)
-         (setq opencode-shell--permission-sending nil))
-        (setq opencode-shell--permissions
-              (seq-remove (lambda (entry)
-                            (equal id (opencode-shell--permission-id entry)))
-                          opencode-shell--permissions))
-        (opencode-shell--schedule-render "permission-reply-ok" t)
-        (opencode-shell--refresh-permissions)
-        (unless (opencode-shell--permission-blocked-p)
-          (opencode-shell--resync))
-         (opencode-shell--log-lifecycle "permission-reply-ok")
-         (message "Permission %s" reply))
-     `((reply . ,reply)) nil
+       (unless (opencode-shell--resolved-permission id)
+         (let ((record `((id . ,id) (reply . ,reply)
+                         (description . ,(opencode-shell--permission-description item))
+                         (after-turn-id . ,(when-let ((turn (car (last opencode-shell--turns))))
+                                             (opencode-shell--turn-id turn))))))
+           (setq opencode-shell--resolved-permissions
+                 (append opencode-shell--resolved-permissions (list record)))))
+       (setq opencode-shell--permissions
+             (opencode-shell-interaction-remove-pending
+              opencode-shell--permissions id #'opencode-shell--permission-id))
+       (opencode-shell--schedule-render "permission-reply-ok" t)
+       (opencode-shell--refresh-permissions)
+       (unless (opencode-shell--permission-blocked-p)
+         (opencode-shell--resync))
+       (opencode-shell--log-lifecycle "permission-reply-ok")
+       (message "Permission %s" reply))
+     `((reply . ,reply))
      (lambda ()
-        (when (equal opencode-shell--permission-sending id)
-          (setq opencode-shell--permission-sending nil))
-        (opencode-shell--refresh-permissions)
-        (opencode-shell--log-lifecycle "permission-reply-error" t)
-        (message "Permission reply failed; refreshing pending permissions")))))
+       (opencode-shell--refresh-permissions)
+       (opencode-shell--log-lifecycle "permission-reply-error" t)
+       (message "Permission reply failed; refreshing pending permissions")))))
 
 (defun opencode-shell--permission-allow-once ()
   "Allow the inline permission once."

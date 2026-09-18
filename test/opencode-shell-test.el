@@ -525,12 +525,12 @@
                      "bash: git status"))
       (should-not confirmations)
 
-      (setq requests nil opencode-shell--permission-sending nil)
+      (setq requests nil opencode-shell--interaction-state nil)
       (opencode-shell--permission-reject)
       (should (equal (caddar requests) '((reply . "reject"))))
       (should-not confirmations)
 
-      (setq requests nil opencode-shell--permission-sending nil)
+      (setq requests nil opencode-shell--interaction-state nil)
       (opencode-shell--permission-allow-always)
       (should (equal (caddar requests) '((reply . "always"))))
       (should-not confirmations))))
@@ -611,7 +611,7 @@
            (opencode-shell--session-status
             '(("session-1" . (("type" . "idle")))))
            (opencode-shell--permissions `(((id . "permission-1") (description . ,secret))))
-           (opencode-shell--permission-sending t)
+           (opencode-shell--interaction-state '((permission . "permission-1")))
            (opencode-shell--submit-in-flight "local-1")
            (opencode-shell--request-status "receiving")
            (summary (opencode-shell--lifecycle-summary)))

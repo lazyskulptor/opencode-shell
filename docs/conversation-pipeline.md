@@ -38,6 +38,13 @@ hydration. `opencode-shell--request-status` is only a display/log summary and is
 never readiness authority. `opencode-shell--composer-visible-p` is the sole UI
 adapter; the temporary hydration adapter remains ready until authoritative
 resource hydration is introduced.
+`opencode-shell-interaction.el` owns pure, kind-keyed in-flight transitions and
+ID-based pending removal. The major mode wraps transport with those primitives:
+only a matching callback may settle or apply a permission outcome, so a stale
+callback cannot clear a newer request. Permission policy, resolved records,
+anchors, refreshes, logs, and user messages remain explicit in
+`opencode-shell.el`; question requests retain their legacy path until their
+separate migration.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.

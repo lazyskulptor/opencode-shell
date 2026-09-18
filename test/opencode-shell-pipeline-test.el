@@ -73,5 +73,29 @@
     (should-not (string-match-p "┌─ QUESTION" (buffer-string)))
     (should (equal (opencode-shell--composer-text) "draft"))))
 
+(ert-deftest opencode-shell-pipeline-stale-interaction-callback-cannot-settle-new-request ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (first-callback second-callback completed)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path callback &rest _)
+                   (if first-callback
+                       (setq second-callback callback)
+                     (setq first-callback callback)))))
+        (opencode-shell--interaction-request
+         'permission "p1" "POST" "/permission/p1/reply"
+         (lambda (_) (push "p1" completed)))
+        (funcall first-callback nil)
+        (opencode-shell--interaction-request
+         'permission "p2" "POST" "/permission/p2/reply"
+         (lambda (_) (push "p2" completed)))
+        (funcall first-callback nil)
+        (should (equal completed '("p1")))
+        (should (opencode-shell-interaction-matches-p
+                 opencode-shell--interaction-state 'permission "p2"))
+        (funcall second-callback nil)
+        (should (equal completed '("p2" "p1")))
+        (should-not opencode-shell--interaction-state)))))
+
 (provide 'opencode-shell-pipeline-test)
 ;;; opencode-shell-pipeline-test.el ends here
