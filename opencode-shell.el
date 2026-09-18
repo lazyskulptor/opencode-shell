@@ -1676,10 +1676,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (when (fboundp 'evil-normal-state)
       (evil-normal-state))))
 
-(defun opencode-shell--part-text (part)
-  "Return display text for message PART."
-  (opencode-shell-response-part-display-text part))
-
 (defun opencode-shell--message-text (envelope)
   "Return exact visible text from ENVELOPE's text parts."
   (mapconcat #'identity
@@ -1730,14 +1726,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                                        (opencode-shell--get incoming 'parts)))
     merged))
 
-(defun opencode-shell--terminal-part-p (part)
-  "Return non-nil when PART authoritatively ends an assistant turn."
-  (opencode-shell-response-terminal-part-p part))
-
-(defun opencode-shell--running-tool-part-p (part)
-  "Return non-nil when PART describes an unsettled tool invocation."
-  (opencode-shell-response-running-tool-p part))
-
 (defun opencode-shell--continuation-finish-p (finish)
   "Return non-nil when FINISH indicates more assistant steps will follow.
 On OpenCode 1.18.30, \"tool-calls\" is the only observed non-terminal value;
@@ -1756,19 +1744,9 @@ error, or nil."
         (if message (format "%s: %s" name message) name))
        200 nil nil t))))
 
-(defun opencode-shell--assistant-envelope-complete-p (envelope)
-  "Return non-nil when ENVELOPE contains authoritative completion evidence."
-  (opencode-shell-response-envelope-complete-p
-   (opencode-shell--get envelope 'info)
-   (opencode-shell--get envelope 'parts)))
-
 (defun opencode-shell--lifecycle-id (value)
   "Return VALUE as bounded operational metadata."
   (if value (truncate-string-to-width (format "%s" value) 80 nil nil t) "-"))
-
-(defun opencode-shell--part-state-label (part)
-  "Return a payload-free type and status label for PART."
-  (opencode-shell-response-part-state-label part))
 
 (defun opencode-shell--count-labels (labels)
   "Return sorted occurrence counts for payload-free LABELS."
@@ -1794,7 +1772,7 @@ error, or nil."
                        turns))
          (submit-turn (and opencode-shell--submit-in-flight
                            (opencode-shell--turn-by-id opencode-shell--submit-in-flight turns)))
-         (blocked-permission (opencode-shell--permission-blocked-p))
+         (blocked-permission (opencode-shell--human-interaction-blocked-p))
          (blockers (delq nil
                          (list (and blocked-permission "permission")
                                (and opencode-shell--submit-in-flight "submit")
@@ -1821,7 +1799,7 @@ error, or nil."
             (if finish (opencode-shell--lifecycle-id finish) "absent")
             (if completed "present" "absent")
             (or (opencode-shell--count-labels
-                 (mapcar #'opencode-shell--part-state-label parts)) "none")
+                 (mapcar #'opencode-shell-response-part-state-label parts)) "none")
             (opencode-shell--status opencode-shell--session-id)
             (length opencode-shell--permissions)
             (if (opencode-shell-interaction-active-p
@@ -1841,10 +1819,6 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
         (setq opencode-shell--last-lifecycle-signature summary)
         (opencode-shell--log "Lifecycle%s %s"
                              (if event (format "[%s]" event) "") summary)))))
-
-(defun opencode-shell--response-phase (turn)
-  "Return the nonterminal response phase for TURN's authoritative parts."
-  (opencode-shell-response-phase (opencode-shell--turn-parts turn)))
 
 (defun opencode-shell--turn-by-server-id (id turns)
   "Find the turn with server user ID ID in TURNS."
@@ -1878,8 +1852,10 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                                messages)))
          (last-envelope (cdr (car (last messages))))
          (complete (and last-envelope
-                        (opencode-shell--assistant-envelope-complete-p last-envelope)
-                        (not (seq-some #'opencode-shell--running-tool-part-p parts)))))
+                        (opencode-shell-response-envelope-complete-p
+                          (opencode-shell--get last-envelope 'info)
+                          (opencode-shell--get last-envelope 'parts))
+                        (not (seq-some #'opencode-shell-response-running-tool-p parts)))))
     (setf (opencode-shell--turn-parts turn) parts
           (opencode-shell--turn-assistant turn)
           (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
@@ -1892,7 +1868,8 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
           (opencode-shell--turn-status turn)
           (cond (complete 'complete)
                 ((opencode-shell--turn-locally-settled turn) 'complete)
-                (t (opencode-shell--response-phase turn)))
+                (t (opencode-shell-response-phase
+                     (opencode-shell--turn-parts turn))))
           (opencode-shell--turn-locally-settled turn)
           (and (opencode-shell--turn-locally-settled turn) (not complete)))
     turn))
@@ -2283,9 +2260,6 @@ Return a plist containing affected turns and whether a full render is required."
       (opencode-shell-interaction-active-p opencode-shell--interaction-state)
       opencode-shell--questions-pending))
 
-(defalias 'opencode-shell--permission-blocked-p
-  #'opencode-shell--human-interaction-blocked-p)
-
 (defun opencode-shell--session-permissions (items)
   "Return permission ITEMS belonging to the current session."
   (seq-filter
@@ -2536,7 +2510,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
            (opencode-shell--session-permissions items)))))
     (unless (equal permissions opencode-shell--permissions)
       (setq opencode-shell--permissions permissions)
-      (when (opencode-shell--permission-blocked-p)
+      (when (opencode-shell--human-interaction-blocked-p)
         (opencode-shell--start-polling))
       (if defer-render
           (opencode-shell--schedule-render "permissions")
@@ -2650,7 +2624,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 
 (defun opencode-shell--permission-status-turn ()
   "Return the latest nonterminal turn while permission blocks input."
-  (and (opencode-shell--permission-blocked-p)
+  (and (opencode-shell--human-interaction-blocked-p)
        (seq-find (lambda (turn)
                    (not (eq (opencode-shell--turn-status turn) 'complete)))
                  (reverse opencode-shell--turns))))
@@ -2934,7 +2908,7 @@ CHANGED-TURNS into the response blocks pending incremental update."
                     opencode-shell--turns)))
     (when (eq (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)))
-  (when (and (not (opencode-shell--permission-blocked-p))
+  (when (and (not (opencode-shell--human-interaction-blocked-p))
              (not (opencode-shell-state-polling-needed-p
                    (mapcar #'opencode-shell--turn-status opencode-shell--turns)
                    opencode-shell--submit-in-flight)))
@@ -3298,7 +3272,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
               opencode-shell--permissions id #'opencode-shell--permission-id))
        (opencode-shell--schedule-render "permission-reply-ok" t)
        (opencode-shell--refresh-permissions)
-       (unless (opencode-shell--permission-blocked-p)
+       (unless (opencode-shell--human-interaction-blocked-p)
          (opencode-shell--resync))
        (opencode-shell--log-lifecycle "permission-reply-ok")
        (message "Permission %s" reply))
@@ -3850,18 +3824,16 @@ ACTIVE means that their session browser is already live."
           (buffer-list))))
     (opencode-shell-async-reset)
     (let* ((main (or load-file-name (locate-library "opencode-shell")))
-         (directory (and main (file-name-directory main)))
-         (render (and directory (expand-file-name "opencode-shell-render.el" directory)))
-         (async (and directory (expand-file-name "opencode-shell-async.el" directory)))
-         (source (and directory (expand-file-name "opencode-shell.el" directory))))
-    (unless (and render async source
-                 (file-exists-p render)
-                 (file-exists-p async)
-                 (file-exists-p source))
-      (user-error "Cannot locate OpenCode Shell source files"))
-    (load render nil nil t)
-    (load async nil nil t)
-    (load source nil nil t)
+           (directory (and main (file-name-directory main)))
+           (names '("opencode-shell-render.el" "opencode-shell-async.el"
+                    "opencode-shell-state.el" "opencode-shell-interaction.el"
+                    "opencode-shell-response.el" "opencode-shell.el"))
+           (sources (and directory
+                         (mapcar (lambda (name) (expand-file-name name directory))
+                                 names))))
+      (unless (and sources (seq-every-p #'file-exists-p sources))
+        (user-error "Cannot locate OpenCode Shell source files"))
+      (dolist (source sources) (load source nil nil t))
     (when-let ((setting (locate-library "opencode-shell-setting")))
       (load setting nil nil t))
     (opencode-shell--register-profile-commands)

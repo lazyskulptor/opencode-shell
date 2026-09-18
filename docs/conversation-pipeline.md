@@ -20,7 +20,7 @@ command → observation → lifecycle → presentation
 - **Presentation** turns the current model into protected transcript regions,
   interaction cards, transient status, and one writable Composer.
 
-The target dependency direction is:
+The dependency direction is:
 
 ```
 opencode-shell-state.el
@@ -63,6 +63,9 @@ its existing incremental role and never substitutes for the initial snapshots.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
+`opencode-shell-reload` reloads the lower-level state, interaction, and response
+modules before the main mode so live development follows the same acyclic order
+as normal `require` loading.
 
 ## Non-negotiable contracts
 
