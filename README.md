@@ -109,10 +109,10 @@ confirmed delete. Child sessions created by subagents are hidden by default;
 use `T` to show or hide them without deleting their server history. `RET` uses
 the selected row's exact server-reported directory, which is
 then immutable for transcript history, prompts, aborts, permissions, questions,
-and status requests. A transcript buffer has a multiline composer after
-`Prompt> ` at its bottom; `RET` inserts a newline, while `C-c C-c` or `s-RET`
-submits it. Submitted prompts and polled responses above the composer are
-read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
+and status requests. A transcript buffer has a subtly highlighted multiline
+composer on the line below the read-only `Prompt>` label; `RET` inserts a
+newline, while `C-c C-c` or `s-RET` submits it. Submitted prompts and polled
+responses above the composer are read-only. Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
 both selections appear with the generated session title in the transcript header
 and affect subsequent prompt payloads. The title updates on session open and an
 explicit `g` resync when the session snapshot reports OpenCode's generated title.
@@ -182,7 +182,10 @@ newest-first server session. The session selector marks live transcripts as
 active and recent inactive sessions with distinct faces, then opens or reuses the
 selection like `find-file`.
 In transcript Evil normal state, `?` opens this help and `RET` submits the
-composer. Insert state keeps `?` as text input and `RET` as a newline.
+composer. Insert state keeps `?` as text input and `RET` as a newline. Native
+Evil edits such as `dd`, `I`, `A`, `o`, and `O` retain their standard behavior
+inside the composer. Entering insert state does not move point; editing from the
+transcript reports that the transcript is read-only.
 
 Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
 `C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`
@@ -200,10 +203,10 @@ Questions block prompt readiness until their authoritative snapshot clears, and
 each action immediately resyncs question and tool state.
 
 The session buffer uses normal text editing rather than `special-mode`. Only the
-bottom composer is writable; each submitted user prompt and its response are
+visible bottom composer is writable; each submitted user prompt and its response are
 separate read-only regions owned by a buffer-local turn record. Poll updates
 replace turn regions without changing composer text or point. Evil's ordinary
-insert commands are left intact and entering insert state focuses the composer.
+editing commands are left intact and are never redirected from protected text.
 Transcript, status, and interaction-card updates do not enter undo history.
 Submitting starts a fresh composer undo history, so undo cannot restore a sent
 draft; edits to the current draft remain normally undoable.
@@ -278,8 +281,10 @@ Run `make verify` before loading a changed checkout. It deletes stale bytecode,
 runs source ERT, compiles the package and tests, then runs compiled ERT.
 
 For a live check, restart Emacs, close old OpenCode transcript buffers, open or
-create a localhost session, enter insert state with several of `i`, `a`, `A`,
-`o`, and `O`, then submit two multiline Korean/Markdown prompts. Confirm each
+create a localhost session, exercise standard Evil edits such as `dd`, `I`, `A`,
+`o`, and `O` inside the highlighted composer, then submit two multiline
+Korean/Markdown prompts. Confirm that editing outside the composer reports the
+read-only warning without moving point, each
 submitted prompt and response is read-only, the bottom composer remains
 writable, and repeated spinner frames or unchanged polling do not move the cursor,
 scroll the window, alter undo behavior, or erase a draft being edited. Then leave

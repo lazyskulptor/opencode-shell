@@ -479,6 +479,7 @@ and lifecycle keys."
 (defvar-local opencode-shell--runtime-key nil)
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
+(defvar-local opencode-shell--composer-overlay nil)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--render-force nil)
@@ -584,6 +585,11 @@ and lifecycle keys."
 (defface opencode-shell-permission-face
   '((t :inherit warning :weight bold))
   "Face for pending permission requests." :group 'opencode-shell)
+(defface opencode-shell-composer-face
+  '((((class color) (background dark)) :background "#2f3338" :extend t)
+    (((class color) (background light)) :background "#f0f2f4" :extend t)
+    (t :inherit default))
+  "Subtle background face for the writable composer." :group 'opencode-shell)
 
 (cl-defstruct (opencode-shell--turn (:constructor opencode-shell--make-turn))
   id server-user-id user assistant parts assistant-messages status acknowledged user-begin user-end
@@ -1304,11 +1310,16 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     map)
   "Keymap for an inline pending question.")
 
-(defun opencode-shell--in-composer-p ()
+(defun opencode-shell--point-in-composer-p ()
   "Return non-nil when point is geometrically inside the composer."
   (and (markerp opencode-shell--composer-start)
        (marker-position opencode-shell--composer-start)
        (>= (point) opencode-shell--composer-start)))
+
+(defun opencode-shell--in-composer-p ()
+  "Return non-nil when point is in the visible writable composer."
+  (and (opencode-shell--composer-visible-p)
+       (opencode-shell--point-in-composer-p)))
 
 (defun opencode-shell--protect-transcript (begin end)
   "Reject user edits outside or crossing the visible composer boundary."
@@ -1390,6 +1401,41 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       'rear-nonsticky
                       '(read-only opencode-shell-composer-label))))
 
+(defun opencode-shell--composer-overlay-modified (overlay after &rest _ignored)
+  "Keep the empty-composer display line in sync with OVERLAY."
+  (when after
+    (overlay-put overlay 'after-string
+                 (when (= (overlay-start overlay) (overlay-end overlay))
+                   (propertize "\n" 'face
+                               'opencode-shell-composer-face)))))
+
+(defun opencode-shell--refresh-composer-overlay ()
+  "Show the composer background exactly over the visible editable region."
+  (if (and (opencode-shell--composer-visible-p)
+           (markerp opencode-shell--composer-start)
+           (marker-position opencode-shell--composer-start))
+      (progn
+        (unless (overlayp opencode-shell--composer-overlay)
+          (setq opencode-shell--composer-overlay
+                (make-overlay opencode-shell--composer-start (point-max)
+                              nil nil t)))
+        (move-overlay opencode-shell--composer-overlay
+                      opencode-shell--composer-start (point-max))
+        (overlay-put opencode-shell--composer-overlay
+                     'face 'opencode-shell-composer-face)
+        (dolist (property '(modification-hooks insert-in-front-hooks
+                              insert-behind-hooks))
+          (overlay-put opencode-shell--composer-overlay property
+                       '(opencode-shell--composer-overlay-modified)))
+        (overlay-put opencode-shell--composer-overlay 'after-string
+                     (when (= (overlay-start opencode-shell--composer-overlay)
+                              (overlay-end opencode-shell--composer-overlay))
+                       (propertize "\n" 'face
+                                   'opencode-shell-composer-face))))
+    (when (overlayp opencode-shell--composer-overlay)
+      (delete-overlay opencode-shell--composer-overlay))
+    (setq opencode-shell--composer-overlay nil)))
+
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
@@ -1415,10 +1461,13 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           opencode-shell--permission-end (copy-marker (point) nil)
           opencode-shell--permission-status-begin (copy-marker (point) nil)
            opencode-shell--permission-status-end (copy-marker (point) nil)))
+  (opencode-shell--refresh-composer-overlay)
   ;; Mode-owned scaffolding must never become the first undoable transcript edit.
   (setq buffer-undo-list nil)
   (goto-char (point-max))
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
+  (add-hook 'evil-insert-state-entry-hook
+            #'opencode-shell--guard-evil-insert-state nil t)
   (add-hook 'window-configuration-change-hook
             #'opencode-shell--refresh-table-layout nil t)
   (add-hook 'window-configuration-change-hook
@@ -1438,6 +1487,9 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
      opencode-shell--runtime-key (current-buffer)))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (opencode-shell--clear-spinner-overlays)
+  (when (overlayp opencode-shell--composer-overlay)
+    (delete-overlay opencode-shell--composer-overlay))
+  (setq opencode-shell--composer-overlay nil)
   (setq opencode-shell--runtime-key nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
@@ -2258,7 +2310,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   "Render pending permissions as one boxed read-only region before composer."
   (opencode-shell--without-user-undo
    (let* ((draft (opencode-shell--composer-text))
-         (offset (and (opencode-shell--in-composer-p)
+         (offset (and (opencode-shell--point-in-composer-p)
                       (- (point) opencode-shell--composer-start)))
           (inhibit-read-only t))
     (save-excursion
@@ -2333,6 +2385,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
       (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
     (unless (equal draft (opencode-shell--composer-text))
       (error "Permission rendering changed composer text"))))
+  (opencode-shell--refresh-composer-overlay)
   (opencode-shell--refresh-spinner-overlays))
 
 (defun opencode-shell--refresh-permissions ()
@@ -2378,11 +2431,12 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 (defun opencode-shell--replace-composer (text &optional offset)
   "Replace the composer with TEXT and place point at OFFSET or its end."
   (opencode-shell--without-user-undo
-   (let ((inhibit-read-only t))
-    (delete-region opencode-shell--composer-start (point-max))
-    (goto-char opencode-shell--composer-start)
-    (insert text)
-     (goto-char (+ opencode-shell--composer-start (or offset (length text)))))))
+    (let ((inhibit-read-only t))
+      (delete-region opencode-shell--composer-start (point-max))
+      (goto-char opencode-shell--composer-start)
+      (insert text)
+      (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
+  (opencode-shell--refresh-composer-overlay))
 
 (defun opencode-shell--discard-turn-markers (turn)
   "Detach all rendered region markers owned by TURN."
@@ -2610,7 +2664,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 When FORCE is non-nil, rebuild every turn so anchored event positions settle.
 Otherwise update only CHANGED-TURNS when that list is non-nil."
   (opencode-shell--without-user-undo
-   (let* ((composer-offset (and (opencode-shell--in-composer-p)
+   (let* ((composer-offset (and (opencode-shell--point-in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
          (composer-text (opencode-shell--composer-text))
          (old-point (point))
@@ -3203,6 +3257,31 @@ When FULL is non-nil, also refresh metadata and capabilities."
        (opencode-shell--resync nil)
        (message "Question rejection failed")))))
 
+(defun opencode-shell--guard-evil-insert-state ()
+  "Keep Evil out of insert state outside the visible composer."
+  (unless (opencode-shell--in-composer-p)
+    (declare-function evil-normal-state "evil-states")
+    (evil-normal-state)
+    (user-error "OpenCode transcript is read-only")))
+
+(defun opencode-shell--evil-open-below ()
+  "Open below point, entering an immediately adjacent composer."
+  (interactive)
+  (declare-function evil-open-below "evil-commands")
+  (declare-function evil-insert-state "evil-states")
+  (cond
+   ((opencode-shell--in-composer-p)
+    (call-interactively #'evil-open-below))
+   ((and (opencode-shell--composer-visible-p)
+         (< (point) opencode-shell--composer-start)
+         (= (1+ (line-end-position)) opencode-shell--composer-start))
+    (goto-char opencode-shell--composer-start)
+    (insert "\n")
+    (goto-char opencode-shell--composer-start)
+    (evil-insert-state))
+   (t
+    (user-error "OpenCode transcript is read-only"))))
+
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."
   (declare-function evil-set-initial-state "evil-core")
@@ -3217,7 +3296,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "?") #'opencode-shell-help
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
-    (kbd "C-c C-m") #'opencode-shell--select-agent)
+    (kbd "C-c C-m") #'opencode-shell--select-agent
+    (kbd "o") #'opencode-shell--evil-open-below)
   (evil-define-key* 'insert opencode-shell-mode-map
     (kbd "?") #'self-insert-command
     (kbd "RET") #'newline
@@ -3664,6 +3744,7 @@ ACTIVE means that their session browser is already live."
           (use-local-map opencode-shell-mode-map)
           (setq-local header-line-format '(:eval (opencode-shell--header))
                       mode-line-process '(:eval (opencode-shell--mode-line-status)))
+          (opencode-shell--refresh-composer-overlay)
           (when (markerp opencode-shell--composer-start)
             (goto-char (point-max)))))))
       (dolist (buffer active-buffers)

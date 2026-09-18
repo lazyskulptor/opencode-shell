@@ -45,3 +45,6 @@
   stale work after mode transitions, coalesce update/removal events by entity,
   scope unsupported-event reconciliation by resource, and cascade user-message
   removals through locally indexed assistant children.
+- Separate and subtly highlight the multiline composer below `Prompt>`, preserve
+  native Evil editing inside it, and reject edits elsewhere without relocating
+  point or allowing writes while the composer is hidden.
