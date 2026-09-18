@@ -52,6 +52,16 @@
       (should (< (point) opencode-shell--composer-start))
       (should-error (insert "blocked") :type 'text-read-only))))
 
+(ert-deftest opencode-shell-acceptance-empty-composer-point-survives-render ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (goto-char opencode-shell--composer-start)
+    (should (= (point) (point-max)))
+    (opencode-shell--render-turns)
+    (should (= (point) opencode-shell--composer-start))
+    (should (= (point) (point-max)))
+    (should (local-variable-p 'evil-move-beyond-eol))))
+
 (ert-deftest opencode-shell-acceptance-queued-response-preserves-active-draft ()
   (with-temp-buffer
     (opencode-shell-mode)

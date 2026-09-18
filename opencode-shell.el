@@ -1494,6 +1494,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           opencode-shell--permission-status-begin (copy-marker (point) nil)
            opencode-shell--permission-status-end (copy-marker (point) nil)))
   (opencode-shell--refresh-composer-overlay)
+  (opencode-shell--configure-evil-buffer)
   ;; Mode-owned scaffolding must never become the first undoable transcript edit.
   (setq buffer-undo-list nil)
   (goto-char (point-max))
@@ -3296,23 +3297,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (evil-normal-state)
     (user-error "OpenCode transcript is read-only")))
 
-(defun opencode-shell--evil-open-below ()
-  "Open below point, entering an immediately adjacent composer."
-  (interactive)
-  (declare-function evil-open-below "evil-commands")
-  (declare-function evil-insert-state "evil-states")
-  (cond
-   ((opencode-shell--in-composer-p)
-    (call-interactively #'evil-open-below))
-   ((and (opencode-shell--composer-visible-p)
-         (< (point) opencode-shell--composer-start)
-         (= (1+ (line-end-position)) opencode-shell--composer-start))
-    (goto-char opencode-shell--composer-start)
-    (insert "\n")
-    (goto-char opencode-shell--composer-start)
-    (evil-insert-state))
-   (t
-    (user-error "OpenCode transcript is read-only"))))
+(defvar evil-move-beyond-eol nil)
+
+(defun opencode-shell--configure-evil-buffer ()
+  "Apply Evil policy local to an OpenCode transcript buffer."
+  (setq-local evil-move-beyond-eol t))
 
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."
@@ -3328,8 +3317,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "?") #'opencode-shell-help
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
-    (kbd "C-c C-m") #'opencode-shell--select-agent
-    (kbd "o") #'opencode-shell--evil-open-below)
+    (kbd "C-c C-m") #'opencode-shell--select-agent)
   (evil-define-key* 'insert opencode-shell-mode-map
     (kbd "?") #'self-insert-command
     (kbd "RET") #'newline
@@ -3776,9 +3764,8 @@ ACTIVE means that their session browser is already live."
           (use-local-map opencode-shell-mode-map)
           (setq-local header-line-format '(:eval (opencode-shell--header))
                       mode-line-process '(:eval (opencode-shell--mode-line-status)))
-          (opencode-shell--refresh-composer-overlay)
-          (when (markerp opencode-shell--composer-start)
-            (goto-char (point-max)))))))
+          (opencode-shell--configure-evil-buffer)
+          (opencode-shell--refresh-composer-overlay)))))
       (dolist (buffer active-buffers)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer

@@ -1399,34 +1399,21 @@
         (while remaining
           (push (car remaining) keys)
           (setq remaining (cddr remaining))))
-      (dolist (key '("d" "i" "I" "a" "A" "O"))
-        (should-not (member (kbd key) keys)))
-      (should (eq (cadr (member (kbd "o") bindings))
-                  #'opencode-shell--evil-open-below)))))
+      (dolist (key '("d" "i" "I" "a" "A" "o" "O" "j" "k"))
+        (should-not (member (kbd key) keys))))))
 
-(ert-deftest opencode-shell-evil-open-crosses-only-adjacent-composer-boundary ()
-  (with-temp-buffer
-    (opencode-shell-mode)
-    (insert "draft")
-    (let (entered delegated)
-      (cl-letf (((symbol-function 'evil-insert-state)
-                 (lambda () (setq entered t)))
-                ((symbol-function 'evil-open-below)
-                 (lambda () (interactive) (setq delegated t))))
-        (goto-char (1- opencode-shell--composer-start))
-        (opencode-shell--evil-open-below)
-        (should entered)
-        (should (= (point) opencode-shell--composer-start))
-        (should (equal (opencode-shell--composer-text) "\ndraft"))
-        (goto-char (point-max))
-        (opencode-shell--evil-open-below)
-        (should delegated)
-        (let ((inhibit-read-only t)
-              (opencode-shell--internal-edit t))
-          (goto-char (point-min))
-          (insert "older transcript\n"))
-        (goto-char (point-min))
-        (should-error (opencode-shell--evil-open-below) :type 'user-error)))))
+(ert-deftest opencode-shell-configures-evil-buffer-locally ()
+  (let ((original (default-value 'evil-move-beyond-eol)))
+    (unwind-protect
+        (progn
+          (set-default 'evil-move-beyond-eol nil)
+          (with-temp-buffer
+            (opencode-shell-mode)
+            (should (local-variable-p 'evil-move-beyond-eol))
+            (should (symbol-value 'evil-move-beyond-eol))
+            (should (= opencode-shell--composer-start (point-max))))
+          (should-not (default-value 'evil-move-beyond-eol)))
+      (set-default 'evil-move-beyond-eol original))))
 
 (ert-deftest opencode-shell-evil-insert-state-stays-outside-composer ()
   (with-temp-buffer
@@ -3139,6 +3126,22 @@
                           (normal ,(kbd "d") opencode-shell--delete-session)
                           (normal ,(kbd "?") opencode-shell-sessions-help)))
         (should (member expected bindings))))))
+
+(ert-deftest opencode-shell-reload-reconfigures-evil-buffer-locally ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local evil-move-beyond-eol nil)
+    (cl-letf (((symbol-function 'load) (lambda (&rest _) nil))
+              ((symbol-function 'opencode-shell--register-profile-commands) #'ignore)
+              ((symbol-function 'locate-library)
+               (lambda (library)
+                 (expand-file-name
+                  (if (equal library "opencode-shell-setting")
+                      "opencode-shell-setting.el"
+                    "opencode-shell.el")
+                  default-directory))))
+      (opencode-shell-reload)
+      (should evil-move-beyond-eol))))
 
 (ert-deftest opencode-shell-reload-refreshes-existing-buffer-local-map ()
   (let (loaded)
