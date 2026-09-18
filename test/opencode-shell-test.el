@@ -501,7 +501,8 @@
         (should (member '("POST" "/question/q1/reply" ((answers . [["A"]])))
                         requests))
         (should (equal resyncs '(nil)))
-        (should-not opencode-shell--question-sending)
+        (should-not (opencode-shell-interaction-active-p
+                      opencode-shell--interaction-state 'question))
         (should-not opencode-shell--questions-pending)))))
 
 (ert-deftest opencode-shell-permission-replies-and-presentation ()

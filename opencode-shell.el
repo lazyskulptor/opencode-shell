@@ -552,7 +552,6 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--resolved-permissions nil)
 (defvar-local opencode-shell--permission-refresh-pending nil)
 (defvar-local opencode-shell--questions-pending nil)
-(defvar-local opencode-shell--question-sending nil)
 (defvar-local opencode-shell--question-refresh-pending nil)
 (defvar-local opencode-shell--last-lifecycle-signature nil)
 (defvar-local opencode-shell--table-render-width nil)
@@ -1199,7 +1198,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (user-error "No OpenCode session in this buffer"))
   (when (or opencode-shell--submit-in-flight
             (opencode-shell-interaction-active-p opencode-shell--interaction-state)
-            opencode-shell--question-sending
             opencode-shell--permissions
             opencode-shell--questions-pending
             (seq-some (lambda (turn)
@@ -2285,7 +2283,7 @@ This compatibility adapter remains true until hydration is tracked explicitly."
   "Return non-nil while a human interaction blocks new input."
   (or opencode-shell--permissions
       (opencode-shell-interaction-active-p opencode-shell--interaction-state)
-      opencode-shell--questions-pending opencode-shell--question-sending))
+      opencode-shell--questions-pending))
 
 (defalias 'opencode-shell--permission-blocked-p
   #'opencode-shell--human-interaction-blocked-p)
@@ -3345,7 +3343,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
 
 (defun opencode-shell--question-reply (item confirm)
   "Answer ITEM, prompting for rejection first when CONFIRM is non-nil."
-  (when opencode-shell--question-sending
+  (when (opencode-shell-interaction-active-p
+         opencode-shell--interaction-state 'question)
     (user-error "Question reply already in progress"))
   (if (and confirm (not (yes-or-no-p "Answer this question? (No rejects) ")))
       (opencode-shell--question-reject item)
@@ -3354,48 +3353,41 @@ When FULL is non-nil, also refresh metadata and capabilities."
                      (mapcar #'opencode-shell--question-answer
                              (or (opencode-shell--get item 'questions)
                                  (list item))))))
-      (setq opencode-shell--question-sending id)
-      (opencode-shell--request
-       "POST" (format "/question/%s/reply" id)
+      (opencode-shell--interaction-request
+       'question id "POST" (format "/question/%s/reply" id)
        (lambda (_)
-         (setq opencode-shell--question-sending nil
-               opencode-shell--questions-pending
-               (seq-remove (lambda (entry)
-                            (equal id (opencode-shell--question-id entry)))
-                           opencode-shell--questions-pending))
+         (setq opencode-shell--questions-pending
+               (opencode-shell-interaction-remove-pending
+                opencode-shell--questions-pending id #'opencode-shell--question-id))
          (opencode-shell--schedule-render "question-reply")
          (opencode-shell--resync nil)
          (message "Question reply sent"))
-       `((answers . ,answers)) nil
+       `((answers . ,answers))
        (lambda ()
-         (setq opencode-shell--question-sending nil)
          (opencode-shell--resync nil)
          (message "Question reply failed"))))))
 
 (defun opencode-shell--question-reject (&optional item)
   "Reject pending question ITEM or the current inline question."
   (interactive)
-  (when opencode-shell--question-sending
+  (when (opencode-shell-interaction-active-p
+         opencode-shell--interaction-state 'question)
     (user-error "Question reply already in progress"))
   (setq item (or item (get-text-property (point) 'opencode-shell-question)
                  (car opencode-shell--questions-pending)
                  (user-error "No pending question")))
   (let ((id (opencode-shell--question-id item)))
-    (setq opencode-shell--question-sending id)
-    (opencode-shell--request
-     "POST" (format "/question/%s/reject" id)
+    (opencode-shell--interaction-request
+     'question id "POST" (format "/question/%s/reject" id)
      (lambda (_)
-       (setq opencode-shell--question-sending nil
-             opencode-shell--questions-pending
-             (seq-remove (lambda (entry)
-                         (equal id (opencode-shell--question-id entry)))
-                        opencode-shell--questions-pending))
+       (setq opencode-shell--questions-pending
+             (opencode-shell-interaction-remove-pending
+              opencode-shell--questions-pending id #'opencode-shell--question-id))
        (opencode-shell--schedule-render "question-reject")
        (opencode-shell--resync nil)
        (message "Question rejected"))
-     '() nil
+     '()
      (lambda ()
-       (setq opencode-shell--question-sending nil)
        (opencode-shell--resync nil)
        (message "Question rejection failed")))))
 

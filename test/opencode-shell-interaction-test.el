@@ -46,5 +46,11 @@
               pending "missing" (lambda (item) (alist-get 'id item)))
              pending))))
 
+(ert-deftest opencode-shell-interaction-allows-concurrent-different-kinds ()
+  (should (equal
+           (opencode-shell-interaction-begin
+            '((permission . "p1")) 'question "q1")
+           '((permission . "p1") (question . "q1")))))
+
 (provide 'opencode-shell-interaction-test)
 ;;; opencode-shell-interaction-test.el ends here

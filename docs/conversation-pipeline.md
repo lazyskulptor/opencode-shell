@@ -43,8 +43,9 @@ ID-based pending removal. The major mode wraps transport with those primitives:
 only a matching callback may settle or apply a permission outcome, so a stale
 callback cannot clear a newer request. Permission policy, resolved records,
 anchors, refreshes, logs, and user messages remain explicit in
-`opencode-shell.el`; question requests retain their legacy path until their
-separate migration.
+`opencode-shell.el`. Permission and question operations may run concurrently,
+but duplicate operations of the same kind are rejected. Their endpoint,
+payload, confirmation, refreshes, and user-message policies remain separate.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.

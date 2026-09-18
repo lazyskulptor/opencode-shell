@@ -97,5 +97,48 @@
         (should (equal completed '("p2" "p1")))
         (should-not opencode-shell--interaction-state)))))
 
+(ert-deftest opencode-shell-pipeline-question-request-blocks-until-callback ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--questions-pending
+          '(((id . "q1") (sessionID . "s") (question . "Choose")
+             (options . (((label . "A")))))))
+    (let (callback request)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "A"))
+                ((symbol-function 'opencode-shell--resync) #'ignore)
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (method path success &optional body &rest _)
+                   (setq callback success request (list method path body)))))
+        (opencode-shell--questions)
+        (should (equal request
+                       '("POST" "/question/q1/reply" ((answers . [["A"]])))))
+        (should (opencode-shell-interaction-active-p
+                 opencode-shell--interaction-state 'question))
+        (setq opencode-shell--questions-pending nil)
+        (should-not (opencode-shell--composer-visible-p))
+        (funcall callback nil)
+        (should-not opencode-shell--interaction-state)
+        (should (opencode-shell--composer-visible-p))))))
+
+(ert-deftest opencode-shell-pipeline-question-failure-clears-only-in-flight-state ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((item '((id . "q1") (question . "Choose")))
+           (opencode-shell--questions-pending (list item))
+           error-callback resyncs)
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&optional full) (push full resyncs)))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path _success &optional _body _params failure)
+                   (setq error-callback failure))))
+        (opencode-shell--question-reject item)
+        (should (opencode-shell-interaction-active-p
+                 opencode-shell--interaction-state 'question))
+        (funcall error-callback)
+        (should-not opencode-shell--interaction-state)
+        (should (equal opencode-shell--questions-pending (list item)))
+        (should (equal resyncs '(nil)))))))
+
 (provide 'opencode-shell-pipeline-test)
 ;;; opencode-shell-pipeline-test.el ends here
