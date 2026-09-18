@@ -41,7 +41,9 @@ For a local development checkout, evaluate the following in Emacs:
 
 Use `M-x opencode-shell-log` to inspect privacy-safe lifecycle diagnostics when
 troubleshooting. See [Contributing](CONTRIBUTING.md) for development workflow and
-[the async runtime design](docs/async-runtime.md) for synchronization guarantees.
+[the conversation pipeline](docs/conversation-pipeline.md),
+[testing guide](docs/testing.md), and
+[async runtime design](docs/async-runtime.md) for detailed contributor contracts.
 
 ## Installation and configuration
 

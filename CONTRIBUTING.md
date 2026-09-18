@@ -18,6 +18,12 @@ Thanks for improving the Emacs client.
 4. Run `make verify` before submitting a pull request. It runs source tests,
    byte-compilation, and compiled tests.
 
+Choose the owner before editing: pure lifecycle and hydration belong in
+`opencode-shell-state.el`, interaction identity in `opencode-shell-interaction.el`,
+assistant-part semantics in `opencode-shell-response.el`, and commands/network/
+markers/presentation in `opencode-shell.el`. The detailed map and change recipes
+are in [`docs/conversation-pipeline.md`](docs/conversation-pipeline.md).
+
 ## Change guidelines
 
 - Preserve the asynchronous runtime contracts in
@@ -25,6 +31,8 @@ Thanks for improving the Emacs client.
   on interactive paths, no callback-time UI rendering, and no raw event logging.
 - Add deterministic ERT coverage for behavior changes. Include regression tests
   for ordering, editor-state preservation, or hidden-buffer behavior when relevant.
+- Follow `RED → GREEN → REFACTOR → VERIFY`; see
+  [`docs/testing.md`](docs/testing.md) for focused commands and suite ownership.
 - Keep user-facing documentation current when commands, configuration, lifecycle,
   protocol, or privacy behavior changes.
 - Follow the surrounding Emacs Lisp style and keep public symbols documented.

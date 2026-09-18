@@ -4,6 +4,10 @@ OpenCode Shell treats Emacs input latency as a correctness property. Network
 activity, background sessions, and event bursts must not make editing the
 composer noticeably pause.
 
+This document owns runtime concurrency. See
+[conversation-pipeline.md](conversation-pipeline.md) for state/presentation
+ownership and [testing.md](testing.md) for deterministic callback tests.
+
 ## Invariants
 
 1. Interactive and timer hot paths never perform synchronous network or process
