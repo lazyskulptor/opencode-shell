@@ -102,13 +102,13 @@
             (setq opencode-shell--session-id "acceptance-stability")
             (opencode-shell--render-messages
              opencode-shell-test--active-transcript-snapshot 1)
+            (goto-char opencode-shell--composer-start)
+            (insert "작성 중인 초안")
+            (goto-char (+ opencode-shell--composer-start 4))
             (opencode-shell--receive-permissions
              opencode-shell-test--pending-permission-snapshot)
             (opencode-shell--receive-questions
              opencode-shell-test--pending-question-snapshot)
-            (goto-char opencode-shell--composer-start)
-            (insert "작성 중인 초안")
-            (goto-char (+ opencode-shell--composer-start 4))
             (set-window-start window (point-min))
             (let ((text (buffer-string))
                   (tick (buffer-chars-modified-tick))

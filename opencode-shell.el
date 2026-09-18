@@ -492,6 +492,9 @@ and lifecycle keys."
 (defvar-local opencode-shell--turn-counter 0)
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
+(defvar-local opencode-shell--internal-edit nil)
+(defconst opencode-shell--composer-label "Prompt>\n"
+  "Read-only label displayed immediately above the composer.")
 (defvar-local opencode-shell--request-status "idle")
 (defvar-local opencode-shell--message-request-sequence 0)
 (defvar-local opencode-shell--message-applied-sequence 0)
@@ -1302,17 +1305,18 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Keymap for an inline pending question.")
 
 (defun opencode-shell--in-composer-p ()
-  "Return non-nil when point is in the writable composer."
+  "Return non-nil when point is geometrically inside the composer."
   (and (markerp opencode-shell--composer-start)
        (marker-position opencode-shell--composer-start)
        (>= (point) opencode-shell--composer-start)))
 
 (defun opencode-shell--protect-transcript (begin end)
-  "Reject user edits before or crossing the composer boundary."
-  (when (and (not inhibit-read-only)
+  "Reject user edits outside or crossing the visible composer boundary."
+  (when (and (not opencode-shell--internal-edit)
              (markerp opencode-shell--composer-start)
              (marker-position opencode-shell--composer-start)
-             (or (< begin opencode-shell--composer-start)
+             (or (not (opencode-shell--composer-visible-p))
+                 (< begin opencode-shell--composer-start)
                  (< end opencode-shell--composer-start)))
     (signal 'text-read-only (list "OpenCode transcript is read-only"))))
 
@@ -1357,9 +1361,10 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 (defmacro opencode-shell--without-user-undo (&rest body)
   "Run BODY without adding package edits to the user's undo history."
   (declare (indent 0) (debug t))
-  `(if (eq buffer-undo-list t)
-       (progn ,@body)
-     (let ((saved-undo buffer-undo-list)
+  `(let ((opencode-shell--internal-edit t))
+     (if (eq buffer-undo-list t)
+         (progn ,@body)
+       (let ((saved-undo buffer-undo-list)
            (old-composer-start (and (markerp opencode-shell--composer-start)
                                     (marker-position opencode-shell--composer-start)))
            result)
@@ -1374,8 +1379,16 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                            (opencode-shell--shift-undo-entry
                             entry old-composer-start delta))
                          saved-undo))))
-       (setq buffer-undo-list saved-undo)
-       result)))
+         (setq buffer-undo-list saved-undo)
+         result))))
+
+(defun opencode-shell--insert-composer-label ()
+  "Insert the immutable label immediately before the composer."
+  (insert (propertize opencode-shell--composer-label
+                      'read-only t
+                      'opencode-shell-composer-label t
+                      'rear-nonsticky
+                      '(read-only opencode-shell-composer-label))))
 
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
@@ -1395,9 +1408,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (let ((inhibit-read-only t)
         (buffer-undo-list t))
     (erase-buffer)
-    (insert (propertize "Prompt> " 'read-only t
-                        'opencode-shell-composer-label t
-                        'rear-nonsticky '(read-only opencode-shell-composer-label)))
+    (opencode-shell--insert-composer-label)
     (setq opencode-shell--composer-start (copy-marker (point) nil)
           opencode-shell--transcript-end (copy-marker (point) nil)
           opencode-shell--permission-begin (copy-marker (point) nil)
@@ -2254,12 +2265,16 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
       (when-let ((label-pos (text-property-any
                             (point-min) opencode-shell--composer-start
                             'opencode-shell-composer-label t)))
-        (delete-region label-pos (+ label-pos (length "Prompt> ")))
+        (delete-region label-pos
+                       (+ label-pos (length opencode-shell--composer-label)))
         (setq opencode-shell--composer-label-visible nil))
       (goto-char opencode-shell--permission-begin)
       (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
-      (when (looking-back "Prompt> " (line-beginning-position))
-        (delete-region (- (point) (length "Prompt> ")) (point)))
+      (when (looking-back (regexp-quote opencode-shell--composer-label)
+                          (max (point-min)
+                               (- (point) (length opencode-shell--composer-label))))
+        (delete-region (- (point) (length opencode-shell--composer-label))
+                       (point)))
       (set-marker opencode-shell--permission-begin (point))
       (dolist (item (seq-take (opencode-shell--deduplicate-permissions
                                opencode-shell--permissions) 1))
@@ -2310,9 +2325,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
       (set-marker opencode-shell--permission-status-end (point))
       (set-marker opencode-shell--permission-end (point))
       (when (opencode-shell--composer-visible-p)
-        (insert (propertize "Prompt> " 'read-only t
-                            'opencode-shell-composer-label t
-                            'rear-nonsticky '(read-only opencode-shell-composer-label))))
+        (opencode-shell--insert-composer-label))
       (setq opencode-shell--composer-label-visible
             (opencode-shell--composer-visible-p))
       (set-marker opencode-shell--composer-start (point)))
@@ -2637,8 +2650,10 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
                  opencode-shell--composer-label-visible
-                 (>= opencode-shell--composer-start (length "Prompt> ")))
-        (delete-region (- opencode-shell--composer-start (length "Prompt> "))
+                 (>= opencode-shell--composer-start
+                     (length opencode-shell--composer-label)))
+        (delete-region (- opencode-shell--composer-start
+                          (length opencode-shell--composer-label))
                        opencode-shell--composer-start)
         (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
@@ -2649,11 +2664,10 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
         (when-let ((label-pos (text-property-any
                               (point-min) opencode-shell--composer-start
                               'opencode-shell-composer-label t)))
-          (delete-region label-pos (+ label-pos (length "Prompt> "))))
+          (delete-region label-pos
+                         (+ label-pos (length opencode-shell--composer-label))))
         (goto-char opencode-shell--composer-start)
-        (insert (propertize "Prompt> " 'read-only t
-                            'opencode-shell-composer-label t
-                            'rear-nonsticky '(read-only opencode-shell-composer-label)))
+        (opencode-shell--insert-composer-label)
         (setq opencode-shell--composer-label-visible t))
       (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
       (save-excursion

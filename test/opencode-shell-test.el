@@ -833,6 +833,9 @@
                                             :assistant "" :status 'waiting)))
       (setq opencode-shell--turns (list turn))
       (opencode-shell--render-turns)
+      (goto-char opencode-shell--composer-start)
+      (insert "draft")
+      (goto-char (+ opencode-shell--composer-start 2))
       (opencode-shell--receive-permissions
        '(((id . "p1") (sessionID . "s") (permission . "bash")
           (patterns . ("git diff --check")))))
@@ -887,15 +890,11 @@
                     (point))))
        (should (< (opencode-shell--turn-user-end turn)
                   (opencode-shell--turn-response-begin turn)))
-      (goto-char opencode-shell--composer-start)
-      (insert "draft")
-      (goto-char (+ opencode-shell--composer-start 2))
       (setq opencode-shell--turns nil
             opencode-shell--rendered-turns (list turn))
       (opencode-shell--render-turns)
       (should (= 1 (how-many "PERMISSION ALWAYS" (point-min) (point-max))))
-      (should (equal "draft" (opencode-shell--composer-text)))
-      (should (= 2 (- (point) opencode-shell--composer-start))))))
+      (should (equal "draft" (opencode-shell--composer-text))))))
 
 (ert-deftest opencode-shell-reply-success-refreshes-permissions-even-when-blocked ()
   (with-temp-buffer
@@ -1275,11 +1274,11 @@
      (list (opencode-shell-test--message "u1" "user" "q")
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-    (opencode-shell--receive-permissions
-     '(((id . "p") (sessionID . "s") (permission . "bash"))))
     (goto-char opencode-shell--composer-start)
     (insert "draft")
     (goto-char (+ opencode-shell--composer-start 2))
+    (opencode-shell--receive-permissions
+     '(((id . "p") (sessionID . "s") (permission . "bash"))))
     (dotimes (_ 20) (opencode-shell--animation-tick))
     (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))
     (should (= 1 (how-many "Receiving" (point-min) (point-max))))
@@ -1900,7 +1899,7 @@
      (cadr opencode-shell-test--completion-polling-snapshots) 3)
     (should-not opencode-shell--submit-in-flight)
     (should opencode-shell--composer-visible)
-    (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
+    (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
   (with-temp-buffer
@@ -1977,7 +1976,7 @@
            (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
     (set-marker (opencode-shell--turn-user-begin (car opencode-shell--turns)) nil)
     (opencode-shell--render-turns)
-    (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))
+    (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-stale-response-marker-triggers-full-rerender ()
   (with-temp-buffer
@@ -2003,12 +2002,12 @@
             opencode-shell--composer-visible nil)
       (opencode-shell--render-turns)
       (should (= 1 (how-many "USER>" (point-min) (point-max))))
-      (should (= 0 (how-many "Prompt> " (point-min) (point-max))))
+      (should (= 0 (how-many "Prompt>\n" (point-min) (point-max))))
       (setf (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)
       (setq opencode-shell--composer-visible t)
       (opencode-shell--render-turns)
-      (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))))
+      (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
 
 (ert-deftest opencode-shell-identical-completed-poll-is-render-no-op ()
   (with-temp-buffer
@@ -2020,12 +2019,13 @@
              (begin (opencode-shell--turn-response-begin turn))
              (end (opencode-shell--turn-response-end turn))
              (before (buffer-string)))
-        (let ((inhibit-read-only t))
+        (let ((inhibit-read-only t)
+              (opencode-shell--internal-edit t))
           (add-text-properties begin end '(opencode-shell-render-token t)))
         (opencode-shell--render-messages messages)
         (should (equal before (buffer-string)))
          (should (get-text-property begin 'opencode-shell-render-token))
-         (should (= 1 (how-many "Prompt> " (point-min) (point-max))))))))
+         (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))))
 
 (ert-deftest opencode-shell-identical-active-poll-does-not-schedule-render ()
   (with-temp-buffer
@@ -2361,7 +2361,7 @@
       (opencode-shell--render-messages messages)
       (should-not opencode-shell--submit-in-flight)
       (should opencode-shell--composer-visible)
-      (should (= 1 (how-many "Prompt> " (point-min) (point-max)))))))
+      (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
 
 (ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
   (let* ((known '((id . "p1") (type . "tool") (tool . "read")
@@ -2376,6 +2376,9 @@
 (ert-deftest opencode-shell-composer-boundary-is-multiline-and-transcript-read-only ()
   (with-temp-buffer
     (opencode-shell-mode)
+    (should (equal (buffer-substring-no-properties
+                    (point-min) opencode-shell--composer-start)
+                   opencode-shell--composer-label))
     (insert "first\nsecond")
     (should (equal (opencode-shell--composer-text) "first\nsecond"))
     (opencode-shell--render-messages
@@ -2401,6 +2404,16 @@
     (insert "\nthird")
     (should (equal (opencode-shell--composer-text) "first\nsecond\nthird"))))
 
+(ert-deftest opencode-shell-hidden-composer-rejects-user-edits ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--composer-visible nil)
+    (opencode-shell--render-turns)
+    (goto-char (point-max))
+    (should-error (let ((inhibit-read-only t)) (insert "blocked"))
+                  :type 'text-read-only)
+    (should (string-empty-p (opencode-shell--composer-text)))))
+
 (ert-deftest opencode-shell--submit-commits-clears-and-restores-on-failure ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2422,11 +2435,12 @@
         (should (equal (opencode-shell--turn-user (car opencode-shell--turns)) "hello\nworld"))
         (should (eq (get-text-property (point-min) 'read-only) t))
         (funcall failure)
-        (insert "retry")
+        (should-error (let ((inhibit-read-only t)) (insert "retry"))
+                      :type 'text-read-only)
         (should-error (opencode-shell--submit) :type 'user-error)
-        (should (equal (opencode-shell--composer-text) "retry"))
+        (should (string-empty-p (opencode-shell--composer-text)))
         (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'recovering))
-         (should (equal opencode-shell--request-status "recovering"))))))
+        (should (equal opencode-shell--request-status "recovering"))))))
 
 (ert-deftest opencode-shell-transcript-renders-preserve-composer-undo ()
   (with-temp-buffer
@@ -2439,11 +2453,14 @@
            (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
     (opencode-shell--receive-permissions
      '(((id . "p1") (permission . "bash") (patterns . ("git status")))))
+    (setq opencode-shell--permissions nil
+          opencode-shell--composer-visible t)
+    (opencode-shell--render-permissions)
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
     (should (= 1 (how-many "USER>" (point-min) (point-max))))
     (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
-    (should (= 1 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
+    (should (= 0 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-mode-and-initial-transcript-have-no-undo-history ()
   (let ((buffer (generate-new-buffer " *oc-initial-undo*")))
@@ -2488,6 +2505,11 @@
     (cl-letf (((symbol-function 'opencode-shell--request) #'ignore))
       (opencode-shell--submit))
     (should-error (undo-only 1) :type 'user-error)
+    (should-error (insert "blocked") :type 'text-read-only)
+    (setf (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)
+    (setq opencode-shell--submit-in-flight nil
+          opencode-shell--composer-visible t)
+    (opencode-shell--render-turns)
     (insert "new draft")
     (undo-boundary)
     (undo-only 1)
@@ -2495,7 +2517,7 @@
     (should (= 1 (how-many "committed" (point-min) (point-max))))
     (should (= 1 (how-many "USER>" (point-min) (point-max))))))
 
-(ert-deftest opencode-shell-failure-does-not-overwrite-edited-composer ()
+(ert-deftest opencode-shell-failure-keeps-hidden-composer-protected ()
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
@@ -2505,11 +2527,12 @@
                  (lambda (_method _path _callback &optional _body _params error-callback)
                    (setq failure error-callback))))
         (opencode-shell--submit)
-        (insert "new draft")
-        (goto-char (+ opencode-shell--composer-start 3))
-        (funcall failure)
-        (should (equal (opencode-shell--composer-text) "new draft"))
-        (should (= (- (point) opencode-shell--composer-start) 3))))))
+        (should-error (let ((inhibit-read-only t)) (insert "new draft"))
+                      :type 'text-read-only)
+        (let ((position (point)))
+          (funcall failure)
+          (should (string-empty-p (opencode-shell--composer-text)))
+          (should (= (point) position)))))))
 
 (ert-deftest opencode-shell-out-of-order-failures-do-not-restore-or-reorder-prompts ()
   (with-temp-buffer
@@ -2521,10 +2544,10 @@
                    (setq failures (append failures (list error-callback))))))
         (insert "first")
         (opencode-shell--submit)
-        (insert "second")
+        (should-error (insert "second") :type 'text-read-only)
         (should-error (opencode-shell--submit) :type 'user-error)
         (funcall (car failures))
-        (should (equal (opencode-shell--composer-text) "second"))
+        (should (string-empty-p (opencode-shell--composer-text)))
         (should (equal (mapcar #'opencode-shell--turn-user opencode-shell--turns)
                        '("first")))))))
 
