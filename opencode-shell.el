@@ -2495,7 +2495,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (let ((body-begin (point)))
       (insert (propertize body 'face 'opencode-shell-composer-face)
               (propertize "\n" 'face 'opencode-shell-composer-face))
-      (let ((background (make-overlay body-begin (point) nil nil t)))
+      (let ((background (make-overlay body-begin (point) nil nil nil)))
         (overlay-put background 'face 'opencode-shell-composer-face)
         (overlay-put background 'priority 1)
         (overlay-put background 'evaporate t)))
