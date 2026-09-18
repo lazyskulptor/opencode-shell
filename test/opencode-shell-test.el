@@ -3328,6 +3328,62 @@
         (should (member "local" names))
         (should (member "remote" names))))))
 
+(ert-deftest opencode-shell-profile-for-directory-selects-most-specific-match ()
+  (let* ((nested (copy-tree opencode-shell-test--local-profile))
+         (opencode-shell-profiles
+          (list opencode-shell-test--local-profile
+                opencode-shell-test--remote-profile
+                nested)))
+    (setf (plist-get nested :name) "nested"
+          (plist-get nested :directory) "/client/project/nested")
+    (should (eq (opencode-shell--profile-for-directory
+                 "/client/project/src/")
+                opencode-shell-test--local-profile))
+    (should (eq (opencode-shell--profile-for-directory
+                 "/ssh:code.example.test:/srv/project/src/")
+                opencode-shell-test--remote-profile))
+    (should (eq (opencode-shell--profile-for-directory
+                 "/client/project/nested/src/")
+                nested))
+    (should-error (opencode-shell--profile-for-directory "/outside/")
+                  :type 'user-error)))
+
+(ert-deftest opencode-shell-entry-infers-profile-without-prompting ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile
+               opencode-shell-test--remote-profile))
+        (default-directory "/client/project/src/")
+        opened started)
+    (cl-letf (((symbol-function 'opencode-shell--read-profile)
+               (lambda () (ert-fail "Profile prompt should not run")))
+              ((symbol-function 'opencode-shell--open-sessions)
+               (lambda (profile &rest _) (setq opened profile)))
+              ((symbol-function 'opencode-shell--start-session)
+               (lambda (profile) (setq started profile))))
+      (opencode-shell)
+      (opencode-shell-start)
+      (should (eq opened opencode-shell-test--local-profile))
+      (should (eq started opencode-shell-test--local-profile)))))
+
+(ert-deftest opencode-shell-profile-for-directory-rejects-ambiguous-match ()
+  (let* ((first '(:name "first" :directory "/work"))
+         (second '(:name "second" :directory "/work"))
+         (opencode-shell-profiles (list first second)))
+    (should-error (opencode-shell--profile-for-directory "/work/project/")
+                  :type 'user-error)))
+
+(ert-deftest opencode-shell-entry-accepts-explicit-profile-without-base-url ()
+  (let ((profile '(:name "implicit-url" :directory "/work"))
+        opened started)
+    (cl-letf (((symbol-function 'opencode-shell--open-sessions)
+               (lambda (resolved &rest _) (setq opened resolved)))
+              ((symbol-function 'opencode-shell--start-session)
+               (lambda (resolved) (setq started resolved))))
+      (opencode-shell profile)
+      (opencode-shell-start profile)
+      (should (eq opened profile))
+      (should (eq started profile)))))
+
 (ert-deftest opencode-shell-profile-local-and-tramp-directory-mapping ()
   (should-not (opencode-shell--profile-remote-p opencode-shell-test--local-profile))
   (should (opencode-shell--profile-remote-p opencode-shell-test--remote-profile))

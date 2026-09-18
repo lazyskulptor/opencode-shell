@@ -209,6 +209,38 @@ and lifecycle keys."
   (or (opencode-shell--resolve-profile value) value
       (opencode-shell--read-profile)))
 
+(defun opencode-shell--profile-for-directory (&optional directory)
+  "Return the most specific profile containing DIRECTORY.
+Signal a user error when no configured profile contains it or equally specific
+profiles make the result ambiguous."
+  (unless opencode-shell-profiles
+    (user-error "No OpenCode profiles configured"))
+  (opencode-shell--validate-profiles)
+  (let ((directory (opencode-shell--canonical-directory
+                    (or directory default-directory)))
+        best best-length ambiguous)
+    (dolist (profile opencode-shell-profiles)
+      (when-let ((root (opencode-shell--canonical-directory
+                        (plist-get profile :directory))))
+        (when (string-prefix-p root directory)
+          (let ((length (length root)))
+            (cond ((or (null best-length) (> length best-length))
+                   (setq best profile best-length length ambiguous nil))
+                  ((= length best-length)
+                   (setq ambiguous t)))))))
+    (cond (ambiguous
+           (user-error "Multiple OpenCode profiles match %s" directory))
+          (best best)
+          (t (user-error "No OpenCode profile matches %s" directory)))))
+
+(defun opencode-shell--profile-for-command (value)
+  "Resolve explicit profile VALUE or infer one from `default-directory'."
+  (cond ((and value (listp value)) value)
+        (value
+         (or (opencode-shell--resolve-profile value)
+             (user-error "Unknown OpenCode profile: %s" value)))
+        (t (opencode-shell--profile-for-directory))))
+
 (defun opencode-shell--profile-command-segment (name)
   "Return a safe command segment for profile NAME."
   (let ((segment (downcase (replace-regexp-in-string "[ _]+" "-" name))))
@@ -3549,17 +3581,17 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 ;;;###autoload
 (defun opencode-shell (&optional profile)
-  "Select an OpenCode server and open sessions for the current directory."
-  (interactive (list (opencode-shell--read-profile)))
+  "Open sessions using PROFILE or the profile matching the current directory."
+  (interactive)
   (opencode-shell--open-sessions
-   (opencode-shell--resolve-or-read-profile profile)))
+   (opencode-shell--profile-for-command profile)))
 
 ;;;###autoload
 (defun opencode-shell-start (&optional profile)
-  "Select an OpenCode PROFILE and start a session in the current directory."
-  (interactive (list (opencode-shell--read-profile)))
+  "Start a session using PROFILE or the profile matching the current directory."
+  (interactive)
   (opencode-shell--start-session
-   (opencode-shell--resolve-or-read-profile profile)))
+   (opencode-shell--profile-for-command profile)))
 
 ;;;###autoload
 (defun opencode-shell-switch-buffer ()
