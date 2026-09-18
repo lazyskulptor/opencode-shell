@@ -140,5 +140,20 @@
         (should (equal opencode-shell--questions-pending (list item)))
         (should (equal resyncs '(nil)))))))
 
+(ert-deftest opencode-shell-pipeline-canonical-error-survives-every-render-path ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns)
+      (setf (opencode-shell--turn-status turn) 'error)
+      (opencode-shell--render-turns nil (list turn))
+      (should (string-match-p
+               "Request state is uncertain; resync with g r" (buffer-string)))
+      (should-not (string-match-p "Request failed" (buffer-string)))
+      (let ((incremental (buffer-string)))
+        (opencode-shell--render-turns t)
+        (should (equal incremental (buffer-string)))))))
+
 (provide 'opencode-shell-pipeline-test)
 ;;; opencode-shell-pipeline-test.el ends here

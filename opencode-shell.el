@@ -2548,33 +2548,12 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (cons begin (point))))
 
 (defun opencode-shell--insert-turn-blocks (turn)
-  "Insert immutable user and response blocks for TURN before the composer."
+  "Insert immutable user and canonical response blocks for TURN."
   (pcase-let ((`(,user-begin . ,user-end)
                (opencode-shell--insert-user-prompt turn)))
     (opencode-shell--insert-permission-results (opencode-shell--turn-id turn))
     (let ((response-begin (point)))
-      (unless (eq turn (opencode-shell--permission-status-turn))
-        (insert (opencode-shell--tool-name-display turn))
-        (if (eq (opencode-shell--turn-status turn) 'complete)
-            (let ((answer (opencode-shell--assistant-display-text turn)))
-              (insert (propertize "ASSISTANT>\n" 'face
-                                  'opencode-shell-assistant-face)
-                      (or answer "")
-                      (opencode-shell--turn-terminal-error-suffix turn)
-                      "\n\n"))
-          (insert
-           (propertize
-            (pcase (opencode-shell--turn-status turn)
-              ('sending (opencode-shell--status-display "Sending"))
-              ('thinking (opencode-shell--status-display "Thinking"))
-              ('receiving (opencode-shell--status-display "Receiving"))
-              ('recovering (opencode-shell--status-display "Recovering"))
-              ('aborting (opencode-shell--status-display "Aborting"))
-              ('error "Request state is uncertain; resync with g r\n\n")
-              (_ (opencode-shell--status-display "Waiting for response")))
-            'face (if (eq (opencode-shell--turn-status turn) 'error)
-                      'opencode-shell-error-face
-                    'opencode-shell-waiting-face)))))
+      (insert (opencode-shell--response-display turn))
       (let ((response-end (point)))
         (add-text-properties user-begin user-end
                              '(read-only t rear-nonsticky (read-only face)))
@@ -2619,7 +2598,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         ('receiving (opencode-shell--status-display "Receiving"))
         ('recovering (opencode-shell--status-display "Recovering"))
         ('aborting (opencode-shell--status-display "Aborting"))
-        ('error "Request failed\n\n")
+        ('error "Request state is uncertain; resync with g r\n\n")
         (_ (opencode-shell--status-display "Waiting for response")))
        'face (if (eq (opencode-shell--turn-status turn) 'error)
                  'opencode-shell-error-face 'opencode-shell-waiting-face))))))

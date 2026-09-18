@@ -51,6 +51,10 @@ parts. It normalizes tool spellings, name/status fallbacks, text/reasoning,
 terminal evidence, response phase, completion blockers, lifecycle labels, and
 ordered tool names. Network payloads stay in observations; presentation and
 logs consume only these neutral helpers.
+`opencode-shell--response-display` is the sole propertized response projector.
+Initial insertion, incremental updates, forced rerenders, and interaction-card
+relocation all consume its bytes and properties; `opencode-shell--insert-turn-blocks`
+only establishes user/response bounds and read-only protection.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
