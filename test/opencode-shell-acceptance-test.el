@@ -41,15 +41,16 @@
           (should (= (point) opencode-shell--composer-start))
           (should (eq (get-text-property (point-min) 'read-only) t)))))))
 
-(ert-deftest opencode-shell-acceptance-insert-entry-focuses-composer ()
-  (dolist (_command '(i I a A o O))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (let ((inhibit-read-only t))
-        (goto-char (point-min)))
-      (opencode-shell--evil-move-to-composer)
-      (should (= (point) (point-max)))
-      (should (opencode-shell--in-composer-p)))))
+(ert-deftest opencode-shell-acceptance-protected-point-stays-put-across-render ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages (opencode-shell-acceptance--messages 1))
+    (goto-char (point-min))
+    (let ((position (point)))
+      (opencode-shell--render-turns)
+      (should (= (point) position))
+      (should (< (point) opencode-shell--composer-start))
+      (should-error (insert "blocked") :type 'text-read-only))))
 
 (ert-deftest opencode-shell-acceptance-queued-response-preserves-active-draft ()
   (with-temp-buffer

@@ -1381,6 +1381,26 @@
                           ("?" #'opencode-shell-sessions-help))))
             (setq bindings (cddr bindings))))))))
 
+(ert-deftest opencode-shell-evil-keeps-native-composer-edit-keys ()
+  (should-not (fboundp 'opencode-shell--evil-move-to-composer))
+  (should-not (fboundp 'opencode-shell--enable-evil-composer-hook))
+  (let (calls)
+    (cl-letf (((symbol-function 'evil-set-initial-state) #'ignore)
+              ((symbol-function 'evil-define-key*)
+               (lambda (&rest args) (push args calls))))
+      (opencode-shell--setup-evil))
+    (let* ((call (seq-find (lambda (args)
+                             (and (eq (car args) 'normal)
+                                  (eq (cadr args) opencode-shell-mode-map)))
+                           calls))
+           (bindings (nthcdr 2 call))
+           keys)
+      (while bindings
+        (push (car bindings) keys)
+        (setq bindings (cddr bindings)))
+      (dolist (key '("d" "i" "I" "a" "A" "o" "O"))
+        (should-not (member (kbd key) keys))))))
+
 (ert-deftest opencode-shell-uses-editable-base-with-native-character-input ()
   (with-temp-buffer
     (opencode-shell-mode)

@@ -3230,18 +3230,6 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "d") #'opencode-shell--delete-session
     (kbd "?") #'opencode-shell-sessions-help))
 
-(defun opencode-shell--evil-move-to-composer ()
-  "Move point to the composer when entering Evil insert state."
-  (when (and (derived-mode-p 'opencode-shell-mode)
-             (not (opencode-shell--in-composer-p)))
-    (goto-char (point-max))))
-
-(defun opencode-shell--enable-evil-composer-hook ()
-  "Install the buffer-local Evil insert-state hook."
-  (when (boundp 'evil-insert-state-entry-hook)
-    (add-hook 'evil-insert-state-entry-hook
-              #'opencode-shell--evil-move-to-composer nil t)))
-
 (defun opencode-shell--server-health-callback (profile callback status)
   "Handle a health response for PROFILE and report readiness to CALLBACK."
   (let ((response (current-buffer)))
@@ -3693,11 +3681,14 @@ ACTIVE means that their session browser is already live."
 
 (with-eval-after-load 'evil
   (opencode-shell--setup-evil)
-  (add-hook 'opencode-shell-mode-hook #'opencode-shell--enable-evil-composer-hook)
+  ;; Remove relocation hooks left in buffers by older loaded versions.
+  (remove-hook 'opencode-shell-mode-hook
+               (intern "opencode-shell--enable-evil-composer-hook"))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (derived-mode-p 'opencode-shell-mode)
-        (opencode-shell--enable-evil-composer-hook)))))
+        (remove-hook 'evil-insert-state-entry-hook
+                     (intern "opencode-shell--evil-move-to-composer") t)))))
 
 (provide 'opencode-shell)
 ;;; opencode-shell.el ends here
