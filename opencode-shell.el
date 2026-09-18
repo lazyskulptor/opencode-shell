@@ -543,6 +543,7 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--normalized-changed-turns nil)
 (defvar-local opencode-shell--message-state-revision 0)
 (defvar-local opencode-shell--submit-in-flight nil)
+(defvar-local opencode-shell--hydration-state nil)
 (defvar-local opencode-shell--composer-label-visible t)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
@@ -1664,6 +1665,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (setq-local default-directory
                   (opencode-shell--client-directory resolved-directory profile))
       (setq-local opencode-shell--session-title nil)
+      (opencode-shell--begin-initial-hydration)
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
     (pop-to-buffer buffer)
@@ -2246,9 +2248,34 @@ Return a plist containing affected turns and whether a full render is required."
    (opencode-shell--initial-hydration-complete-p)))
 
 (defun opencode-shell--initial-hydration-complete-p ()
-  "Return non-nil when initial authoritative snapshots have settled.
-This compatibility adapter remains true until hydration is tracked explicitly."
-  t)
+  "Return non-nil when initial authoritative snapshots have settled."
+  (or (null opencode-shell--hydration-state)
+      (opencode-shell-state-hydration-complete-p
+       opencode-shell--hydration-state)))
+
+(defun opencode-shell--begin-initial-hydration ()
+  "Block Composer until all authoritative session resources settle."
+  (setq opencode-shell--hydration-state
+        (opencode-shell-state-hydration-start
+         '(messages permissions questions)))
+  (opencode-shell--render-turns)
+  (opencode-shell--render-permissions))
+
+(defun opencode-shell--settle-hydration (resource success)
+  "Record RESOURCE hydration SUCCESS and schedule its readiness transition."
+  (when opencode-shell--hydration-state
+    (let ((next (opencode-shell-state-hydration-settle
+                 opencode-shell--hydration-state resource success)))
+      (unless (equal next opencode-shell--hydration-state)
+        (setq opencode-shell--hydration-state next)
+        (opencode-shell--schedule-render "hydration" t)))))
+
+(defun opencode-shell--retry-hydration (resources)
+  "Move failed RESOURCES back to pending before retrying them."
+  (when opencode-shell--hydration-state
+    (setq opencode-shell--hydration-state
+          (opencode-shell-state-hydration-retry
+           opencode-shell--hydration-state resources))))
 
 (defun opencode-shell--human-interaction-blocked-p ()
   "Return non-nil while a human interaction blocks new input."
@@ -2309,6 +2336,7 @@ This compatibility adapter remains true until hydration is tracked explicitly."
   "Store the authoritative current-session question snapshot ITEMS.
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-question-refresh-pending)
+  (opencode-shell--settle-hydration 'questions t)
   (let ((questions (opencode-shell--deduplicate-questions
                     (opencode-shell--session-questions items))))
     (unless (equal questions opencode-shell--questions-pending)
@@ -2328,7 +2356,9 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (opencode-shell--guarded-request
      'questions "GET" "/question"
      (lambda (items) (opencode-shell--receive-questions items t))
-     nil #'opencode-shell--consume-question-refresh-pending)))
+     nil (lambda ()
+           (opencode-shell--consume-question-refresh-pending)
+           (opencode-shell--settle-hydration 'questions nil)))))
 
 (defun opencode-shell--consume-question-refresh-pending ()
   "Reissue a deferred `/question' fetch."
@@ -2482,7 +2512,9 @@ request settles."
     (opencode-shell--guarded-request
      'permissions "GET" "/permission"
      (lambda (items) (opencode-shell--receive-permissions items t))
-     nil #'opencode-shell--consume-permission-refresh-pending)))
+     nil (lambda ()
+           (opencode-shell--consume-permission-refresh-pending)
+           (opencode-shell--settle-hydration 'permissions nil)))))
 
 (defun opencode-shell--consume-permission-refresh-pending ()
   "Reissue a `/permission' fetch deferred while one was already in flight."
@@ -2494,6 +2526,7 @@ request settles."
   "Store session-scoped permission ITEMS and update their display.
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-permission-refresh-pending)
+  (opencode-shell--settle-hydration 'permissions t)
   (let ((permissions
          (seq-remove
           (lambda (item)
@@ -2623,9 +2656,16 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                  (reverse opencode-shell--turns))))
 
 (defun opencode-shell--permission-status-display ()
-  "Return transient status displayed below the permission card."
-  (when-let ((turn (opencode-shell--permission-status-turn)))
-    (opencode-shell--response-display turn t)))
+  "Return hydration recovery or transient interaction status."
+  (cond
+   ((plist-get opencode-shell--hydration-state :failed)
+    (propertize "Session sync failed; retry with g r\n\n"
+                'face 'opencode-shell-error-face))
+   ((plist-get opencode-shell--hydration-state :pending)
+    (propertize (opencode-shell--status-display "Loading session")
+                'face 'opencode-shell-waiting-face))
+   ((when-let ((turn (opencode-shell--permission-status-turn)))
+      (opencode-shell--response-display turn t)))))
 
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current UI-only spinner frame."
@@ -3014,6 +3054,10 @@ non-nil, remove cached server messages absent from the snapshot."
   "Resync RESOURCE, or all polling state when RESOURCE is nil or `all'.
 When FULL is non-nil, also refresh metadata and capabilities."
   (interactive (list t))
+  (opencode-shell--retry-hydration
+   (if (memq resource '(nil all))
+       '(messages permissions questions)
+     (list resource)))
   (when full (opencode-shell--refresh-session-metadata))
   (when (memq resource '(nil all messages))
     (unless (alist-get 'messages opencode-shell--in-flight)
@@ -3023,9 +3067,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
          'messages
          "GET" (format "/session/%s/message" opencode-shell--session-id)
          (lambda (messages)
+           (opencode-shell--settle-hydration 'messages t)
            (if (= revision opencode-shell--message-state-revision)
                (opencode-shell--render-messages messages sequence t t)
-             (opencode-shell--schedule-event-reconciliation 'messages)))))))
+             (opencode-shell--schedule-event-reconciliation 'messages)))
+         nil (lambda () (opencode-shell--settle-hydration 'messages nil))))))
   (when (memq resource '(nil all permissions))
     (opencode-shell--guarded-request
      'permissions "GET" "/permission"

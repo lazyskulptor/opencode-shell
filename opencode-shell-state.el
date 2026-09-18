@@ -55,5 +55,32 @@ or question work, and HYDRATION-COMPLETE-P gates initial session snapshots."
        (not interaction-blocked-p)
        (not (seq-some #'opencode-shell-state-turn-active-p statuses))))
 
+(defun opencode-shell-state-hydration-start (resources)
+  "Return initial hydration state for authoritative RESOURCES."
+  (list :pending (copy-sequence resources) :failed nil))
+
+(defun opencode-shell-state-hydration-complete-p (state)
+  "Return non-nil when STATE has no pending or failed resources."
+  (and (null (plist-get state :pending))
+       (null (plist-get state :failed))))
+
+(defun opencode-shell-state-hydration-settle (state resource success)
+  "Return STATE after RESOURCE settles with SUCCESS."
+  (let ((pending (remove resource (plist-get state :pending)))
+        (failed (remove resource (plist-get state :failed))))
+    (unless success (setq failed (append failed (list resource))))
+    (list :pending pending :failed failed)))
+
+(defun opencode-shell-state-hydration-retry (state resources)
+  "Return STATE with failed RESOURCES moved back to pending."
+  (let ((pending (copy-sequence (plist-get state :pending)))
+        (failed (copy-sequence (plist-get state :failed))))
+    (dolist (resource resources)
+      (when (memq resource failed)
+        (setq failed (remove resource failed))
+        (unless (memq resource pending)
+          (setq pending (append pending (list resource))))))
+    (list :pending pending :failed failed)))
+
 (provide 'opencode-shell-state)
 ;;; opencode-shell-state.el ends here

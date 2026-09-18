@@ -124,6 +124,10 @@ Each prompt carries a stable message ID. SSE events wake authoritative snapshot
 reconciliation, with periodic polling retained for fallback and recovery. Each
 recurring reconciliation is limited to message history and pending permissions
 and questions; session metadata and model/agent capabilities are full-resync data.
+When a session opens, the Composer stays unavailable until successful message,
+permission, and question snapshots have all arrived, including valid empty
+snapshots. A transient failure keeps input blocked and shows a recovery message;
+use `g r` to retry the authoritative hydration.
 The transcript shows sending, waiting, receiving, recovering, aborting, or error
 state and never replaces an already completed response with stale data. Pending
 status uses a bounded right-growing spinner that advances on the UI-only

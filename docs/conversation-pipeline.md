@@ -55,6 +55,11 @@ logs consume only these neutral helpers.
 Initial insertion, incremental updates, forced rerenders, and interaction-card
 relocation all consume its bytes and properties; `opencode-shell--insert-turn-blocks`
 only establishes user/response bounds and read-only protection.
+Initial session hydration tracks messages, permissions, and questions as three
+authoritative resources. Only successful current-generation callbacks settle a
+resource; unchanged and empty snapshots still count, while failures remain
+visible and block Composer readiness until polling or `g r` succeeds. SSE keeps
+its existing incremental role and never substitutes for the initial snapshots.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
