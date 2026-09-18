@@ -1446,25 +1446,28 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (when (and (not opencode-shell--internal-edit)
              (opencode-shell--composer-visible-p)
              (markerp opencode-shell--composer-start)
-             (marker-position opencode-shell--composer-start)
-             (or (not (get-text-property (1- (point-max))
-                                         'opencode-shell-composer-sentinel))
-                 (text-property-any opencode-shell--composer-start
-                                    (1- (point-max))
-                                    'opencode-shell-composer-sentinel t)))
-    (opencode-shell--without-user-undo
-      (let ((opencode-shell--internal-edit t)
-            (inhibit-read-only t)
-            (position (copy-marker (point))))
-        (while-let ((sentinel
-                     (text-property-any opencode-shell--composer-start
-                                        (point-max)
-                                        'opencode-shell-composer-sentinel t)))
-          (delete-region sentinel (1+ sentinel)))
-        (goto-char (point-max))
-        (opencode-shell--insert-composer-sentinel)
-        (goto-char position)
-        (set-marker position nil)))))
+             (marker-position opencode-shell--composer-start))
+    (when (or (not (get-text-property (1- (point-max))
+                                      'opencode-shell-composer-sentinel))
+              (text-property-any opencode-shell--composer-start
+                                 (1- (point-max))
+                                 'opencode-shell-composer-sentinel t))
+      (opencode-shell--without-user-undo
+        (let ((opencode-shell--internal-edit t)
+              (inhibit-read-only t)
+              (position (copy-marker (point))))
+          (while-let ((sentinel
+                       (text-property-any opencode-shell--composer-start
+                                          (point-max)
+                                          'opencode-shell-composer-sentinel t)))
+            (delete-region sentinel (1+ sentinel)))
+          (goto-char (point-max))
+          (opencode-shell--insert-composer-sentinel)
+          (goto-char position)
+          (set-marker position nil))))
+    (when (and (opencode-shell--point-in-composer-p)
+               (= (point) (point-max)))
+      (goto-char (1- (point-max))))))
 
 (defun opencode-shell--refresh-composer-overlay ()
   "Show the composer background exactly over the visible editable region."
