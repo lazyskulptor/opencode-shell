@@ -1399,8 +1399,33 @@
         (while remaining
           (push (car remaining) keys)
           (setq remaining (cddr remaining))))
-      (dolist (key '("d" "i" "I" "a" "A" "o" "O" "j" "k"))
+      (should (eq (cadr (member (kbd "o") bindings))
+                  #'opencode-shell--evil-open-below))
+      (dolist (key '("d" "i" "I" "a" "A" "O" "j" "k"))
         (should-not (member (kbd key) keys))))))
+
+(ert-deftest opencode-shell-evil-open-below-reuses-only-empty-composer ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((line-count (line-number-at-pos (point-max))) entered native-count)
+      (cl-letf (((symbol-function 'evil-insert-state)
+                 (lambda () (setq entered t)))
+                ((symbol-function 'evil-open-below)
+                 (lambda (count) (setq native-count count))))
+        (goto-char (- opencode-shell--composer-start
+                      (length opencode-shell--composer-label)))
+        (opencode-shell--evil-open-below 1)
+        (should entered)
+        (should (= (point) opencode-shell--composer-start))
+        (should (= line-count (line-number-at-pos (point-max))))
+        (setq entered nil)
+        (goto-char opencode-shell--composer-start)
+        (insert "draft")
+        (goto-char (- opencode-shell--composer-start
+                      (length opencode-shell--composer-label)))
+        (opencode-shell--evil-open-below 2)
+        (should-not entered)
+        (should (= native-count 2))))))
 
 (ert-deftest opencode-shell-configures-evil-buffer-locally ()
   (let ((original (default-value 'evil-move-beyond-eol)))
@@ -1412,7 +1437,10 @@
             (should (local-variable-p 'evil-move-beyond-eol))
             (should (symbol-value 'evil-move-beyond-eol))
             (should (= opencode-shell--composer-start (1- (point-max))))
-            (should (eq (char-after opencode-shell--composer-start) ?\n)))
+            (should (get-text-property opencode-shell--composer-start
+                                       'opencode-shell-composer-sentinel))
+            (should (= (line-number-at-pos opencode-shell--composer-start)
+                       (line-number-at-pos (point-max)))))
           (should-not (default-value 'evil-move-beyond-eol)))
       (set-default 'evil-move-beyond-eol original))))
 
@@ -2460,7 +2488,7 @@
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "local" :user "one\ntwo"
-                                             :status 'waiting)))
+                                             :assistant "reply" :status 'complete)))
       (setq opencode-shell--turns (list turn))
       (opencode-shell--render-turns t)
       (goto-char (point-min))
@@ -2489,7 +2517,12 @@
                                   'opencode-shell-composer-face)
                               (= (overlay-get overlay 'priority) 1)))
                        (overlays-at (point)))))
-        (should (overlayp background))))))
+        (should (overlayp background)))
+      (should (search-forward "ASSISTANT>\n" nil t))
+      (should-not
+       (seq-find (lambda (overlay)
+                   (= (overlay-get overlay 'priority) 1))
+                 (overlays-at (point)))))))
 
 (ert-deftest opencode-shell-composer-overlay-follows-draft-and-visibility ()
   (with-temp-buffer
@@ -2503,11 +2536,20 @@
     (should (eq (overlay-get opencode-shell--composer-overlay 'face)
                 'opencode-shell-composer-face))
     (should-not (overlay-get opencode-shell--composer-overlay 'after-string))
-    (should (eq (char-after opencode-shell--composer-start) ?\n))
+    (should (get-text-property opencode-shell--composer-start
+                               'opencode-shell-composer-sentinel))
+    (should (= (line-number-at-pos opencode-shell--composer-start)
+               (line-number-at-pos (point-max))))
     (delete-region opencode-shell--composer-start (point-max))
-    (should (eq (char-after opencode-shell--composer-start) ?\n))
+    (should (get-text-property opencode-shell--composer-start
+                               'opencode-shell-composer-sentinel))
     (should (string-empty-p (opencode-shell--composer-text)))
     (insert "draft\nsecond")
+    (goto-char (point-max))
+    (insert " tail")
+    (should (equal (opencode-shell--composer-text) "draft\nsecond tail"))
+    (should (get-text-property (1- (point-max))
+                               'opencode-shell-composer-sentinel))
     (should (= (overlay-end opencode-shell--composer-overlay) (point-max)))
     (should-not (overlay-get opencode-shell--composer-overlay 'after-string))
     (goto-char (+ opencode-shell--composer-start 2))

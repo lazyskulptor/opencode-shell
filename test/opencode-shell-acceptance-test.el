@@ -60,6 +60,9 @@
     (opencode-shell--render-turns)
     (should (= (point) opencode-shell--composer-start))
     (should (= (point) (1- (point-max))))
+    (should (get-text-property (point) 'opencode-shell-composer-sentinel))
+    (should (= (line-number-at-pos (point))
+               (line-number-at-pos (point-max))))
     (should (local-variable-p 'evil-move-beyond-eol))))
 
 (ert-deftest opencode-shell-acceptance-queued-response-preserves-active-draft ()

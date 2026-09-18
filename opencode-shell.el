@@ -528,6 +528,8 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--internal-edit nil)
 (defconst opencode-shell--composer-label "Prompt>\n"
   "Read-only label displayed immediately above the composer.")
+(defconst opencode-shell--composer-sentinel " "
+  "Structural same-line cursor target for an empty composer.")
 (defvar-local opencode-shell--request-status "idle")
 (defvar-local opencode-shell--message-request-sequence 0)
 (defvar-local opencode-shell--message-applied-sequence 0)
@@ -1433,21 +1435,31 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       'rear-nonsticky
                       '(read-only opencode-shell-composer-label))))
 
-(defun opencode-shell--ensure-composer-newline (&rest _ignored)
-  "Restore the structural trailing composer newline after user edits."
+(defun opencode-shell--insert-composer-sentinel ()
+  "Insert the property-marked same-line composer sentinel at point."
+  (insert (propertize opencode-shell--composer-sentinel
+                      'opencode-shell-composer-sentinel t
+                      'rear-nonsticky '(opencode-shell-composer-sentinel))))
+
+(defun opencode-shell--ensure-composer-sentinel (&rest _ignored)
+  "Keep exactly one structural sentinel at the composer end."
   (when (and (not opencode-shell--internal-edit)
              (opencode-shell--composer-visible-p)
              (markerp opencode-shell--composer-start)
-             (marker-position opencode-shell--composer-start)
-             (or (= opencode-shell--composer-start (point-max))
-                 (not (eq (char-before (point-max)) ?\n))))
+             (marker-position opencode-shell--composer-start))
     (opencode-shell--without-user-undo
       (let ((opencode-shell--internal-edit t)
             (inhibit-read-only t)
-            (position (point)))
+            (position (copy-marker (point))))
+        (while-let ((sentinel
+                     (text-property-any opencode-shell--composer-start
+                                        (point-max)
+                                        'opencode-shell-composer-sentinel t)))
+          (delete-region sentinel (1+ sentinel)))
         (goto-char (point-max))
-        (insert "\n")
-        (goto-char position)))))
+        (opencode-shell--insert-composer-sentinel)
+        (goto-char position)
+        (set-marker position nil)))))
 
 (defun opencode-shell--refresh-composer-overlay ()
   "Show the composer background exactly over the visible editable region."
@@ -1493,14 +1505,14 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           opencode-shell--permission-end (copy-marker (point) nil)
           opencode-shell--permission-status-begin (copy-marker (point) nil)
            opencode-shell--permission-status-end (copy-marker (point) nil)))
-    (insert "\n")
+    (opencode-shell--insert-composer-sentinel)
   (opencode-shell--refresh-composer-overlay)
   (opencode-shell--configure-evil-buffer)
   ;; Mode-owned scaffolding must never become the first undoable transcript edit.
   (setq buffer-undo-list nil)
   (goto-char opencode-shell--composer-start)
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
-  (add-hook 'after-change-functions #'opencode-shell--ensure-composer-newline nil t)
+  (add-hook 'after-change-functions #'opencode-shell--ensure-composer-sentinel nil t)
   (add-hook 'evil-insert-state-entry-hook
             #'opencode-shell--guard-evil-insert-state nil t)
   (add-hook 'window-configuration-change-hook
@@ -2194,9 +2206,9 @@ Return a plist containing affected turns and whether a full render is required."
        (plist-get event :resource)))))
 
 (defun opencode-shell--composer-text ()
-  "Return composer contents without properties or its structural newline."
-  (let ((end (if (and (> (point-max) opencode-shell--composer-start)
-                      (eq (char-before (point-max)) ?\n))
+  "Return composer contents without properties or its sentinel."
+  (let ((end (if (get-text-property (1- (point-max))
+                                    'opencode-shell-composer-sentinel)
                  (1- (point-max))
                (point-max))))
     (buffer-substring-no-properties opencode-shell--composer-start end)))
@@ -2473,7 +2485,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (let ((inhibit-read-only t))
       (delete-region opencode-shell--composer-start (point-max))
       (goto-char opencode-shell--composer-start)
-      (insert text "\n")
+      (insert text)
+      (opencode-shell--insert-composer-sentinel)
       (goto-char (+ opencode-shell--composer-start (or offset (length text))))))
   (opencode-shell--refresh-composer-overlay))
 
@@ -3327,6 +3340,21 @@ When FULL is non-nil, also refresh metadata and capabilities."
   "Apply Evil policy local to an OpenCode transcript buffer."
   (setq-local evil-move-beyond-eol t))
 
+(defun opencode-shell--evil-open-below (count)
+  "Reuse an empty composer from `Prompt>`; otherwise open below COUNT times."
+  (interactive "p")
+  (declare-function evil-insert-state "evil-states")
+  (declare-function evil-open-below "evil-commands")
+  (if (and (opencode-shell--composer-visible-p)
+           (string-empty-p (opencode-shell--composer-text))
+           (= (line-beginning-position)
+              (- opencode-shell--composer-start
+                 (length opencode-shell--composer-label))))
+      (progn
+        (goto-char opencode-shell--composer-start)
+        (evil-insert-state))
+    (evil-open-below count)))
+
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."
   (declare-function evil-set-initial-state "evil-core")
@@ -3339,6 +3367,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "<return>") #'opencode-shell--submit
     (kbd "g r") #'opencode-shell--resync
     (kbd "?") #'opencode-shell-help
+    (kbd "o") #'opencode-shell--evil-open-below
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
     (kbd "C-c C-m") #'opencode-shell--select-agent)
