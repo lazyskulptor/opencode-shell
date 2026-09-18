@@ -1446,7 +1446,12 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (when (and (not opencode-shell--internal-edit)
              (opencode-shell--composer-visible-p)
              (markerp opencode-shell--composer-start)
-             (marker-position opencode-shell--composer-start))
+             (marker-position opencode-shell--composer-start)
+             (or (not (get-text-property (1- (point-max))
+                                         'opencode-shell-composer-sentinel))
+                 (text-property-any opencode-shell--composer-start
+                                    (1- (point-max))
+                                    'opencode-shell-composer-sentinel t)))
     (opencode-shell--without-user-undo
       (let ((opencode-shell--internal-edit t)
             (inhibit-read-only t)
@@ -1475,7 +1480,10 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       opencode-shell--composer-start (point-max))
         (overlay-put opencode-shell--composer-overlay
                      'face 'opencode-shell-composer-face)
-        (overlay-put opencode-shell--composer-overlay 'after-string nil))
+        (overlay-put opencode-shell--composer-overlay 'after-string
+                     (propertize " "
+                                 'face 'opencode-shell-composer-face
+                                 'display '(space :align-to right-fringe))))
     (when (overlayp opencode-shell--composer-overlay)
       (delete-overlay opencode-shell--composer-overlay))
     (setq opencode-shell--composer-overlay nil)))
@@ -1512,7 +1520,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (setq buffer-undo-list nil)
   (goto-char opencode-shell--composer-start)
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
-  (add-hook 'after-change-functions #'opencode-shell--ensure-composer-sentinel nil t)
+  (add-hook 'post-command-hook #'opencode-shell--ensure-composer-sentinel nil t)
   (add-hook 'evil-insert-state-entry-hook
             #'opencode-shell--guard-evil-insert-state nil t)
   (add-hook 'window-configuration-change-hook
@@ -1618,9 +1626,11 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (opencode-shell--start-polling))
     (pop-to-buffer buffer)
     (opencode-shell--refresh-table-layout)
-    (goto-char (point-max))
-    (when (fboundp 'evil-insert-state)
-      (evil-insert-state))))
+    (goto-char (or (and (markerp opencode-shell--composer-start)
+                             (marker-position opencode-shell--composer-start))
+                        (point-max)))
+    (when (fboundp 'evil-normal-state)
+      (evil-normal-state))))
 
 (defun opencode-shell--part-text (part)
   "Return display text for message PART."

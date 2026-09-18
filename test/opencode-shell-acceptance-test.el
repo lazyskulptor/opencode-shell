@@ -63,6 +63,12 @@
     (should (get-text-property (point) 'opencode-shell-composer-sentinel))
     (should (= (line-number-at-pos (point))
                (line-number-at-pos (point-max))))
+    (let ((filler (overlay-get opencode-shell--composer-overlay
+                               'after-string)))
+      (should (equal (get-text-property 0 'display filler)
+                     '(space :align-to right-fringe)))
+      (should (eq (get-text-property 0 'face filler)
+                  'opencode-shell-composer-face)))
     (should (local-variable-p 'evil-move-beyond-eol))))
 
 (ert-deftest opencode-shell-acceptance-queued-response-preserves-active-draft ()
