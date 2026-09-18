@@ -25,5 +25,20 @@
   (should (opencode-shell-state-polling-needed-p '(complete) "request"))
   (should-not (opencode-shell-state-polling-needed-p '(complete) nil)))
 
+(ert-deftest opencode-shell-state-composer-readiness-truth-table ()
+  (should (opencode-shell-state-composer-ready-p nil nil nil t))
+  (should (opencode-shell-state-composer-ready-p '(complete) nil nil t))
+  (dolist (status '(sending waiting thinking receiving recovering aborting error))
+    (should-not
+     (opencode-shell-state-composer-ready-p (list status) nil nil t)))
+  (should-not
+   (opencode-shell-state-composer-ready-p '(complete) "local" nil t))
+  (should-not
+   (opencode-shell-state-composer-ready-p '(complete) nil 'permission t))
+  (should-not
+   (opencode-shell-state-composer-ready-p '(complete) nil 'question t))
+  (should-not
+   (opencode-shell-state-composer-ready-p '(complete) nil nil nil)))
+
 (provide 'opencode-shell-state-test)
 ;;; opencode-shell-state-test.el ends here

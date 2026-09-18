@@ -44,5 +44,16 @@ active server phase has been observed yet."
   (or submit-in-flight
       (seq-some #'opencode-shell-state-turn-active-p statuses)))
 
+(defun opencode-shell-state-composer-ready-p
+    (statuses submit-in-flight interaction-blocked-p hydration-complete-p)
+  "Return non-nil when lifecycle inputs permit Composer editing.
+STATUSES are authoritative turn statuses.  SUBMIT-IN-FLIGHT identifies a local
+submission still being reconciled.  INTERACTION-BLOCKED-P represents permission
+or question work, and HYDRATION-COMPLETE-P gates initial session snapshots."
+  (and hydration-complete-p
+       (not submit-in-flight)
+       (not interaction-blocked-p)
+       (not (seq-some #'opencode-shell-state-turn-active-p statuses))))
+
 (provide 'opencode-shell-state)
 ;;; opencode-shell-state.el ends here

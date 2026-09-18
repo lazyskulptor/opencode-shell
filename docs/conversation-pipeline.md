@@ -32,6 +32,11 @@ opencode-shell-interaction.el   opencode-shell-response.el
 
 `opencode-shell-state.el` stays pure and has no package-module dependency. It
 owns the turn record plus terminality, aggregate phase, and polling predicates.
+Composer readiness is a pure conjunction of authoritative turn terminality,
+local submission settlement, human-interaction settlement, and initial
+hydration. `opencode-shell--request-status` is only a display/log summary and is
+never readiness authority. The UI still uses its legacy visibility latch until
+the next migration commit switches all presentation callers together.
 `opencode-shell.el` owns public commands, buffer-local state, network effects,
 marker coordination, and the major mode. Do not add a generic send/receive
 framework: share narrow invariants, while retaining explicit domain policies.
