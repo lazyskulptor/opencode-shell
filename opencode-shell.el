@@ -3485,8 +3485,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
       (user-error ":start-command must be a non-empty argv list"))
     (when (opencode-shell--attempt-current-p key attempt)
       (condition-case err
-        (let* ((default-directory (or (plist-get profile :server-directory)
-                                      default-directory))
+        (let* ((default-directory
+                 (or (and (opencode-shell--profile-remote-p profile)
+                          temporary-file-directory)
+                     (plist-get profile :server-directory)
+                     default-directory))
                (process (make-process
                          :name (format "opencode-%s" key)
                          :buffer (get-buffer-create (format " *opencode-%s*" key))
@@ -3508,17 +3511,15 @@ When FULL is non-nil, also refresh metadata and capabilities."
                (format "could not start server: %s" (error-message-string err))))))))
 
 (defun opencode-shell--start-server (&optional profile callback)
-  "Start local PROFILE server and invoke CALLBACK when healthy.
-Concurrent starts for one server are coalesced.  Remote profiles are never
-auto-started."
+  "Start PROFILE's configured process and invoke CALLBACK when healthy.
+Concurrent starts for one server are coalesced.  A remote profile may use
+`:start-command' to establish its transport, such as an SSH tunnel."
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
           (key (opencode-shell--server-key profile))
           (state (gethash key opencode-shell--servers))
           (command (plist-get profile :start-command)))
     (let ((config (opencode-shell--validate-server-profile profile state)))
     (cond
-     ((opencode-shell--profile-remote-p profile)
-      (when (called-interactively-p 'interactive) (user-error "Remote profiles are not auto-started")))
      ((or (plist-get state :checking) (plist-get state :starting))
       (when callback
         (puthash key (plist-put state :callbacks
