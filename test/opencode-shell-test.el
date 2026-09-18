@@ -829,13 +829,13 @@
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
+    (goto-char opencode-shell--composer-start)
+    (insert "draft")
+    (goto-char (+ opencode-shell--composer-start 2))
     (let ((turn (opencode-shell--make-turn :id "turn-1" :user "run it"
                                             :assistant "" :status 'waiting)))
       (setq opencode-shell--turns (list turn))
       (opencode-shell--render-turns)
-      (goto-char opencode-shell--composer-start)
-      (insert "draft")
-      (goto-char (+ opencode-shell--composer-start 2))
       (opencode-shell--receive-permissions
        '(((id . "p1") (sessionID . "s") (permission . "bash")
           (patterns . ("git diff --check")))))
@@ -1048,8 +1048,7 @@
 (ert-deftest opencode-shell-question-snapshot-is-session-scoped-and-blocking ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--session-id "s"
-          opencode-shell--composer-visible nil)
+    (setq opencode-shell--session-id "s")
     (opencode-shell--receive-questions
      '(((id . "q1") (sessionID . "other"))
        ((id . "q2") (sessionId . "s"))
@@ -1060,13 +1059,13 @@
     (should (equal (mapcar #'opencode-shell--question-id
                            opencode-shell--questions-pending)
                    '("q2")))
-    (should opencode-shell--submit-in-flight)
-    (should-not opencode-shell--composer-visible)
+    (should-not opencode-shell--submit-in-flight)
+    (should-not (opencode-shell--composer-visible-p))
     (opencode-shell--receive-questions nil)
     (opencode-shell--render-messages
      (cadr opencode-shell-test--completion-polling-snapshots) 2)
     (should-not opencode-shell--submit-in-flight)
-    (should opencode-shell--composer-visible)))
+    (should (opencode-shell--composer-visible-p))))
 
 (ert-deftest opencode-shell-capabilities-retry-after-transient-failure ()
   (with-temp-buffer
@@ -1270,13 +1269,13 @@
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s")
+    (goto-char opencode-shell--composer-start)
+    (insert "draft")
+    (goto-char (+ opencode-shell--composer-start 2))
     (opencode-shell--render-messages
      (list (opencode-shell-test--message "u1" "user" "q")
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-    (goto-char opencode-shell--composer-start)
-    (insert "draft")
-    (goto-char (+ opencode-shell--composer-start 2))
     (opencode-shell--receive-permissions
      '(((id . "p") (sessionID . "s") (permission . "bash"))))
     (dotimes (_ 20) (opencode-shell--animation-tick))
@@ -1292,6 +1291,9 @@
 (ert-deftest opencode-shell-animation-preserves-anchored-result-markers ()
   (with-temp-buffer
     (opencode-shell-mode)
+    (goto-char opencode-shell--composer-start)
+    (insert "draft")
+    (goto-char (+ opencode-shell--composer-start 2))
     (let ((turn (opencode-shell--make-turn :id "t" :user "q" :status 'waiting)))
       (setq opencode-shell--turns (list turn)
             opencode-shell--resolved-permissions
@@ -1299,9 +1301,6 @@
                (after-turn-id . "t"))))
       (opencode-shell--render-turns)
       (let ((user-end (marker-position (opencode-shell--turn-user-end turn))))
-        (goto-char opencode-shell--composer-start)
-        (insert "draft")
-        (goto-char (+ opencode-shell--composer-start 2))
         (dotimes (_ 20) (opencode-shell--animation-tick))
         (should (= user-end
                    (marker-position (opencode-shell--turn-user-end turn))))
@@ -1803,12 +1802,12 @@
 (ert-deftest opencode-shell-submit-settles-existing-nonterminal-turns ()
   (with-temp-buffer
     (opencode-shell-mode)
+    (insert "new prompt")
     (setq opencode-shell--session-id "s"
           opencode-shell--selected-model '((providerID . "p") (modelID . "m"))
           opencode-shell--selected-agent "build"
           opencode-shell--turns
           (list (opencode-shell--make-turn :id "u1" :user "old" :status 'waiting)))
-    (insert "new prompt")
     (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
               ((symbol-function 'opencode-shell--request) (lambda (&rest _))))
       (opencode-shell--submit))
@@ -1826,7 +1825,6 @@
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s"
           opencode-shell--submit-in-flight "u1"
-          opencode-shell--composer-visible nil
           opencode-shell--turns
           (list (opencode-shell--make-turn :id "u1" :user "question" :status 'waiting)))
     (let (callback)
@@ -1859,7 +1857,6 @@
           callback)
       (setq opencode-shell--session-id "s"
             opencode-shell--submit-in-flight "u1"
-            opencode-shell--composer-visible nil
             opencode-shell--turns (list target))
       (cl-letf (((symbol-function 'opencode-shell--request)
                  (lambda (_method _path cb &rest _) (setq callback cb)))
@@ -1875,7 +1872,7 @@
           (should (opencode-shell--turn-locally-settled target))
           (should (eq (opencode-shell--turn-status new) 'sending))
           (should (equal opencode-shell--submit-in-flight "u2"))
-          (should-not opencode-shell--composer-visible))))))
+          (should-not (opencode-shell--composer-visible-p)))))))
 
 (ert-deftest opencode-shell-completed-tool-alone-does-not-complete-turn ()
   (with-temp-buffer
@@ -1968,8 +1965,7 @@
 (ert-deftest opencode-shell-multi-step-turn-completes-only-at-final-stop-step ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--submit-in-flight "u1"
-          opencode-shell--composer-visible nil)
+    (setq opencode-shell--submit-in-flight "u1")
     (let ((user (opencode-shell-test--message "u1" "user" "question"))
           (step1 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
                             (finish . "tool-calls") (time . ((created . 1) (completed . 2)))))
@@ -1985,12 +1981,12 @@
       ;; The premature-completion bug would restore the composer and stop
       ;; reconciliation right after this first (non-final) step.
       (should opencode-shell--submit-in-flight)
-      (should-not opencode-shell--composer-visible)
+      (should-not (opencode-shell--composer-visible-p))
       (opencode-shell--render-messages (list user step1 step2))
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
       (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns)) "answer"))
       (should-not opencode-shell--submit-in-flight)
-      (should opencode-shell--composer-visible))))
+      (should (opencode-shell--composer-visible-p)))))
 
 (ert-deftest opencode-shell-error-terminated-message-completes-turn ()
   (with-temp-buffer
@@ -2045,7 +2041,6 @@
     (opencode-shell-mode)
     (setq opencode-shell--session-id "session-1"
           opencode-shell--submit-in-flight "user-1"
-          opencode-shell--composer-visible nil
           opencode-shell--permissions '(((id . "permission-1")
                                          (sessionID . "session-1"))))
     (opencode-shell--render-messages
@@ -2056,13 +2051,13 @@
      (cadr opencode-shell-test--completion-polling-snapshots) 2)
     (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
                 'complete))
-    (should opencode-shell--submit-in-flight)
-    (should-not opencode-shell--composer-visible)
+    (should-not opencode-shell--submit-in-flight)
+    (should-not (opencode-shell--composer-visible-p))
     (setq opencode-shell--permissions nil)
     (opencode-shell--render-messages
      (cadr opencode-shell-test--completion-polling-snapshots) 3)
     (should-not opencode-shell--submit-in-flight)
-    (should opencode-shell--composer-visible)
+    (should (opencode-shell--composer-visible-p))
     (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
@@ -2162,14 +2157,12 @@
     (let ((turn (opencode-shell--make-turn :id "u1" :user "hello"
                                             :status 'waiting)))
       (setq opencode-shell--turns (list turn)
-            opencode-shell--submit-in-flight "u1"
-            opencode-shell--composer-visible nil)
+            opencode-shell--submit-in-flight "u1")
       (opencode-shell--render-turns)
       (should (= 1 (how-many "USER>" (point-min) (point-max))))
       (should (= 0 (how-many "Prompt>\n" (point-min) (point-max))))
       (setf (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)
-      (setq opencode-shell--composer-visible t)
       (opencode-shell--render-turns)
       (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
 
@@ -2513,18 +2506,17 @@
     (opencode-shell-mode)
     (setq opencode-shell--session-id "s"
           opencode-shell--submit-in-flight "u1"
-          opencode-shell--composer-visible nil
           opencode-shell--permissions '(((id . "p1") (sessionID . "s"))))
     (let ((messages (list (opencode-shell-test--message "u1" "user" "question")
                           (opencode-shell-test--message "a1" "assistant" "answer" "u1"))))
       (opencode-shell--render-messages messages)
       (should (eq (opencode-shell--turn-status (car opencode-shell--turns)) 'complete))
-      (should opencode-shell--submit-in-flight)
-      (should-not opencode-shell--composer-visible)
+      (should-not opencode-shell--submit-in-flight)
+      (should-not (opencode-shell--composer-visible-p))
       (setq opencode-shell--permissions nil)
       (opencode-shell--render-messages messages)
       (should-not opencode-shell--submit-in-flight)
-      (should opencode-shell--composer-visible)
+      (should (opencode-shell--composer-visible-p))
       (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
 
 (ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
@@ -2659,10 +2651,10 @@
       (should (equal text (buffer-string)))
       (should (= tick (buffer-chars-modified-tick)))
       (should (equal undo buffer-undo-list)))
-    (setq opencode-shell--composer-visible nil)
+    (setq opencode-shell--submit-in-flight "fixture")
     (opencode-shell--render-turns)
     (should-not opencode-shell--composer-overlay)
-    (setq opencode-shell--composer-visible t)
+    (setq opencode-shell--submit-in-flight nil)
     (opencode-shell--render-turns)
     (should (overlayp opencode-shell--composer-overlay))
     (let ((overlay opencode-shell--composer-overlay))
@@ -2705,7 +2697,7 @@
 (ert-deftest opencode-shell-composer-sentinel-does-not-move-point-when-hidden ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--composer-visible nil)
+    (setq opencode-shell--submit-in-flight "fixture")
     (goto-char (point-max))
     (opencode-shell--ensure-composer-sentinel)
     (should (= (point) (point-max)))))
@@ -2768,7 +2760,7 @@
 (ert-deftest opencode-shell-hidden-composer-rejects-user-edits ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (setq opencode-shell--composer-visible nil)
+    (setq opencode-shell--submit-in-flight "fixture")
     (opencode-shell--render-turns)
     (goto-char (point-max))
     (should (opencode-shell--point-in-composer-p))
@@ -2816,8 +2808,7 @@
            (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
     (opencode-shell--receive-permissions
      '(((id . "p1") (permission . "bash") (patterns . ("git status")))))
-    (setq opencode-shell--permissions nil
-          opencode-shell--composer-visible t)
+    (setq opencode-shell--permissions nil)
     (opencode-shell--render-permissions)
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
@@ -2870,8 +2861,7 @@
     (should-error (undo-only 1) :type 'user-error)
     (should-error (insert "blocked") :type 'text-read-only)
     (setf (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)
-    (setq opencode-shell--submit-in-flight nil
-          opencode-shell--composer-visible t)
+    (setq opencode-shell--submit-in-flight nil)
     (opencode-shell--render-turns)
     (insert "new draft")
     (undo-boundary)

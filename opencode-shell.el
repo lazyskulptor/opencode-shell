@@ -541,7 +541,6 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--normalized-changed-turns nil)
 (defvar-local opencode-shell--message-state-revision 0)
 (defvar-local opencode-shell--submit-in-flight nil)
-(defvar-local opencode-shell--composer-visible t)
 (defvar-local opencode-shell--composer-label-visible t)
 (defvar-local opencode-shell--permissions nil)
 (defvar-local opencode-shell--permission-begin nil)
@@ -2267,8 +2266,17 @@ Return a plist containing affected turns and whether a full render is required."
     (buffer-substring-no-properties opencode-shell--composer-start end)))
 
 (defun opencode-shell--composer-visible-p ()
-  "Return non-nil when the prompt composer should be displayed."
-  opencode-shell--composer-visible)
+  "Return non-nil when authoritative lifecycle state permits editing."
+  (opencode-shell-state-composer-ready-p
+   (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+   opencode-shell--submit-in-flight
+   (opencode-shell--human-interaction-blocked-p)
+   (opencode-shell--initial-hydration-complete-p)))
+
+(defun opencode-shell--initial-hydration-complete-p ()
+  "Return non-nil when initial authoritative snapshots have settled.
+This compatibility adapter remains true until hydration is tracked explicitly."
+  t)
 
 (defun opencode-shell--human-interaction-blocked-p ()
   "Return non-nil while a human interaction blocks new input."
@@ -2333,7 +2341,6 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (unless (equal questions opencode-shell--questions-pending)
       (setq opencode-shell--questions-pending questions)
       (when (opencode-shell--human-interaction-blocked-p)
-        (setq opencode-shell--composer-visible nil)
         (opencode-shell--start-polling))
       (if defer-render
           (opencode-shell--schedule-render "questions")
@@ -2524,7 +2531,6 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (unless (equal permissions opencode-shell--permissions)
       (setq opencode-shell--permissions permissions)
       (when (opencode-shell--permission-blocked-p)
-        (setq opencode-shell--composer-visible nil)
         (opencode-shell--start-polling))
       (if defer-render
           (opencode-shell--schedule-render "permissions")
@@ -2574,27 +2580,28 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                (opencode-shell--insert-user-prompt turn)))
     (opencode-shell--insert-permission-results (opencode-shell--turn-id turn))
     (let ((response-begin (point)))
-      (insert (opencode-shell--tool-name-display turn))
-      (if (eq (opencode-shell--turn-status turn) 'complete)
-          (let ((answer (opencode-shell--assistant-display-text turn)))
-            (insert (propertize "ASSISTANT>\n" 'face
-                                'opencode-shell-assistant-face)
-                    (or answer "")
-                    (opencode-shell--turn-terminal-error-suffix turn)
-                    "\n\n"))
-        (insert
-         (propertize
-          (pcase (opencode-shell--turn-status turn)
-            ('sending (opencode-shell--status-display "Sending"))
-            ('thinking (opencode-shell--status-display "Thinking"))
-            ('receiving (opencode-shell--status-display "Receiving"))
-            ('recovering (opencode-shell--status-display "Recovering"))
-            ('aborting (opencode-shell--status-display "Aborting"))
-            ('error "Request state is uncertain; resync with g r\n\n")
-            (_ (opencode-shell--status-display "Waiting for response")))
-          'face (if (eq (opencode-shell--turn-status turn) 'error)
-                    'opencode-shell-error-face
-                  'opencode-shell-waiting-face))))
+      (unless (eq turn (opencode-shell--permission-status-turn))
+        (insert (opencode-shell--tool-name-display turn))
+        (if (eq (opencode-shell--turn-status turn) 'complete)
+            (let ((answer (opencode-shell--assistant-display-text turn)))
+              (insert (propertize "ASSISTANT>\n" 'face
+                                  'opencode-shell-assistant-face)
+                      (or answer "")
+                      (opencode-shell--turn-terminal-error-suffix turn)
+                      "\n\n"))
+          (insert
+           (propertize
+            (pcase (opencode-shell--turn-status turn)
+              ('sending (opencode-shell--status-display "Sending"))
+              ('thinking (opencode-shell--status-display "Thinking"))
+              ('receiving (opencode-shell--status-display "Receiving"))
+              ('recovering (opencode-shell--status-display "Recovering"))
+              ('aborting (opencode-shell--status-display "Aborting"))
+              ('error "Request state is uncertain; resync with g r\n\n")
+              (_ (opencode-shell--status-display "Waiting for response")))
+            'face (if (eq (opencode-shell--turn-status turn) 'error)
+                      'opencode-shell-error-face
+                    'opencode-shell-waiting-face)))))
       (let ((response-end (point)))
         (add-text-properties user-begin user-end
                              '(read-only t rear-nonsticky (read-only face)))
@@ -2621,9 +2628,12 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                       markers)
          (apply #'<= (mapcar #'marker-position markers)))))
 
-(defun opencode-shell--response-display (turn)
+(defun opencode-shell--response-display (turn &optional relocated)
   "Return the propertized response display for TURN."
-  (concat
+  (if (and (not relocated)
+           (eq turn (opencode-shell--permission-status-turn)))
+      ""
+    (concat
    (opencode-shell--tool-name-display turn)
    (if (eq (opencode-shell--turn-status turn) 'complete)
        (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
@@ -2638,8 +2648,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         ('aborting (opencode-shell--status-display "Aborting"))
         ('error "Request failed\n\n")
         (_ (opencode-shell--status-display "Waiting for response")))
-      'face (if (eq (opencode-shell--turn-status turn) 'error)
-                'opencode-shell-error-face 'opencode-shell-waiting-face)))))
+       'face (if (eq (opencode-shell--turn-status turn) 'error)
+                 'opencode-shell-error-face 'opencode-shell-waiting-face))))))
 
 (defun opencode-shell--tool-name-display (turn)
   "Return payload-free tool names observed in TURN."
@@ -2668,7 +2678,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 (defun opencode-shell--permission-status-display ()
   "Return transient status displayed below the permission card."
   (when-let ((turn (opencode-shell--permission-status-turn)))
-    (opencode-shell--response-display turn)))
+    (opencode-shell--response-display turn t)))
 
 (defun opencode-shell--status-display (label)
   "Return LABEL with the current UI-only spinner frame."
@@ -2915,13 +2925,13 @@ CHANGED-TURNS into the response blocks pending incremental update."
     opencode-shell--turns)
    opencode-shell--request-status
    opencode-shell--submit-in-flight
-   opencode-shell--composer-visible))
+   (opencode-shell--composer-visible-p)))
 
 (defun opencode-shell--message-lifecycle-signature ()
   "Return top-level message lifecycle state outside individual turns."
   (list opencode-shell--request-status
         opencode-shell--submit-in-flight
-        opencode-shell--composer-visible))
+        (opencode-shell--composer-visible-p)))
 
 (defun opencode-shell--update-message-lifecycle-state ()
   "Derive request and composer lifecycle state from normalized turns."
@@ -2936,9 +2946,7 @@ CHANGED-TURNS into the response blocks pending incremental update."
                              (opencode-shell--turn-id entry)))
                     opencode-shell--turns)))
     (when (eq (opencode-shell--turn-status turn) 'complete)
-      (unless (opencode-shell--permission-blocked-p)
-        (setq opencode-shell--submit-in-flight nil
-              opencode-shell--composer-visible t))))
+      (setq opencode-shell--submit-in-flight nil)))
   (when (and (not (opencode-shell--permission-blocked-p))
              (not (opencode-shell-state-polling-needed-p
                    (mapcar #'opencode-shell--turn-status opencode-shell--turns)
@@ -3152,7 +3160,6 @@ When FULL is non-nil, also refresh metadata and capabilities."
                   :user text :status 'sending)))
       (setq opencode-shell--turns (append opencode-shell--turns (list turn))
             opencode-shell--request-status "sending"
-            opencode-shell--composer-visible nil
             opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
        (opencode-shell--replace-composer "")
        (opencode-shell--render-turns)
@@ -3200,9 +3207,6 @@ When FULL is non-nil, also refresh metadata and capabilities."
                                          (equal opencode-shell--submit-in-flight
                                                 (opencode-shell--turn-id target)))
                                  (setq opencode-shell--submit-in-flight nil))
-                               (unless (or opencode-shell--submit-in-flight
-                                           (opencode-shell--permission-blocked-p))
-                                 (setq opencode-shell--composer-visible t))
                                 (opencode-shell--schedule-render "abort-ack")
                                (opencode-shell--log-lifecycle "abort-ack" t)
                                (opencode-shell--resync)) '())))

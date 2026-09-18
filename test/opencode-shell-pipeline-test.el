@@ -29,12 +29,27 @@
     (should (string-match-p "TOOL> shell" (buffer-string)))
     (should-not (string-match-p "PRIVATE TOOL PAYLOAD" (buffer-string)))))
 
+(ert-deftest opencode-shell-pipeline-restored-receiving-turn-hides-composer ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list
+      (opencode-shell-pipeline-test--message "u1" "user" "question")
+      '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+        (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+    (should-not opencode-shell--submit-in-flight)
+    (should-not (opencode-shell--composer-visible-p))
+    (should (= 0 (how-many "Prompt>\n" (point-min) (point-max))))))
+
 (ert-deftest opencode-shell-pipeline-characterizes-response-protection ()
   (with-temp-buffer
     (opencode-shell-mode)
     (opencode-shell--render-messages
-     (list (opencode-shell-pipeline-test--message "u1" "user" "question")
-           (opencode-shell-pipeline-test--message "a1" "assistant" "answer" "u1")))
+     (list
+      (opencode-shell-pipeline-test--message "u1" "user" "question")
+      '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                  (finish . "stop") (time . ((completed . 1)))))
+        (parts . (((type . "text") (text . "answer")))))))
     (let* ((turn (car opencode-shell--turns))
            (begin (marker-position (opencode-shell--turn-response-begin turn)))
            (end (marker-position (opencode-shell--turn-response-end turn))))

@@ -95,10 +95,10 @@
               (parts . (((type . "text") (text . "질문")))))
              ((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
               (parts . (((id . "a1-text") (type . "text") (text . "응답 중"))))))))
-      (opencode-shell--render-messages messages 1)
       (goto-char opencode-shell--composer-start)
       (insert "작성 중")
       (goto-char (+ opencode-shell--composer-start 2))
+      (opencode-shell--render-messages messages 1)
       (let ((before (buffer-string))
             (tick (buffer-chars-modified-tick))
             (position (point)))
@@ -120,11 +120,11 @@
           (with-current-buffer buffer
             (opencode-shell-mode)
             (setq opencode-shell--session-id "acceptance-stability")
-            (opencode-shell--render-messages
-             opencode-shell-test--active-transcript-snapshot 1)
             (goto-char opencode-shell--composer-start)
             (insert "작성 중인 초안")
             (goto-char (+ opencode-shell--composer-start 4))
+            (opencode-shell--render-messages
+             opencode-shell-test--active-transcript-snapshot 1)
             (opencode-shell--receive-permissions
              opencode-shell-test--pending-permission-snapshot)
             (opencode-shell--receive-questions
