@@ -631,6 +631,12 @@ profiles make the result ambiguous."
     (((class color) (background light)) :background "#f0f2f4" :extend t)
     (t :inherit default))
   "Subtle background face for the writable composer." :group 'opencode-shell)
+(defface opencode-shell-active-session-face
+  '((t :inherit success :weight bold))
+  "Face for an active session-browser location." :group 'opencode-shell)
+(defface opencode-shell-recent-session-face
+  '((t :inherit shadow))
+  "Face for a saved session-browser location." :group 'opencode-shell)
 
 
 
@@ -3453,13 +3459,14 @@ When FULL is non-nil, also refresh metadata and capabilities."
 
 (defun opencode-shell--sync-input-policy ()
   "Synchronize Composer editability and Evil state with lifecycle readiness."
-  (setq-local buffer-read-only (not (opencode-shell--composer-visible-p)))
-  (when (and (bound-and-true-p evil-local-mode)
-             (boundp 'evil-state)
-             (eq evil-state 'insert)
-             (not (opencode-shell--in-composer-p))
-             (fboundp 'evil-force-normal-state))
-    (evil-force-normal-state)))
+  (let ((inhibit-read-only t))
+    (setq-local buffer-read-only (not (opencode-shell--composer-visible-p)))
+    (when (and (bound-and-true-p evil-local-mode)
+               (boundp 'evil-state)
+               (eq evil-state 'insert)
+               (not (opencode-shell--in-composer-p))
+               (fboundp 'evil-force-normal-state))
+      (evil-force-normal-state))))
 
 (defun opencode-shell--install-input-policy-hooks ()
   "Install buffer-local Composer input policy hooks."

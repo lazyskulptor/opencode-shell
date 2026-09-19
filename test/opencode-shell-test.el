@@ -3439,7 +3439,9 @@
     (should (eq (get-text-property 0 'face (car active))
                 'opencode-shell-active-session-face))
     (should (eq (get-text-property 0 'face (car recent))
-                'opencode-shell-recent-session-face))))
+                'opencode-shell-recent-session-face))
+    (should (facep 'opencode-shell-active-session-face))
+    (should (facep 'opencode-shell-recent-session-face))))
 
 (ert-deftest opencode-shell-switch-buffer-shows-title-and-buffer-name ()
   (let ((shell (generate-new-buffer "*Opencode project shell*")) prompt selected)
