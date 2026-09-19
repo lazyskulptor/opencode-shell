@@ -1742,8 +1742,21 @@
         (should-error (opencode-shell--previous-turn) :type 'user-error)
         (should (= (point) first))
         (goto-char third)
-        (should-error (opencode-shell--next-turn) :type 'user-error)
+        (opencode-shell--next-turn)
+        (should (= (point) opencode-shell--composer-start))
+        (opencode-shell--previous-turn)
         (should (= (point) third))))))
+
+(ert-deftest opencode-shell-turn-navigation-skips-hidden-composer ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "active" :user "question"
+                                            :status 'receiving)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns)
+      (goto-char (opencode-shell--turn-user-begin turn))
+      (should-error (opencode-shell--next-turn) :type 'user-error)
+      (should (= (point) (opencode-shell--turn-user-begin turn))))))
 
 (ert-deftest opencode-shell-turn-navigation-normalizes-active-evil-state ()
   (with-temp-buffer
@@ -1764,7 +1777,8 @@
         (should (= (point) (opencode-shell--turn-user-begin second)))
         (setq entered-normal nil)
         (goto-char (opencode-shell--turn-user-begin second))
-        (should-error (opencode-shell--next-turn) :type 'user-error)
+        (opencode-shell--next-turn)
+        (should (= (point) opencode-shell--composer-start))
         (should-not entered-normal)))))
 
 (ert-deftest opencode-shell-reconciles-identical-local-prompts-in-order ()

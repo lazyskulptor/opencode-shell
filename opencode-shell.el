@@ -1371,6 +1371,12 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       (> candidate position)
                     (< candidate position))
               (push candidate candidates))))))
+    (when (and (eq direction 'next)
+               (opencode-shell--composer-visible-p)
+               (markerp opencode-shell--composer-start)
+               (marker-position opencode-shell--composer-start)
+               (> opencode-shell--composer-start position))
+      (push opencode-shell--composer-start candidates))
     (if (eq direction 'next)
         (and candidates (apply #'min candidates))
       (and candidates (apply #'max candidates)))))
@@ -1379,7 +1385,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Move to the nearest rendered user prompt in DIRECTION."
   (if-let ((target (opencode-shell--turn-navigation-target direction)))
       (progn
-        (when (and (bound-and-true-p evil-local-mode)
+        (when (and (/= target opencode-shell--composer-start)
+                   (bound-and-true-p evil-local-mode)
                    (fboundp 'evil-normal-state))
           (evil-normal-state))
         (goto-char target))

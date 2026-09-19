@@ -191,6 +191,9 @@ selects only live transcript buffers, and `C-c o f` selects a canonical
 newest-first server session. The session selector marks live transcripts as
 active and recent inactive sessions with distinct faces, then opens or reuses the
 selection like `find-file`.
+`C-n` and `C-p` move between submitted `USER>` prompts; after the final completed
+response, `C-n` moves to the visible writable `Prompt>`. Hidden or blocked
+Composers are not navigation targets.
 In transcript Evil normal state, `?` opens this help and `RET` submits the
 composer. Insert state keeps `?` as text input and `RET` as a newline. Native
 Evil edits such as `dd`, `I`, `A`, `o`, and `O` retain their standard behavior
