@@ -520,6 +520,8 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--composer-overlay nil)
+(defvar-local opencode-shell--composer-protection-overlay nil)
+(defvar-local opencode-shell--composer-input-ready nil)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--render-force nil)
@@ -1634,15 +1636,15 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
           opencode-shell--permission-end (copy-marker (point) nil)
           opencode-shell--permission-status-begin (copy-marker (point) nil)
            opencode-shell--permission-status-end (copy-marker (point) nil)))
-    (opencode-shell--insert-composer-sentinel)
-  (opencode-shell--refresh-composer-overlay)
-  (opencode-shell--configure-evil-buffer)
+   (opencode-shell--insert-composer-sentinel)
+   (opencode-shell--refresh-composer-overlay)
+   (opencode-shell--configure-evil-buffer)
+   (opencode-shell--sync-input-policy)
   ;; Mode-owned scaffolding must never become the first undoable transcript edit.
   (setq buffer-undo-list nil)
-  (goto-char opencode-shell--composer-start)
-  (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
-   (opencode-shell--install-input-policy-hooks)
-   (add-hook 'post-command-hook #'opencode-shell--ensure-composer-sentinel nil t)
+   (goto-char opencode-shell--composer-start)
+   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
+    (add-hook 'post-command-hook #'opencode-shell--ensure-composer-sentinel nil t)
   (add-hook 'window-configuration-change-hook
             #'opencode-shell--refresh-table-layout nil t)
   (add-hook 'window-configuration-change-hook
@@ -1662,9 +1664,11 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
      opencode-shell--runtime-key (current-buffer)))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (opencode-shell--clear-spinner-overlays)
-  (when (overlayp opencode-shell--composer-overlay)
-    (delete-overlay opencode-shell--composer-overlay))
-  (setq opencode-shell--composer-overlay nil)
+   (dolist (overlay (list opencode-shell--composer-overlay
+                          opencode-shell--composer-protection-overlay))
+     (when (overlayp overlay) (delete-overlay overlay)))
+   (setq opencode-shell--composer-overlay nil
+         opencode-shell--composer-protection-overlay nil)
   (setq opencode-shell--runtime-key nil)
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
@@ -3458,20 +3462,30 @@ When FULL is non-nil, also refresh metadata and capabilities."
        (message "Question rejection failed")))))
 
 (defun opencode-shell--sync-input-policy ()
-  "Synchronize Composer editability and Evil state with lifecycle readiness."
-  (let ((inhibit-read-only t))
-    (setq-local buffer-read-only (not (opencode-shell--composer-visible-p)))
-    (when (and (bound-and-true-p evil-local-mode)
-               (boundp 'evil-state)
-               (eq evil-state 'insert)
-               (not (opencode-shell--in-composer-p))
-               (fboundp 'evil-force-normal-state))
-      (evil-force-normal-state))))
-
-(defun opencode-shell--install-input-policy-hooks ()
-  "Install buffer-local Composer input policy hooks."
-  (add-hook 'pre-command-hook #'opencode-shell--sync-input-policy nil t)
-  (add-hook 'post-command-hook #'opencode-shell--sync-input-policy nil t))
+  "Synchronize regional Composer protection with lifecycle readiness."
+  (let ((ready (opencode-shell--composer-visible-p)))
+    (when (and opencode-shell--composer-input-ready
+               (not ready)
+               (bound-and-true-p evil-local-mode)
+               (fboundp 'evil-insert-state-p)
+               (evil-insert-state-p)
+               (fboundp 'evil-normal-state))
+      (evil-normal-state))
+    (setq-local opencode-shell--composer-input-ready ready)
+    (if ready
+        (when (overlayp opencode-shell--composer-protection-overlay)
+          (delete-overlay opencode-shell--composer-protection-overlay)
+          (setq opencode-shell--composer-protection-overlay nil))
+      (when (and (markerp opencode-shell--composer-start)
+                 (marker-position opencode-shell--composer-start))
+        (unless (overlayp opencode-shell--composer-protection-overlay)
+          (setq opencode-shell--composer-protection-overlay
+                (make-overlay opencode-shell--composer-start (point-max) nil nil t)))
+        (move-overlay opencode-shell--composer-protection-overlay
+                      opencode-shell--composer-start (point-max))
+        (overlay-put opencode-shell--composer-protection-overlay 'read-only t)
+        (overlay-put opencode-shell--composer-protection-overlay
+                     'modification-hooks nil)))))
 
 (defvar evil-move-beyond-eol nil)
 (defvar evil-local-mode)
@@ -3485,15 +3499,50 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (interactive "p")
   (declare-function evil-insert-state "evil-states")
   (declare-function evil-open-below "evil-commands")
-  (if (and (opencode-shell--composer-visible-p)
+  (cond
+   ((not (opencode-shell--evil-edit-allowed-p t)) nil)
+   ((and (string-empty-p (opencode-shell--composer-text))
+         (= (line-beginning-position)
+            (- opencode-shell--composer-start
+               (length opencode-shell--composer-label))))
+    (goto-char opencode-shell--composer-start)
+    (evil-insert-state))
+    (t (evil-open-below count))))
+
+(defun opencode-shell--evil-edit-allowed-p (&optional prompt-line-p)
+  "Return non-nil when the current position may invoke an Evil edit.
+When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
+  (or (opencode-shell--in-composer-p)
+      (and prompt-line-p
+           (opencode-shell--composer-visible-p)
            (string-empty-p (opencode-shell--composer-text))
            (= (line-beginning-position)
               (- opencode-shell--composer-start
-                 (length opencode-shell--composer-label))))
-      (progn
-        (goto-char opencode-shell--composer-start)
-        (evil-insert-state))
-    (evil-open-below count)))
+                 (length opencode-shell--composer-label))))))
+
+(defconst opencode-shell--evil-mutating-commands
+  '(evil-append evil-append-line evil-change evil-change-line
+    evil-delete evil-delete-line evil-indent evil-insert evil-insert-line
+    evil-invert-char evil-join evil-open-above evil-open-below
+    evil-paste-after evil-paste-before evil-replace evil-replace-state
+    evil-shift-left evil-shift-right evil-substitute evil-substitute-line)
+  "Evil commands that may change transcript bytes.")
+
+(defun opencode-shell--evil-edit-in-composer (command)
+  "Run Evil editing COMMAND only at the visible writable Composer."
+  (interactive)
+  (when (opencode-shell--in-composer-p)
+    (call-interactively command)))
+
+(defun opencode-shell--evil-gated-command (command)
+  "Return the interactive gate command for Evil COMMAND."
+  (let ((wrapper (intern (format "opencode-shell--evil-gate-%s" command))))
+    (unless (fboundp wrapper)
+      (fset wrapper
+            `(lambda ()
+               (interactive)
+               (opencode-shell--evil-edit-in-composer #',command))))
+    wrapper))
 
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."
@@ -3505,8 +3554,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (evil-define-key* 'normal opencode-shell-mode-map
     (kbd "RET") #'opencode-shell--submit
     (kbd "<return>") #'opencode-shell--submit
-    (kbd "g r") #'opencode-shell--resync
-    (kbd "?") #'opencode-shell-help
+   (kbd "g r") #'opencode-shell--resync
+   (kbd "?") #'opencode-shell-help
     (kbd "o") #'opencode-shell--evil-open-below
     (kbd "C-n") #'opencode-shell--next-turn
     (kbd "C-p") #'opencode-shell--previous-turn
@@ -3514,7 +3563,10 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "C-c C-v") #'opencode-shell--select-model
     (kbd "C-c C-m") #'opencode-shell--select-agent
     (kbd "C-<tab>") #'opencode-shell--next-agent)
-  (evil-define-key* 'insert opencode-shell-mode-map
+   (dolist (command opencode-shell--evil-mutating-commands)
+     (define-key opencode-shell-mode-map (vector 'remap command)
+       (opencode-shell--evil-gated-command command)))
+   (evil-define-key* 'insert opencode-shell-mode-map
     (kbd "?") #'self-insert-command
     (kbd "RET") #'newline
     (kbd "<return>") #'newline
@@ -4089,11 +4141,11 @@ ACTIVE means that their session browser is already live."
           (setq-local header-line-format nil))
          ((derived-mode-p 'opencode-shell-mode)
           (use-local-map opencode-shell-mode-map)
-           (setq-local header-line-format '(:eval (opencode-shell--header))
-                       mode-line-process '(:eval (opencode-shell--mode-line-status)))
-           (opencode-shell--configure-evil-buffer)
-           (opencode-shell--install-input-policy-hooks)
-           (opencode-shell--refresh-composer-overlay)))))
+            (setq-local header-line-format '(:eval (opencode-shell--header))
+                        mode-line-process '(:eval (opencode-shell--mode-line-status)))
+            (opencode-shell--configure-evil-buffer)
+            (opencode-shell--refresh-composer-overlay)
+            (opencode-shell--sync-input-policy)))))
       (dolist (buffer active-buffers)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer

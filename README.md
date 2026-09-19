@@ -134,8 +134,9 @@ When a session opens, the Composer stays unavailable until successful message,
 permission, and question snapshots have all arrived, including valid empty
 snapshots. A transient failure keeps input blocked and shows a recovery message;
 use `g r` to retry the authoritative hydration.
-While the Composer is blocked, the transcript is buffer-read-only and Evil
-returns to normal state; completion restores Composer editability but does not
+While the Composer is blocked, its retained region remains read-only and Evil
+editing commands are inert outside the writable Composer.  Blocking returns
+Evil to normal state; completion restores Composer editability but does not
 enter insert state automatically.
 The transcript shows sending, waiting, receiving, recovering, aborting, or error
 state and never replaces an already completed response with stale data. Pending

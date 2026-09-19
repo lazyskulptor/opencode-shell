@@ -78,8 +78,10 @@ as normal `require` loading.
   never reach presentation, logs, tests, screenshots, or commits.
 - Composer readiness is derived state. A non-complete turn, local submission,
   pending human interaction, or incomplete initial hydration blocks it.
-- Rendered history is read-only; rerenders preserve Composer draft, point,
-  markers, undo history, and window state.
+- Rendered history is read-only.  A blocked Composer is protected regionally,
+  while Evil mutating commands are inert outside the writable Composer;
+  rerenders preserve Composer draft, point, markers, undo history, and window
+  state.
 
 ## Module ownership
 
