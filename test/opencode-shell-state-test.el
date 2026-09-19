@@ -23,6 +23,7 @@
 (ert-deftest opencode-shell-state-polling-follows-unsettled-work ()
   (should (opencode-shell-state-polling-needed-p '(receiving) nil))
   (should (opencode-shell-state-polling-needed-p '(complete) "request"))
+  (should (opencode-shell-state-polling-needed-p '(complete) nil t))
   (should-not (opencode-shell-state-polling-needed-p '(complete) nil)))
 
 (ert-deftest opencode-shell-state-composer-readiness-truth-table ()

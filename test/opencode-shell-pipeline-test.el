@@ -225,5 +225,28 @@
         (funcall (alist-get 'questions callbacks) nil)
         (should (opencode-shell--composer-visible-p))))))
 
+(ert-deftest opencode-shell-pipeline-receiving-removes-stale-composer-label ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    ;; Simulate a stale presentation cache from a live/reloaded session.
+    (setq opencode-shell--composer-label-visible nil)
+    (opencode-shell--render-messages
+     (list (opencode-shell-pipeline-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((type . "text") (text . "partial")))))))
+    (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                'receiving))
+    (should-not (string-match-p "Prompt>\n" (buffer-string)))))
+
+(ert-deftest opencode-shell-pipeline-pending-hydration-keeps-polling-alive ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--begin-initial-hydration)
+    (let (stopped)
+      (cl-letf (((symbol-function 'opencode-shell--stop-polling)
+                 (lambda () (setq stopped t))))
+        (opencode-shell--render-messages nil)
+        (should-not stopped)))))
+
 (provide 'opencode-shell-pipeline-test)
 ;;; opencode-shell-pipeline-test.el ends here

@@ -39,9 +39,12 @@ active server phase has been observed yet."
       (and submit-in-flight 'sending)
       'idle))
 
-(defun opencode-shell-state-polling-needed-p (statuses submit-in-flight)
-  "Return non-nil when unfinished STATUSES or SUBMIT-IN-FLIGHT require polling."
-  (or submit-in-flight
+(defun opencode-shell-state-polling-needed-p
+    (statuses submit-in-flight &optional hydration-incomplete-p)
+  "Return non-nil when lifecycle work requires polling.
+This includes unfinished STATUSES, SUBMIT-IN-FLIGHT, or HYDRATION-INCOMPLETE-P."
+  (or hydration-incomplete-p
+      submit-in-flight
       (seq-some #'opencode-shell-state-turn-active-p statuses)))
 
 (defun opencode-shell-state-composer-ready-p

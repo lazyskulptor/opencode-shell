@@ -2911,7 +2911,8 @@ CHANGED-TURNS into the response blocks pending incremental update."
   (when (and (not (opencode-shell--human-interaction-blocked-p))
              (not (opencode-shell-state-polling-needed-p
                    (mapcar #'opencode-shell--turn-status opencode-shell--turns)
-                   opencode-shell--submit-in-flight)))
+                   opencode-shell--submit-in-flight
+                    (not (opencode-shell--initial-hydration-complete-p)))))
     (opencode-shell--stop-polling)))
 
 
