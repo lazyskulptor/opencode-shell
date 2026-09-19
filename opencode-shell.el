@@ -3629,9 +3629,13 @@ When FULL is non-nil, also refresh metadata and capabilities."
                (memq (process-status process) '(exit signal failed))
                (eq process (plist-get state :process)))
       (if-let ((restart-profile (plist-get state :restart-profile)))
-          (progn
+          (let ((callbacks (plist-get state :callbacks)))
             (remhash key opencode-shell--servers)
-            (opencode-shell--start-server restart-profile))
+            (opencode-shell--start-server
+             restart-profile
+             (lambda (_ready)
+               (dolist (entry (nreverse callbacks))
+                 (funcall (car entry) (cdr entry))))))
         (if (and (plist-get state :starting)
                  (opencode-shell--attempt-current-p key attempt))
             (let* ((state (gethash key opencode-shell--servers))
@@ -3694,7 +3698,9 @@ Concurrent starts for one server are coalesced.  A remote profile may use
           (command (plist-get profile :start-command)))
     (let ((config (opencode-shell--validate-server-profile profile state)))
     (cond
-     ((or (plist-get state :checking) (plist-get state :starting))
+      ((or (plist-get state :checking)
+           (plist-get state :starting)
+           (plist-get state :restart-profile))
       (when callback
         (puthash key (plist-put state :callbacks
                                 (cons (cons callback profile)
