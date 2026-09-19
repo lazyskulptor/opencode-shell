@@ -510,6 +510,11 @@ profiles make the result ambiguous."
 (defvar-local opencode-shell--session-id nil)
 (defvar-local opencode-shell--models nil)
 (defvar-local opencode-shell--agents nil)
+(defvar-local opencode-shell--configured-model nil)
+(defvar-local opencode-shell--agent-model-history nil)
+(defvar-local opencode-shell--agent-model-overrides nil)
+(defvar-local opencode-shell--last-history-agent nil)
+(defvar-local opencode-shell--selection-user-chosen-p nil)
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--runtime-key nil)
@@ -1284,18 +1289,69 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                 default-directory
                 (opencode-shell--client-directory destination profile))))
 
+(defun opencode-shell--available-model (model)
+  "Return MODEL normalized to a connected server-advertised model, or nil."
+  (when-let ((value (opencode-shell--model-value model)))
+    (when-let ((entry (seq-find (lambda (item) (equal (cdr item) value))
+                                opencode-shell--models)))
+      (cdr entry))))
+
+(defun opencode-shell--agent-model (agent)
+  "Return AGENT's highest-priority available model."
+  (let ((configured (cdr (assoc agent opencode-shell--agents))))
+    (seq-some #'opencode-shell--available-model
+              (list (alist-get agent opencode-shell--agent-model-overrides nil nil #'equal)
+                    (alist-get agent opencode-shell--agent-model-history nil nil #'equal)
+                    (and configured (opencode-shell--get configured 'model))
+                    opencode-shell--configured-model))))
+
+(defun opencode-shell--activate-agent (agent &optional user-chosen)
+  "Select visible AGENT and its resolved model.
+When USER-CHOSEN is non-nil, later history hydration does not replace it."
+  (unless (assoc agent opencode-shell--agents)
+    (user-error "Agent is no longer available: %s" agent))
+  (setq opencode-shell--selected-agent agent
+        opencode-shell--selected-model (opencode-shell--agent-model agent)
+        opencode-shell--selection-user-chosen-p
+        (or opencode-shell--selection-user-chosen-p user-chosen))
+  (force-mode-line-update))
+
+(defun opencode-shell--restore-agent-model-history (messages)
+  "Restore per-agent model history and active agent from user MESSAGES."
+  (let (history last-agent)
+    (dolist (envelope messages)
+      (let ((info (opencode-shell--get envelope 'info)))
+        (when (equal (format "%s" (opencode-shell--get info 'role)) "user")
+          (when-let ((agent (opencode-shell--get info 'agent)))
+            (setq last-agent agent)
+            (when-let ((model (opencode-shell--model-value
+                               (opencode-shell--get info 'model))))
+              (setf (alist-get agent history nil nil #'equal) model))))))
+    (setq opencode-shell--agent-model-history history
+          opencode-shell--last-history-agent last-agent)
+    (dolist (override (copy-sequence opencode-shell--agent-model-overrides))
+      (when (equal (cdr override)
+                   (alist-get (car override) history nil nil #'equal))
+        (setq opencode-shell--agent-model-overrides
+              (assoc-delete-all (car override)
+                                opencode-shell--agent-model-overrides
+                                #'equal))))
+    (when opencode-shell--capabilities-loaded
+      (opencode-shell--initialize-server-defaults))))
+
 (defun opencode-shell--initialize-server-defaults ()
-  "Initialize unset selections from OpenCode's build agent."
-  (when-let* ((build (cdr (assoc "build" opencode-shell--agents)))
-              (configured (opencode-shell--model-value
-                           (opencode-shell--get build 'model)))
-              (available (seq-find
-                          (lambda (entry) (equal (cdr entry) configured))
-                          opencode-shell--models)))
-    (unless opencode-shell--selected-agent
-      (setq opencode-shell--selected-agent "build"))
-    (unless opencode-shell--selected-model
-      (setq opencode-shell--selected-model (cdr available)))))
+  "Initialize agent and model selections from session history or build defaults."
+  (when opencode-shell--agents
+    (let ((agent (or (and (not opencode-shell--selection-user-chosen-p)
+                          (assoc opencode-shell--last-history-agent
+                                 opencode-shell--agents)
+                          opencode-shell--last-history-agent)
+                     opencode-shell--selected-agent
+                     (and (assoc "build" opencode-shell--agents) "build")
+                     (caar opencode-shell--agents))))
+      (when agent
+        (setq opencode-shell--selected-agent agent
+              opencode-shell--selected-model (opencode-shell--agent-model agent))))))
 
 (defun opencode-shell-help ()
   "Display the transcript Transient menu."
@@ -1328,6 +1384,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     (define-key map (kbd "s-<return>") #'opencode-shell--submit)
     (define-key map (kbd "C-c C-v") #'opencode-shell--select-model)
     (define-key map (kbd "C-c C-m") #'opencode-shell--select-agent)
+    (define-key map (kbd "C-<tab>") #'opencode-shell--next-agent)
     (define-key map (kbd "C-c C-g") #'opencode-shell--resync)
     (define-key map (kbd "C-c C-a") #'opencode-shell--abort)
     (define-key map (kbd "C-c C-p") #'opencode-shell--permissions)
@@ -2942,6 +2999,8 @@ non-nil, remove cached server messages absent from the snapshot."
       (when sequence (setq opencode-shell--message-applied-sequence sequence))
       (setq cache-result
             (opencode-shell--cache-message-snapshot messages authoritative))
+      (when authoritative
+        (opencode-shell--restore-agent-model-history messages))
       (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
       (setq opencode-shell--normalized-changed-turns
             (seq-uniq
@@ -3071,7 +3130,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (opencode-shell--refresh-questions))
   (when (and full
              (not opencode-shell--capabilities-loading))
-    (let ((remaining 2) failed)
+    (let ((remaining 3) failed)
       (setq opencode-shell--capabilities-loading t)
       (cl-labels ((settle (failure)
                     (setq failed (or failed failure)
@@ -3092,14 +3151,22 @@ When FULL is non-nil, also refresh metadata and capabilities."
            (settle nil))
          nil (lambda () (settle t)))
         (opencode-shell--guarded-request
-         'agents "GET" "/agent"
-         (lambda (response)
-           (setq opencode-shell--agents (opencode-shell--normalize-agents response))
-           (unless (assoc opencode-shell--selected-agent opencode-shell--agents)
-             (setq opencode-shell--selected-agent nil))
-           (force-mode-line-update)
-           (settle nil))
-         nil (lambda () (settle t)))))))
+          'agents "GET" "/agent"
+          (lambda (response)
+            (setq opencode-shell--agents (opencode-shell--normalize-agents response))
+            (unless (assoc opencode-shell--selected-agent opencode-shell--agents)
+              (setq opencode-shell--selected-agent nil))
+            (force-mode-line-update)
+            (settle nil))
+          nil (lambda () (settle t)))
+         (opencode-shell--guarded-request
+          'config "GET" "/config"
+          (lambda (response)
+            (setq opencode-shell--configured-model
+                  (opencode-shell--model-value
+                   (opencode-shell--get response 'model)))
+            (settle nil))
+          nil (lambda () (settle t)))))))
 
 (defun opencode-shell--select-model ()
   "Select a server-advertised model for subsequent prompts."
@@ -3108,7 +3175,12 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (let* ((choice (completing-read "Model: " opencode-shell--models nil t))
          (entry (assoc choice opencode-shell--models)))
     (unless entry (user-error "Model is no longer available: %s" choice))
-    (setq opencode-shell--selected-model (cdr entry)))
+    (setq opencode-shell--selected-model (cdr entry)
+          opencode-shell--selection-user-chosen-p t)
+    (when opencode-shell--selected-agent
+      (setf (alist-get opencode-shell--selected-agent
+                        opencode-shell--agent-model-overrides nil nil #'equal)
+            (cdr entry))))
   (force-mode-line-update))
 
 (defun opencode-shell--select-agent ()
@@ -3118,8 +3190,15 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (let* ((choice (completing-read "Agent: " opencode-shell--agents nil t))
          (entry (assoc choice opencode-shell--agents)))
     (unless entry (user-error "Agent is no longer available: %s" choice))
-    (setq opencode-shell--selected-agent (car entry)))
-  (force-mode-line-update))
+    (opencode-shell--activate-agent (car entry) t)))
+
+(defun opencode-shell--next-agent ()
+  "Select the next visible primary agent, wrapping at the end."
+  (interactive)
+  (unless opencode-shell--agents (user-error "No agents loaded; resync first"))
+  (let* ((names (mapcar #'car opencode-shell--agents))
+         (tail (member opencode-shell--selected-agent names)))
+    (opencode-shell--activate-agent (or (cadr tail) (car names)) t)))
 
 (defun opencode-shell--prompt-body (text)
   "Return the legacy prompt payload for TEXT and current selections."
@@ -3418,13 +3497,15 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (kbd "C-p") #'opencode-shell--previous-turn
     (kbd "C-c C-c") #'opencode-shell--submit
     (kbd "C-c C-v") #'opencode-shell--select-model
-    (kbd "C-c C-m") #'opencode-shell--select-agent)
+    (kbd "C-c C-m") #'opencode-shell--select-agent
+    (kbd "C-<tab>") #'opencode-shell--next-agent)
   (evil-define-key* 'insert opencode-shell-mode-map
     (kbd "?") #'self-insert-command
     (kbd "RET") #'newline
     (kbd "<return>") #'newline
     (kbd "C-n") #'opencode-shell--next-turn
-    (kbd "C-p") #'opencode-shell--previous-turn)
+    (kbd "C-p") #'opencode-shell--previous-turn
+    (kbd "C-<tab>") #'opencode-shell--next-agent)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map
     (kbd "RET") #'opencode-shell--open-at-point
     (kbd "g r") #'opencode-shell--refresh

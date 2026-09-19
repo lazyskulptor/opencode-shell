@@ -1005,15 +1005,16 @@
                  (lambda (_ path callback &optional _body _params error-callback)
                    (push (list path callback error-callback) requests))))
         (opencode-shell--resync t)
-        (should (= (length requests) 6))
+        (should (= (length requests) 7))
         (should opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         ;; A poll while the capability pair is pending must not overlap it.
         (opencode-shell--resync t)
-        (should (= (length requests) 6))
+        (should (= (length requests) 7))
         (funcall (cadr (assoc "/provider" requests)) '((providers . nil)))
         (should-not opencode-shell--capabilities-loaded)
         (funcall (cadr (assoc "/agent" requests)) nil)
+        (funcall (cadr (assoc "/config" requests)) nil)
         (should opencode-shell--capabilities-loaded)
         (should-not opencode-shell--capabilities-loading)
         (let ((old (cadr (assoc "/session/s/message" requests))))
@@ -1080,15 +1081,17 @@
         (funcall (nth 2 (assoc "/provider" requests)))
         (should opencode-shell--capabilities-loading)
         (funcall (cadr (assoc "/agent" requests)) nil)
+        (funcall (nth 2 (assoc "/config" requests)))
         (should-not opencode-shell--capabilities-loading)
         (should-not opencode-shell--capabilities-loaded)
         (setq requests nil)
         (opencode-shell--resync t)
         ;; The still-pending message poll remains guarded; only the failed
         ;; capability batch is retried.
-        (should (= (length requests) 2))
+        (should (= (length requests) 3))
         (should (assoc "/provider" requests))
-        (should (assoc "/agent" requests))))))
+        (should (assoc "/agent" requests))
+        (should (assoc "/config" requests))))))
 
 (ert-deftest opencode-shell-poll-error-releases-guard ()
   (with-temp-buffer
@@ -3241,11 +3244,12 @@
   (should (eq (lookup-key opencode-shell-mode-map (kbd "s-<return>")) #'opencode-shell--submit))
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-v")) #'opencode-shell--select-model))
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-m")) #'opencode-shell--select-agent))
+  (should (eq (lookup-key opencode-shell-mode-map (kbd "C-<tab>")) #'opencode-shell--next-agent))
   (with-temp-buffer
     (opencode-shell-mode)
     (setq opencode-shell--directory "/work" opencode-shell--session-id "session"
           opencode-shell--models '(("p/m" . ((providerID . "p") (modelID . "m"))))
-          opencode-shell--agents '(("build" . ((name . "build")))))
+           opencode-shell--agents '(("build" . ((name . "build") (model . "p/m")))))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (prompt &rest _) (if (string-prefix-p "Model" prompt) "p/m" "build"))))
       (opencode-shell--select-model)
@@ -3317,8 +3321,85 @@
           '(("build" . ((name . "build") (model . "p/m"))))
           opencode-shell--models nil)
     (opencode-shell--initialize-server-defaults)
-    (should-not opencode-shell--selected-agent)
+    (should (equal opencode-shell--selected-agent "build"))
     (should-not opencode-shell--selected-model)))
+
+(ert-deftest opencode-shell-agent-model-history-restores-agent-and-models ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--models
+          '(("p/one" . ((providerID . "p") (modelID . "one")))
+            ("p/two" . ((providerID . "p") (modelID . "two")))
+            ("p/three" . ((providerID . "p") (modelID . "three"))))
+          opencode-shell--agents
+          '(("build" . ((name . "build") (model . "p/one")))
+            ("plan" . ((name . "plan") (model . "p/two"))))
+          opencode-shell--configured-model "p/three"
+          opencode-shell--capabilities-loaded t)
+    (opencode-shell--restore-agent-model-history
+     '(((info . ((role . "user") (agent . "build") (model . "p/two"))))
+       ((info . ((role . "user") (agent . "plan") (model . "p/three"))))))
+    (should (equal opencode-shell--selected-agent "plan"))
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "three"))))
+    (opencode-shell--activate-agent "build")
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "two"))))
+    (opencode-shell--activate-agent "plan")
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "three"))))))
+
+(ert-deftest opencode-shell-agent-model-overrides-are-independent ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--models
+          '(("p/one" . ((providerID . "p") (modelID . "one")))
+            ("p/two" . ((providerID . "p") (modelID . "two"))))
+          opencode-shell--agents
+          '(("build" . ((name . "build") (model . "p/one")))
+            ("plan" . ((name . "plan") (model . "p/one"))))
+          opencode-shell--capabilities-loaded t)
+    (opencode-shell--initialize-server-defaults)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "p/two")))
+      (opencode-shell--select-model))
+    (opencode-shell--activate-agent "plan")
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "one"))))
+    (opencode-shell--activate-agent "build")
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "two"))))))
+
+(ert-deftest opencode-shell-build-falls-back-to-configured-model ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--models
+          '(("p/global" . ((providerID . "p") (modelID . "global"))))
+          opencode-shell--agents '(("build" . ((name . "build"))))
+          opencode-shell--configured-model "p/global")
+    (opencode-shell--initialize-server-defaults)
+    (should (equal opencode-shell--selected-agent "build"))
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "global"))))))
+
+(ert-deftest opencode-shell-next-agent-wraps-and-restores-model ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--models
+          '(("p/one" . ((providerID . "p") (modelID . "one")))
+            ("p/two" . ((providerID . "p") (modelID . "two"))))
+          opencode-shell--agents
+          '(("build" . ((name . "build") (model . "p/one")))
+            ("plan" . ((name . "plan") (model . "p/two"))))
+          opencode-shell--capabilities-loaded t)
+    (opencode-shell--initialize-server-defaults)
+    (opencode-shell--next-agent)
+    (should (equal opencode-shell--selected-agent "plan"))
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "two"))))
+    (opencode-shell--next-agent)
+    (should (equal opencode-shell--selected-agent "build"))
+    (should (equal opencode-shell--selected-model
+                   '((providerID . "p") (modelID . "one"))))))
 
 (ert-deftest opencode-shell-same-leaf-browsers-do-not-collide ()
   (let ((profile opencode-shell-test--local-profile) first second)

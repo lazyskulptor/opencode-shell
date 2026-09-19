@@ -118,9 +118,11 @@ and status requests. A transcript buffer has a subtly highlighted multiline
     prompts retain the composer's background and, like polled responses above
     the composer, are read-only. `C-n` and `C-p` move to the next and previous
     submitted `USER>` prompt without wrapping; an Evil move enters normal state.
-    Use `C-c C-v` to select the model and `C-c C-m` to select the agent;
-both selections appear with the generated session title in the transcript header
-and affect subsequent prompt payloads. The title updates on session open and an
+     Use `C-c C-v` to select the model and `C-c C-m` to select the agent; `C-<tab>`
+     cycles visible primary agents. Each agent retains its selected model; reopening
+     a session restores the latest submitted agent and its model from server history.
+     Both selections appear with the generated session title in the transcript header
+     and affect subsequent prompt payloads. The title updates on session open and an
 explicit `g` resync when the session snapshot reports OpenCode's generated title.
 Each prompt carries a stable message ID. SSE events wake authoritative snapshot
 reconciliation, with periodic polling retained for fallback and recovery. Each
