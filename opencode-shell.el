@@ -1604,6 +1604,7 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
 
 (define-derived-mode opencode-shell-mode text-mode "OpenCode"
   "OpenCode transcript mode with a writable bottom composer."
+  (setq-local buffer-read-only nil)
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
@@ -1634,9 +1635,8 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
   (setq buffer-undo-list nil)
   (goto-char opencode-shell--composer-start)
   (add-hook 'before-change-functions #'opencode-shell--protect-transcript nil t)
-  (add-hook 'post-command-hook #'opencode-shell--ensure-composer-sentinel nil t)
-  (add-hook 'evil-insert-state-entry-hook
-            #'opencode-shell--guard-evil-insert-state nil t)
+   (opencode-shell--install-input-policy-hooks)
+   (add-hook 'post-command-hook #'opencode-shell--ensure-composer-sentinel nil t)
   (add-hook 'window-configuration-change-hook
             #'opencode-shell--refresh-table-layout nil t)
   (add-hook 'window-configuration-change-hook
@@ -2899,7 +2899,8 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
     (opencode-shell--render-permissions)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
-      (goto-char (min old-point opencode-shell--transcript-end))))))
+      (goto-char (min old-point opencode-shell--transcript-end)))))
+   (opencode-shell--sync-input-policy))
 
 (defun opencode-shell--flush-render ()
   "Render the latest reconciled state when the current buffer is visible."
@@ -3450,12 +3451,20 @@ When FULL is non-nil, also refresh metadata and capabilities."
        (opencode-shell--resync nil)
        (message "Question rejection failed")))))
 
-(defun opencode-shell--guard-evil-insert-state ()
-  "Keep Evil out of insert state outside the visible composer."
-  (unless (opencode-shell--in-composer-p)
-    (declare-function evil-normal-state "evil-states")
-    (evil-normal-state)
-    (user-error "OpenCode transcript is read-only")))
+(defun opencode-shell--sync-input-policy ()
+  "Synchronize Composer editability and Evil state with lifecycle readiness."
+  (setq-local buffer-read-only (not (opencode-shell--composer-visible-p)))
+  (when (and (bound-and-true-p evil-local-mode)
+             (boundp 'evil-state)
+             (eq evil-state 'insert)
+             (not (opencode-shell--in-composer-p))
+             (fboundp 'evil-force-normal-state))
+    (evil-force-normal-state)))
+
+(defun opencode-shell--install-input-policy-hooks ()
+  "Install buffer-local Composer input policy hooks."
+  (add-hook 'pre-command-hook #'opencode-shell--sync-input-policy nil t)
+  (add-hook 'post-command-hook #'opencode-shell--sync-input-policy nil t))
 
 (defvar evil-move-beyond-eol nil)
 (defvar evil-local-mode)
@@ -4067,10 +4076,11 @@ ACTIVE means that their session browser is already live."
           (setq-local header-line-format nil))
          ((derived-mode-p 'opencode-shell-mode)
           (use-local-map opencode-shell-mode-map)
-          (setq-local header-line-format '(:eval (opencode-shell--header))
-                      mode-line-process '(:eval (opencode-shell--mode-line-status)))
-          (opencode-shell--configure-evil-buffer)
-          (opencode-shell--refresh-composer-overlay)))))
+           (setq-local header-line-format '(:eval (opencode-shell--header))
+                       mode-line-process '(:eval (opencode-shell--mode-line-status)))
+           (opencode-shell--configure-evil-buffer)
+           (opencode-shell--install-input-policy-hooks)
+           (opencode-shell--refresh-composer-overlay)))))
       (dolist (buffer active-buffers)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer

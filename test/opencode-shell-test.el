@@ -1483,22 +1483,19 @@
           (should-not (default-value 'evil-move-beyond-eol)))
       (set-default 'evil-move-beyond-eol original))))
 
-(ert-deftest opencode-shell-evil-insert-state-stays-outside-composer ()
+(ert-deftest opencode-shell-input-policy-restores-normal-state-outside-composer ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (should (memq #'opencode-shell--guard-evil-insert-state
-                  (symbol-value 'evil-insert-state-entry-hook)))
     (let (normalized)
-      (cl-letf (((symbol-function 'evil-normal-state)
-                 (lambda () (setq normalized t))))
+      (setq-local evil-local-mode t
+                  evil-state 'insert
+                  opencode-shell--submit-in-flight "sending")
+      (cl-letf (((symbol-function 'evil-force-normal-state)
+                  (lambda () (setq normalized t))))
         (goto-char (point-min))
-        (should-error (opencode-shell--guard-evil-insert-state)
-                      :type 'user-error)
+        (opencode-shell--sync-input-policy)
         (should normalized)
-        (setq normalized nil)
-        (goto-char (point-max))
-        (should-not (opencode-shell--guard-evil-insert-state))
-        (should-not normalized)))))
+        (should buffer-read-only)))))
 
 (ert-deftest opencode-shell-uses-editable-base-with-native-character-input ()
   (with-temp-buffer
@@ -2891,7 +2888,7 @@
     (cl-letf (((symbol-function 'opencode-shell--request) #'ignore))
       (opencode-shell--submit))
     (should-error (undo-only 1) :type 'user-error)
-    (should-error (insert "blocked") :type 'text-read-only)
+    (should-error (insert "blocked") :type 'error)
     (setf (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)
     (setq opencode-shell--submit-in-flight nil)
     (opencode-shell--render-turns)
@@ -2929,7 +2926,7 @@
                    (setq failures (append failures (list error-callback))))))
         (insert "first")
         (opencode-shell--submit)
-        (should-error (insert "second") :type 'text-read-only)
+        (should-error (insert "second") :type 'error)
         (should-error (opencode-shell--submit) :type 'user-error)
         (funcall (car failures))
         (should (string-empty-p (opencode-shell--composer-text)))
