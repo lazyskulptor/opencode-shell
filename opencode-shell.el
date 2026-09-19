@@ -950,7 +950,8 @@ Each retained session keeps its server-reported directory unchanged."
       ("s" "Start (select profile)" opencode-shell-start)
        ("l" "Sessions (select profile)" opencode-shell)
        ("b" "Shell buffers" opencode-shell-switch-buffer)
-       ("f" "Find session" opencode-shell-find-session)]])
+       ("f" "Find saved session" opencode-shell-find-session)
+       ("F" "Find session (server)" opencode-shell-find-session-with-server)]])
 
 (define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
   "Browse canonical OpenCode sessions."
@@ -981,9 +982,15 @@ Each retained session keeps its server-reported directory unchanged."
 (add-hook 'opencode-shell-sessions-mode-hook
           #'opencode-shell--setup-sessions-evil-buffer)
 
+(defun opencode-shell--session-location-directory (directory)
+  "Return canonical DIRECTORY spelling for persisted session locations."
+  (if (string-match-p "\\`/+\\'" directory)
+      "/"
+    (file-name-as-directory (directory-file-name directory))))
+
 (defun opencode-shell--remember-session-location (profile directory)
   "Remember PROFILE and DIRECTORY for session browser completion."
-  (let* ((directory (concat (directory-file-name directory) "/"))
+  (let* ((directory (opencode-shell--session-location-directory directory))
          (key (cons (opencode-shell--profile-key profile) directory)))
     (setq opencode-shell--recent-session-locations
           (cons key (delete key opencode-shell--recent-session-locations)))
@@ -1310,7 +1317,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     ("q" "Question" opencode-shell--questions)]
    ["Global"
     ("b" "Shell buffers" opencode-shell-switch-buffer)
-    ("f" "Find session" opencode-shell-find-session)
+    ("f" "Find saved session" opencode-shell-find-session)
+    ("F" "Find session (server)" opencode-shell-find-session-with-server)
     ("l" "Session browser" opencode-shell)
     ("s" "Start session" opencode-shell-start)]])
 
@@ -3709,8 +3717,133 @@ ACTIVE means that their session browser is already live."
                             'opencode-shell-recent-session-face))
         (cons profile directory)))
 
+(defun opencode-shell--forget-session-location (profile-key directory)
+  "Remove persisted PROFILE-KEY and DIRECTORY, returning non-nil when found."
+  (let* ((exact (cons profile-key directory))
+         (canonical
+          (cons profile-key (opencode-shell--session-location-directory directory)))
+         (location
+          (cond ((member exact opencode-shell--recent-session-locations) exact)
+                ((member canonical opencode-shell--recent-session-locations)
+                 canonical))))
+    (when location
+      (setq opencode-shell--recent-session-locations
+            (delete location opencode-shell--recent-session-locations))
+      (opencode-shell--save-recent-session-locations)
+      t)))
+
+(defun opencode-shell--saved-session-location-entries (profiles)
+  "Return saved location entries belonging to PROFILES."
+  (delq nil
+        (mapcar
+         (lambda (location)
+           (when-let ((profile
+                       (seq-find (lambda (item)
+                                   (equal (car location)
+                                          (opencode-shell--profile-key item)))
+                                 profiles)))
+             (list profile (cdr location) 0 nil)))
+         opencode-shell--recent-session-locations)))
+
+(defvar-local opencode-shell--session-location-minibuffer-mode nil)
+
+(defun opencode-shell--install-session-location-minibuffer-map (command)
+  "Install COMMAND for `C-k' above completion frontend maps in this minibuffer."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-k") command)
+    (setq-local opencode-shell--session-location-minibuffer-mode t)
+    (setq-local emulation-mode-map-alists
+                (cons `((opencode-shell--session-location-minibuffer-mode . ,map))
+                      emulation-mode-map-alists))))
+
+(defun opencode-shell--session-location-candidate (text candidates)
+  "Return the uniquely matching location candidate for minibuffer TEXT."
+  (or (seq-find (lambda (item) (string= text (car item))) candidates)
+      (let ((matches
+             (seq-filter (lambda (item)
+                           (string-match-p (regexp-quote text) (car item)))
+                         candidates)))
+        (and (= (length matches) 1) (car matches)))))
+
+(defun opencode-shell--selected-session-location-candidate (candidates)
+  "Return the currently highlighted location from CANDIDATES."
+  (let ((selected
+         (and (fboundp 'vertico--candidate)
+              (ignore-errors (vertico--candidate)))))
+    (or (and selected (assoc selected candidates))
+        (opencode-shell--session-location-candidate
+         (minibuffer-contents-no-properties) candidates))))
+
+(defun opencode-shell--read-session-location (entries)
+  "Read one PROFILE/DIRECTORY entry from ENTRIES with local deletion support."
+  (let (choice deleted)
+    (while (null choice)
+      (let* ((active (seq-filter (lambda (entry) (nth 3 entry)) entries))
+             (inactive (seq-remove (lambda (entry) (nth 3 entry)) entries))
+             (make-candidate
+              (lambda (entry)
+                (opencode-shell--session-browser-candidate
+                 (nth 0 entry) (nth 1 entry) (nth 3 entry))))
+             (separator (propertize "──────── inactive ────────" 'face 'shadow))
+             (candidates
+              (append (mapcar make-candidate active)
+                      (and active inactive (list (cons separator nil)))
+                      (mapcar make-candidate inactive))))
+        (unless candidates (user-error "No saved OpenCode session locations"))
+        (setq deleted nil)
+        (condition-case nil
+             (let ((delete-location
+                    (lambda ()
+                      (interactive)
+                      (let* ((candidate
+                              (opencode-shell--selected-session-location-candidate
+                               candidates))
+                             (location (and candidate (cdr candidate))))
+                        (unless location
+                          (user-error "Select a saved location to delete"))
+                        (unless (opencode-shell--forget-session-location
+                                 (opencode-shell--profile-key (car location))
+                                 (cdr location))
+                          (user-error "Location is not saved"))
+                        (setq entries
+                              (seq-remove
+                               (lambda (entry)
+                                 (and (equal (nth 0 entry) (car location))
+                                      (equal (nth 1 entry) (cdr location))))
+                               entries)
+                              deleted t)
+                        (abort-recursive-edit)))))
+              (let ((selection
+                     (minibuffer-with-setup-hook
+                         (lambda ()
+                           (opencode-shell--install-session-location-minibuffer-map
+                            delete-location))
+                       (completing-read "OpenCode profile : path: " candidates nil t))))
+                (setq choice (assoc selection candidates))))
+          (quit (unless deleted (signal 'quit nil))))
+        (cond (deleted
+               (setq choice (and (null entries) '(nil . nil))))
+              ((and choice (null (cdr choice)))
+               (setq choice nil)))))
+    (cdr choice)))
+
 ;;;###autoload
 (defun opencode-shell-find-session (&optional profile)
+  "Select a saved PROFILE directory and open its session browser."
+  (interactive)
+  (opencode-shell--validate-profiles)
+  (let* ((profiles (if profile
+                       (list (opencode-shell--resolve-or-read-profile profile))
+                     opencode-shell-profiles)))
+    (unless profiles (user-error "No OpenCode profiles configured"))
+    (condition-case nil
+        (when-let ((location
+                    (opencode-shell--read-session-location
+                     (opencode-shell--saved-session-location-entries profiles))))
+          (opencode-shell--open-sessions (car location) (cdr location) t))
+      (quit nil))))
+
+(defun opencode-shell-find-session-with-server (&optional profile)
   "Select a live or recent PROFILE directory and open its session browser."
   (interactive)
   (opencode-shell--validate-profiles)
@@ -3723,7 +3856,7 @@ ACTIVE means that their session browser is already live."
     (cl-labels
          ((remember (candidate-profile directory updated active)
             (when (stringp directory)
-              (setq directory (concat (directory-file-name directory) "/"))
+              (setq directory (opencode-shell--session-location-directory directory))
               (let* ((key (cons (opencode-shell--profile-key candidate-profile) directory))
                     (existing (gethash key locations)))
                (when (or (null existing) active (> updated (nth 2 existing)))
@@ -3744,23 +3877,9 @@ ACTIVE means that their session browser is already live."
                                                              (nth 1 b))))
                                         (nth 3 a)))))
                 (unless entries (user-error "No OpenCode session locations"))
-                 (condition-case nil
-                     (let* ((active (seq-filter (lambda (entry) (nth 3 entry)) entries))
-                            (inactive (seq-remove (lambda (entry) (nth 3 entry)) entries))
-                            (make-candidate
-                             (lambda (entry)
-                               (opencode-shell--session-browser-candidate
-                                (nth 0 entry) (nth 1 entry) (nth 3 entry))))
-                            (separator (propertize "──────── inactive ────────" 'face 'shadow))
-                            (candidates
-                             (append (mapcar make-candidate active)
-                                     (and inactive (list (cons separator nil)))
-                                     (mapcar make-candidate inactive)))
-                            location)
-                       (while (null location)
-                         (let ((choice (completing-read
-                                        "OpenCode profile : path: " candidates nil t)))
-                           (setq location (cdr (assoc choice candidates)))))
+                (condition-case nil
+                     (when-let ((location
+                                 (opencode-shell--read-session-location entries)))
                        (opencode-shell--open-sessions
                         (car location) (cdr location) t))
                   (quit nil))))))

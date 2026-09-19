@@ -187,10 +187,11 @@ This is a client-side scope change; it does not mutate persisted server metadata
 
 Use `?` in either the browser or transcript for its context-specific Transient
 menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
-selects only live transcript buffers, and `C-c o f` selects a canonical
-newest-first server session. The session selector marks live transcripts as
-active and recent inactive sessions with distinct faces, then opens or reuses the
-selection like `find-file`.
+selects only live transcript buffers, and `C-c o f` selects a saved profile/path
+from the local location file without requesting server sessions. Use uppercase
+`F` in either OpenCode action menu when live and server-discovered paths should
+also be included. In either selector, `C-k` removes the selected saved path from
+the local location file; it never deletes a server session or directory.
 `C-n` and `C-p` move between submitted `USER>` prompts; after the final completed
 response, `C-n` moves to the visible writable `Prompt>`. Hidden or blocked
 Composers are not navigation targets.

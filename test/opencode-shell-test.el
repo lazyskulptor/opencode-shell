@@ -3752,7 +3752,7 @@
               (should (= (length (delete-dups buffers)) 2)))
           (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))))
 
-(ert-deftest opencode-shell-find-session-selects-live-and-recent-profile-paths ()
+(ert-deftest opencode-shell-find-session-with-server-selects-live-and-recent-profile-paths ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
         (opencode-shell--recent-session-locations
@@ -3778,7 +3778,7 @@
                     ((symbol-function 'opencode-shell--open-sessions)
                      (lambda (profile directory &optional current-window)
                        (setq opened (list profile directory current-window)))))
-            (opencode-shell-find-session)
+            (opencode-shell-find-session-with-server)
             (should (= (length requests) 2))
             (dolist (request requests)
               (should (equal (cl-subseq request 1 4)
@@ -3807,6 +3807,81 @@
             (should (equal opened (list opencode-shell-test--local-profile "/work/" t)))))
       (when (buffer-live-p browser) (kill-buffer browser)))))
 
+(ert-deftest opencode-shell-find-session-uses-saved-locations-without-network ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+        (opencode-shell--recent-session-locations
+         (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                     "/cached/")
+               (cons (opencode-shell--profile-key opencode-shell-test--remote-profile)
+                     "/srv/cached/")))
+        requested prompt opened)
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (&rest _) (setq requested t)))
+              ((symbol-function 'completing-read)
+               (lambda (text candidates &rest _)
+                 (setq prompt (list text (mapcar #'car candidates)))
+                 (caar candidates)))
+              ((symbol-function 'opencode-shell--open-sessions)
+               (lambda (profile directory &optional current-window)
+                 (setq opened (list profile directory current-window)))))
+      (opencode-shell-find-session)
+      (should-not requested)
+      (should (equal (car prompt) "OpenCode profile : path: "))
+      (should (equal opened
+                     (list opencode-shell-test--local-profile "/cached/" t))))))
+
+(ert-deftest opencode-shell-forget-session-location-removes-only-exact-saved-entry ()
+  (let* ((local-key (opencode-shell--profile-key opencode-shell-test--local-profile))
+         (remote-key (opencode-shell--profile-key opencode-shell-test--remote-profile))
+         (opencode-shell--recent-session-locations
+          (list (cons local-key "/work/") (cons remote-key "/work/")))
+         saved)
+    (cl-letf (((symbol-function 'opencode-shell--save-recent-session-locations)
+               (lambda () (setq saved t))))
+      (should (opencode-shell--forget-session-location local-key "/work/"))
+      (should saved)
+      (should (equal opencode-shell--recent-session-locations
+                     (list (cons remote-key "/work/"))))
+      (should-not (opencode-shell--forget-session-location local-key "/missing/")))))
+
+(ert-deftest opencode-shell-forget-session-location-removes-legacy-slash-spelling ()
+  (let* ((key (opencode-shell--profile-key opencode-shell-test--local-profile))
+         (opencode-shell--recent-session-locations (list (cons key "///"))))
+    (cl-letf (((symbol-function 'opencode-shell--save-recent-session-locations)
+               #'ignore))
+      (should (opencode-shell--forget-session-location key "///"))
+      (should-not opencode-shell--recent-session-locations))))
+
+(ert-deftest opencode-shell-session-location-deletion-keeps-minibuffer-map-local ()
+  (with-temp-buffer
+    (use-local-map minibuffer-local-completion-map)
+    (let ((original (lookup-key minibuffer-local-completion-map (kbd "C-k"))))
+      (opencode-shell--install-session-location-minibuffer-map #'ignore)
+      (should (eq (key-binding (kbd "C-k")) #'ignore))
+      (should (eq original
+                  (lookup-key minibuffer-local-completion-map (kbd "C-k")))))))
+
+(ert-deftest opencode-shell-session-location-candidate-uses-unique-path-filter ()
+  (let ((candidates
+         (list (opencode-shell--session-browser-candidate
+                opencode-shell-test--local-profile "/work/" nil)
+               (opencode-shell--session-browser-candidate
+                opencode-shell-test--remote-profile "/other/" nil))))
+    (should (equal (opencode-shell--session-location-candidate "/work/" candidates)
+                   (car candidates)))
+    (should-not (opencode-shell--session-location-candidate "/" candidates))))
+
+(ert-deftest opencode-shell-session-location-deletion-uses-highlighted-candidate ()
+  (let* ((first (opencode-shell--session-browser-candidate
+                 opencode-shell-test--local-profile "/first/" nil))
+         (second (opencode-shell--session-browser-candidate
+                  opencode-shell-test--local-profile "/second/" nil))
+         (candidates (list first second)))
+    (cl-letf (((symbol-function 'vertico--candidate) (lambda () (car second))))
+      (should (eq (opencode-shell--selected-session-location-candidate candidates)
+                  second)))))
+
 (ert-deftest opencode-shell-remembers-session-browser-locations-without-slash-duplicates ()
   (let ((opencode-shell--recent-session-locations nil))
     (opencode-shell--remember-session-location opencode-shell-test--local-profile "/work")
@@ -3814,6 +3889,14 @@
     (should (equal opencode-shell--recent-session-locations
                    (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
                                "/work/"))))))
+
+(ert-deftest opencode-shell-remembers-root-session-location-with-one-slash ()
+  (let ((opencode-shell--recent-session-locations nil))
+    (opencode-shell--remember-session-location opencode-shell-test--local-profile "/")
+    (opencode-shell--remember-session-location opencode-shell-test--local-profile "//")
+    (should (equal opencode-shell--recent-session-locations
+                   (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                               "/"))))))
 
 (ert-deftest opencode-shell-persists-session-browser-locations ()
   (let ((opencode-shell-recent-locations-file (make-temp-file "opencode-shell-locations-"))
@@ -3842,16 +3925,15 @@
         (delete-file opencode-shell-session-directory-overrides-file)))))
 
 (ert-deftest opencode-shell-find-session-quit-is-silent ()
-  (let ((opencode-shell-profiles (list opencode-shell-test--local-profile)) callback)
-    (cl-letf (((symbol-function 'opencode-shell--request)
-               (lambda (_method _path success &rest _) (setq callback success)))
-              ((symbol-function 'completing-read)
+  (let ((opencode-shell-profiles (list opencode-shell-test--local-profile))
+        (opencode-shell--recent-session-locations
+         (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                     "/work/"))))
+    (cl-letf (((symbol-function 'completing-read)
                (lambda (&rest _) (signal 'quit nil)))
               ((symbol-function 'opencode-shell--open-sessions)
                (lambda (&rest _) (ert-fail "quit must not open a browser"))))
-      (opencode-shell-find-session)
-      (should-not
-       (funcall callback '(((id . "recent") (directory . "/work"))))))))
+      (opencode-shell-find-session))))
 
 (ert-deftest opencode-shell-register-profile-commands-refreshes-and-isolates-profiles ()
   (let ((opencode-shell-profiles
