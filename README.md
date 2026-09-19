@@ -80,8 +80,10 @@ scoping consistent without sending TRAMP syntax to the server. Buffers are
 profile-qualified, so identical session IDs on different servers never share a
 browser or transcript buffer.
 
-Local profiles may provide an argv-style start command, server working
-directory, health path, and bounded startup timeout. Lifecycle is shared by
+Profiles may provide an argv-style start command, server working directory,
+health path, and bounded startup timeout. A remote profile's start command runs
+locally and may own a transport such as an SSH tunnel; it never manages the
+remote OpenCode service behind that transport. Lifecycle is shared by
 canonical base URL: profiles using one endpoint reuse one health probe, start
 attempt, owned process, stop/restart state, and exit cleanup while retaining
 their own directory, authentication, sessions, and capabilities. Profiles for
@@ -93,8 +95,8 @@ control. Internal cleanup only terminates a live process started and owned
 by this Emacs client. Killing a browser or transcript does not stop that
 process. Owned processes are stopped once when Emacs exits unless the shared
 profiles consistently set `:stop-on-exit` to nil. Profiles using a TRAMP
-directory or a non-loopback server URL are remote and are never auto-started;
-`:remote` can also force remote classification.
+directory or a non-loopback server URL are remote; `:remote` can also force
+remote classification.
 
 Canonical lifecycle URLs treat loopback host spellings, a trailing slash, and
 explicit default HTTP/HTTPS ports as the same endpoint. A healthy server not

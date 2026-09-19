@@ -316,8 +316,7 @@ profiles make the result ambiguous."
 (defun opencode-shell--start-session (profile &optional directory)
   "Ensure PROFILE readiness and create a session in DIRECTORY or the current path."
   (let ((directory (or directory (opencode-shell--current-server-directory profile))))
-    (if (and (plist-get profile :start-command)
-             (not (opencode-shell--profile-remote-p profile)))
+    (if (plist-get profile :start-command)
         (opencode-shell--start-server
          profile
          (lambda (ready)
@@ -3746,8 +3745,7 @@ Concurrent starts for one server are coalesced.  A remote profile may use
   "Prepare PROFILE and open its session browser for DIRECTORY.
 When CURRENT-WINDOW is non-nil, display it in the selected window."
   (setq directory (or directory (opencode-shell--current-server-directory profile)))
-  (if (and (plist-get profile :start-command)
-           (not (opencode-shell--profile-remote-p profile)))
+  (if (plist-get profile :start-command)
       (opencode-shell--start-server
        profile (lambda (ready) (opencode-shell--sessions directory ready current-window)))
     (opencode-shell--sessions directory profile current-window)))
