@@ -3615,11 +3615,17 @@ When FULL is non-nil, also refresh metadata and capabilities."
 
 (defun opencode-shell--process-sentinel (key attempt process _event)
   "Handle an owned PROCESS exiting during startup for KEY."
-  (when (and (opencode-shell--attempt-current-p key attempt)
-             (memq (process-status process) '(exit signal failed))
-             (eq process (plist-get (gethash key opencode-shell--servers) :process)))
-    (if (plist-get (gethash key opencode-shell--servers) :starting)
-        (let* ((state (gethash key opencode-shell--servers))
+  (let ((state (gethash key opencode-shell--servers)))
+    (when (and state
+               (memq (process-status process) '(exit signal failed))
+               (eq process (plist-get state :process)))
+      (if-let ((restart-profile (plist-get state :restart-profile)))
+          (progn
+            (remhash key opencode-shell--servers)
+            (opencode-shell--start-server restart-profile))
+        (if (and (plist-get state :starting)
+                 (opencode-shell--attempt-current-p key attempt))
+            (let* ((state (gethash key opencode-shell--servers))
                (tail (opencode-shell--process-tail process))
                (message-text
                 (format "server exited before becoming healthy (status %s)%s"
@@ -3627,11 +3633,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
                         (if tail (format ":\n%s" tail) ""))))
           ;; Another concurrent starter may have won the port.  Keep polling
           ;; this attempt so a healthy endpoint can be adopted safely.
-          (setq state (plist-put state :process nil)
-                state (plist-put state :owned nil)
-                state (plist-put state :exit-error message-text))
-          (puthash key state opencode-shell--servers))
-      (remhash key opencode-shell--servers))))
+           (setq state (plist-put state :process nil)
+                 state (plist-put state :owned nil)
+                 state (plist-put state :exit-error message-text))
+           (puthash key state opencode-shell--servers))
+          (remhash key opencode-shell--servers))))))
 
 (defun opencode-shell--spawn-server (profile attempt)
   "Start PROFILE exactly once and begin bounded health polling."
@@ -3722,10 +3728,17 @@ Concurrent starts for one server are coalesced.  A remote profile may use
     (remhash key opencode-shell--servers)))
 
 (defun opencode-shell--restart-server (&optional profile)
-  "Restart an owned local PROFILE server."
-  (let ((profile (or profile opencode-shell--profile (opencode-shell--read-profile))))
-    (opencode-shell--stop-server profile)
-    (opencode-shell--start-server profile)))
+  "Restart an owned PROFILE process after its terminal sentinel runs."
+  (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
+         (key (opencode-shell--server-key profile))
+         (state (gethash key opencode-shell--servers))
+         (process (plist-get state :process)))
+    (unless (and (plist-get state :owned) (process-live-p process))
+      (user-error "OpenCode server is not owned by this client"))
+    (when (plist-get state :restart-profile)
+      (user-error "OpenCode server restart is already in progress"))
+    (puthash key (plist-put state :restart-profile profile) opencode-shell--servers)
+    (delete-process process)))
 
 (defun opencode-shell--stop-all-servers ()
   "Stop owned servers whose shared lifecycle requests exit cleanup."
