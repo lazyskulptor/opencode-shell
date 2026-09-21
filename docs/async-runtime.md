@@ -16,8 +16,10 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
 2. Transport callbacks do not edit transcript or tabulated-list buffers. They
    validate buffer lifetime and generation, reconcile state, mark UI dirty, and
    enqueue keyed work.
-3. Keyed work is latest-value coalesced and drained at idle time. Closing a
-   buffer, changing generation, reloading, or stopping a runtime cancels it.
+3. Keyed work is latest-value coalesced and drained after 0.25 seconds of Emacs
+   idle time; it never uses a wall-clock fallback that can interrupt unrelated
+   editing. Closing a buffer, changing generation, reloading, or stopping a
+   runtime cancels it.
 4. Hidden buffers do not render. Their authoritative state remains current and
    is rendered once when a window displays them again.
 5. A server/profile owns at most one SSE connection and one runtime cadence,

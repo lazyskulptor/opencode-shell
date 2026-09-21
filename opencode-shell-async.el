@@ -31,16 +31,13 @@
 
 (defconst opencode-shell-async--reconcile-interval 15)
 (defconst opencode-shell-async--max-reconnect-failures 5)
-(defconst opencode-shell-async--delivery-timeout 0.25)
+(defconst opencode-shell-async--idle-delay 0.25)
 
 (defvar-local opencode-shell-async--queue nil
   "Latest queued callback for each key in the current buffer.")
 
 (defvar-local opencode-shell-async--idle-timer nil
   "Idle timer draining `opencode-shell-async--queue'.")
-
-(defvar-local opencode-shell-async--delivery-timer nil
-  "Bounded non-idle fallback timer for queued callback delivery.")
 
 (defun opencode-shell-async-runtime-get (key)
   "Return shared runtime registered under KEY."
@@ -256,10 +253,7 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
     (with-current-buffer buffer
       (when (timerp opencode-shell-async--idle-timer)
         (cancel-timer opencode-shell-async--idle-timer))
-      (when (timerp opencode-shell-async--delivery-timer)
-        (cancel-timer opencode-shell-async--delivery-timer))
-      (setq opencode-shell-async--idle-timer nil
-            opencode-shell-async--delivery-timer nil)
+      (setq opencode-shell-async--idle-timer nil)
       (let ((queue (prog1 (nreverse opencode-shell-async--queue)
                      (setq opencode-shell-async--queue nil))))
         (dolist (entry queue)
@@ -283,21 +277,15 @@ Only the latest pending value for KEY and GENERATION is retained."
                   (assoc-delete-all key opencode-shell-async--queue)))
       (unless (timerp opencode-shell-async--idle-timer)
         (setq opencode-shell-async--idle-timer
-              (run-with-idle-timer 0 nil #'opencode-shell-async-drain buffer)))
-      (unless (timerp opencode-shell-async--delivery-timer)
-        (setq opencode-shell-async--delivery-timer
-              (run-at-time opencode-shell-async--delivery-timeout nil
-                           #'opencode-shell-async-drain buffer))))))
+              (run-with-idle-timer opencode-shell-async--idle-delay nil
+                                   #'opencode-shell-async-drain buffer))))))
 
 (defun opencode-shell-async-cancel (&optional buffer)
   "Cancel queued work for BUFFER or the current buffer."
   (with-current-buffer (or buffer (current-buffer))
     (when (timerp opencode-shell-async--idle-timer)
       (cancel-timer opencode-shell-async--idle-timer))
-    (when (timerp opencode-shell-async--delivery-timer)
-      (cancel-timer opencode-shell-async--delivery-timer))
     (setq opencode-shell-async--idle-timer nil
-          opencode-shell-async--delivery-timer nil
           opencode-shell-async--queue nil)))
 
 (defun opencode-shell-async--animation-tick ()

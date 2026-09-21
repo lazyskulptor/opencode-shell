@@ -3121,23 +3121,27 @@
         'unsafe buffer "http://localhost:4199/event"
         '(("Authorization" . "different")) t 2 #'ignore)))))
 
-(ert-deftest opencode-shell-async-delivery-has-bounded-non-idle-fallback ()
+(ert-deftest opencode-shell-async-delivery-defers-until-idle ()
   (with-temp-buffer
     (setq-local opencode-shell--generation 1)
-    (let (idle delivery value)
+    (let (idle value)
       (cl-letf (((symbol-function 'run-with-idle-timer)
-                 (lambda (_delay _repeat function &rest args)
+                 (lambda (delay _repeat function &rest args)
+                   (should (= delay 0.25))
                    (setq idle (cons function args)) 'idle))
-                ((symbol-function 'run-at-time)
-                 (lambda (_delay _repeat function &rest args)
-                   (setq delivery (cons function args)) 'delivery))
-                ((symbol-function 'timerp)
-                 (lambda (timer) (memq timer '(idle delivery))))
-                ((symbol-function 'cancel-timer) #'ignore))
+                 ((symbol-function 'run-at-time)
+                 (lambda (&rest _)
+                   (ert-fail "Receive delivery must not use a non-idle timer")))
+                 ((symbol-function 'timerp)
+                 (lambda (timer) (eq timer 'idle)))
+                 ((symbol-function 'cancel-timer) #'ignore))
+        (opencode-shell-async-enqueue
+         (current-buffer) 'state 1 (lambda (new) (setq value new)) 'old)
         (opencode-shell-async-enqueue
          (current-buffer) 'state 1 (lambda (new) (setq value new)) 'latest)
         (should idle)
-        (apply (car delivery) (cdr delivery))
+        (should-not value)
+        (apply (car idle) (cdr idle))
         (should (eq value 'latest))
         (should-not opencode-shell-async--queue)))))
 
