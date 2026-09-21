@@ -166,12 +166,13 @@ Completed assistant pipe tables fit the selected transcript window by wrapping
 long cells. Resizing recalculates conventional tables outside fenced code; all
 other Markdown stays unchanged, and each turn retains the verbatim source.
 
-API requests are correlated by a short ID in `*OpenCode Shell Log*` before a
-session exists and in a session-specific log buffer afterwards. Open the relevant
-buffer with `M-x opencode-shell-log`. Non-routine requests log their start and
-outcome. Successful message, permission, and question snapshots stay out of the
-log; failures and semantic lifecycle transitions remain visible. Customize
-`opencode-shell-log-requests` to disable logs. Bodies, query parameters,
+Diagnostic logging is disabled by default. Customize
+`opencode-shell-log-requests` to enable it; API requests are then correlated by a
+short ID in `*OpenCode Shell Log*` before a session exists and in a
+session-specific log buffer afterwards. Open the relevant buffer with `M-x
+opencode-shell-log`. Non-routine requests log their start and outcome.
+Successful message, permission, and question snapshots stay out of the log;
+failures and semantic lifecycle transitions remain visible. Bodies, query parameters,
 authentication headers, and error response bodies are never logged.
 Model completion is limited to providers reported as connected by the server;
 agent completion shows only server-advertised visible primary agents.
@@ -238,7 +239,7 @@ history for its stable ID instead of automatically submitting it again.
 Observed tool parts add payload-free `TOOL> name` lines (for example `bash`,
 `edit`, or `write`) without exposing tool inputs or outputs.
 
-For polling diagnostics, leave `opencode-shell-log-requests` enabled and run
+For polling diagnostics, enable `opencode-shell-log-requests` and run
 `M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted
 when state changes and name the local blockers, completion metadata, tool-state
 counts, pending permission count, and submit reconciliation state. Routine

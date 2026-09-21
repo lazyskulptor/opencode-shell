@@ -460,7 +460,7 @@ profiles make the result ambiguous."
 (defconst opencode-shell--spinner-max-width 10
   "Maximum display width of the transient-status spinner.")
 
-(defcustom opencode-shell-log-requests t
+(defcustom opencode-shell-log-requests nil
   "When non-nil, log API results without payloads or secrets."
   :type 'boolean :group 'opencode-shell)
 

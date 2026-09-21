@@ -550,6 +550,18 @@
       (should (equal (caddar requests) '((reply . "always"))))
       (should-not confirmations))))
 
+(ert-deftest opencode-shell-api-log-is-disabled-by-default ()
+  (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*"))
+    (unwind-protect
+        (progn
+          (when-let ((buffer (get-buffer opencode-shell-log-buffer-name)))
+            (kill-buffer buffer))
+          (should-not (default-value 'opencode-shell-log-requests))
+          (opencode-shell--log "must not create a buffer")
+          (should-not (get-buffer opencode-shell-log-buffer-name)))
+      (when-let ((buffer (get-buffer opencode-shell-log-buffer-name)))
+        (kill-buffer buffer)))))
+
 (ert-deftest opencode-shell-api-log-uses-dedicated-read-only-buffer ()
   (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*")
         (opencode-shell-log-requests t))
@@ -577,7 +589,8 @@
           (kill-buffer buffer))))))
 
 (ert-deftest opencode-shell-killing-session-buffer-kills-its-log ()
-  (let ((shell (generate-new-buffer "*Opencode cleanup-log shell*"))
+  (let ((opencode-shell-log-requests t)
+        (shell (generate-new-buffer "*Opencode cleanup-log shell*"))
         log)
     (unwind-protect
         (progn
