@@ -39,7 +39,7 @@
         (parts . (((id . "p1") (type . "text") (text . "partial")))))))
     (should-not opencode-shell--submit-in-flight)
     (should-not (opencode-shell--composer-visible-p))
-    (should (= 0 (how-many "Prompt>\n" (point-min) (point-max))))))
+    (should (not opencode-shell--composer-label-visible))))
 
 (ert-deftest opencode-shell-pipeline-characterizes-response-protection ()
   (with-temp-buffer
@@ -168,7 +168,7 @@
     (opencode-shell--render-turns)
     (opencode-shell--render-permissions)
     (should (opencode-shell--composer-visible-p))
-    (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
+    (should opencode-shell--composer-label-visible)))
 
 (ert-deftest opencode-shell-pipeline-hydration-failure-stays-blocked-until-retry ()
   (with-temp-buffer

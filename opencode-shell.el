@@ -562,8 +562,10 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
 (defvar-local opencode-shell--internal-edit nil)
-(defconst opencode-shell--composer-label "Prompt>\n"
-  "Read-only label displayed immediately above the composer.")
+(defconst opencode-shell--composer-label "\n"
+  "Structural line above the composer; the prompt glyph is shown via the overlay.")
+(defconst opencode-shell--composer-prompt "➜"
+  "Prompt glyph displayed at the start of the composer lines.")
 (defconst opencode-shell--composer-sentinel " "
   "Structural same-line cursor target for an empty composer.")
 (defvar-local opencode-shell--request-status "idle")
@@ -1627,6 +1629,9 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
                       opencode-shell--composer-start (point-max))
         (overlay-put opencode-shell--composer-overlay
                      'face 'opencode-shell-composer-face)
+        (overlay-put opencode-shell--composer-overlay 'line-prefix
+                     (propertize (concat opencode-shell--composer-prompt " ")
+                                 'font-lock-face 'opencode-shell-user-face))
         (overlay-put opencode-shell--composer-overlay 'after-string
                      (propertize " "
                                  'face 'opencode-shell-composer-face
@@ -2643,16 +2648,40 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                         (opencode-shell--turn-response-end turn)))
     (when (markerp marker) (set-marker marker nil))))
 
+(defun opencode-shell--role-line-prefix (glyph face)
+  "Return a (LINE-PREFIX . WRAP-PREFIX) pair for GLYPH with FACE."
+  (let* ((text (concat glyph " "))
+         (indent (make-string (length text) ?\s)))
+    (cons (propertize text 'font-lock-face face)
+          (propertize indent 'font-lock-face face))))
+
+(defun opencode-shell--apply-role-prefix (begin end glyph face)
+  "Apply GLYPH and FACE as a left gutter prefix on BEGIN..END."
+  (let ((prefix (opencode-shell--role-line-prefix glyph face)))
+    (add-text-properties begin end
+                         (list 'line-prefix (car prefix)
+                               'wrap-prefix (cdr prefix)))))
+
+(defun opencode-shell--assistant-prefixed-text (turn)
+  "Return TURN's assistant text with a role gutter prefix."
+  (let ((text (opencode-shell--assistant-display-text turn)))
+    (if (string-empty-p text)
+        text
+      (let ((prefix (opencode-shell--role-line-prefix
+                     "❯❯" 'opencode-shell-assistant-face)))
+        (propertize text
+                    'line-prefix (car prefix)
+                    'wrap-prefix (cdr prefix))))))
+
 (defun opencode-shell--insert-user-prompt (turn)
   "Insert TURN's immutable user prompt and return its bounds."
   (let ((begin (point))
         (body (or (opencode-shell--turn-user turn) "")))
-    (insert (propertize "USER>\n"
-                        'font-lock-face 'opencode-shell-user-face
-                        'rear-nonsticky '(font-lock-face)))
     (let ((body-begin (point)))
       (insert (propertize body 'face 'opencode-shell-composer-face)
               (propertize "\n" 'face 'opencode-shell-composer-face))
+      (opencode-shell--apply-role-prefix body-begin (point)
+                                         "$" 'opencode-shell-user-face)
       (let ((background (make-overlay body-begin (point) nil nil nil)))
         (overlay-put background 'face 'opencode-shell-composer-face)
         (overlay-put background 'priority 1)
@@ -2701,8 +2730,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (concat
    (opencode-shell--tool-name-display turn)
    (if (eq (opencode-shell--turn-status turn) 'complete)
-       (concat (propertize "ASSISTANT>\n" 'font-lock-face 'opencode-shell-assistant-face)
-               (opencode-shell--assistant-display-text turn)
+       (concat (opencode-shell--assistant-prefixed-text turn)
                (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
      (propertize
       (pcase (opencode-shell--turn-status turn)

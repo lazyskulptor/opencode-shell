@@ -2119,7 +2119,7 @@
      (cadr opencode-shell-test--completion-polling-snapshots) 3)
     (should-not opencode-shell--submit-in-flight)
     (should (opencode-shell--composer-visible-p))
-    (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
+    (should opencode-shell--composer-label-visible)))
 
 (ert-deftest opencode-shell-partial-envelope-retains-completion-metadata ()
   (with-temp-buffer
@@ -2196,7 +2196,7 @@
            (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
     (set-marker (opencode-shell--turn-user-begin (car opencode-shell--turns)) nil)
     (opencode-shell--render-turns)
-    (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))
+    (should opencode-shell--composer-label-visible)))
 
 (ert-deftest opencode-shell-stale-response-marker-triggers-full-rerender ()
   (with-temp-buffer
@@ -2208,7 +2208,7 @@
            (stale-end (copy-marker (1+ (point-max)))))
       (setf (opencode-shell--turn-response-end turn) stale-end)
       (opencode-shell--render-turns)
-      (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
+      (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ "))
       (should (string-match-p "answer" (buffer-string)))
       (should (opencode-shell--turn-rendered-p turn)))))
 
@@ -2220,12 +2220,12 @@
       (setq opencode-shell--turns (list turn)
             opencode-shell--submit-in-flight "u1")
       (opencode-shell--render-turns)
-      (should (= 1 (how-many "USER>" (point-min) (point-max))))
-      (should (= 0 (how-many "Prompt>\n" (point-min) (point-max))))
+      (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
+      (should (not opencode-shell--composer-label-visible))
       (setf (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)
       (opencode-shell--render-turns)
-      (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
+      (should opencode-shell--composer-label-visible))))
 
 (ert-deftest opencode-shell-identical-completed-poll-is-render-no-op ()
   (with-temp-buffer
@@ -2243,7 +2243,7 @@
         (opencode-shell--render-messages messages)
         (should (equal before (buffer-string)))
          (should (get-text-property begin 'opencode-shell-render-token))
-         (should (= 1 (how-many "Prompt>\n" (point-min) (point-max))))))))
+         (should opencode-shell--composer-label-visible)))))
 
 (ert-deftest opencode-shell-identical-active-poll-does-not-schedule-render ()
   (with-temp-buffer
@@ -2578,7 +2578,7 @@
       (opencode-shell--render-messages messages)
       (should-not opencode-shell--submit-in-flight)
       (should (opencode-shell--composer-visible-p))
-      (should (= 1 (how-many "Prompt>\n" (point-min) (point-max)))))))
+      (should opencode-shell--composer-label-visible))))
 
 (ert-deftest opencode-shell-part-field-merge-retains-omitted-fields ()
   (let* ((known '((id . "p1") (type . "tool") (tool . "read")
@@ -2628,11 +2628,9 @@
                                              :assistant "reply" :status 'complete)))
       (setq opencode-shell--turns (list turn))
       (opencode-shell--render-turns t)
-      (goto-char (point-min))
-      (should (search-forward "USER>\n" nil t))
-      (let ((body-start (point)))
-        (should (eq (get-text-property (- body-start (length "USER>\n"))
-                                       'font-lock-face)
+      (let ((body-start (opencode-shell--turn-user-begin turn)))
+        (should (eq (get-text-property
+                     0 'font-lock-face (get-text-property body-start 'line-prefix))
                     'opencode-shell-user-face))
         (should (eq (get-text-property body-start 'face)
                     'opencode-shell-composer-face))
@@ -2642,9 +2640,8 @@
         (let ((text (buffer-string)))
           (opencode-shell--render-turns t)
           (should (equal text (buffer-string)))
-          (goto-char (point-min))
-          (search-forward "USER>\n")
-          (should (eq (get-text-property (point) 'face)
+          (should (eq (get-text-property
+                       (opencode-shell--turn-user-begin turn) 'face)
                       'opencode-shell-composer-face))))
       (should (= (overlay-start opencode-shell--composer-overlay)
                  opencode-shell--composer-start))
@@ -2653,13 +2650,16 @@
                          (and (eq (overlay-get overlay 'face)
                                   'opencode-shell-composer-face)
                               (= (overlay-get overlay 'priority) 1)))
-                       (overlays-at (point)))))
+                       (overlays-at (opencode-shell--turn-user-begin turn)))))
         (should (overlayp background)))
-      (should (search-forward "ASSISTANT>\n" nil t))
+      (should (equal (substring-no-properties
+                      (get-text-property
+                       (opencode-shell--turn-response-begin turn) 'line-prefix))
+                     "❯❯ "))
       (should-not
        (seq-find (lambda (overlay)
                    (= (overlay-get overlay 'priority) 1))
-                 (overlays-at (point)))))))
+                 (overlays-at (opencode-shell--turn-response-begin turn)))))))
 
 (ert-deftest opencode-shell-composer-overlay-follows-draft-and-visibility ()
   (with-temp-buffer
@@ -2873,8 +2873,8 @@
     (opencode-shell--render-permissions)
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
-    (should (= 1 (how-many "USER>" (point-min) (point-max))))
-    (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max))))
+    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
+    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ "))
     (should (= 0 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-mode-and-initial-transcript-have-no-undo-history ()
@@ -2889,8 +2889,8 @@
                  (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
           (should-not buffer-undo-list)
           (should-error (undo-only 1) :type 'user-error)
-          (should (= 1 (how-many "USER>" (point-min) (point-max))))
-          (should (= 1 (how-many "ASSISTANT>" (point-min) (point-max)))))
+          (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
+          (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ ")))
       (kill-buffer buffer))))
 
 (ert-deftest opencode-shell-shifts-documented-composer-undo-entry-shapes ()
@@ -2929,7 +2929,7 @@
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
     (should (= 1 (how-many "committed" (point-min) (point-max))))
-    (should (= 1 (how-many "USER>" (point-min) (point-max))))))
+    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))))
 
 (ert-deftest opencode-shell-failure-keeps-hidden-composer-protected ()
   (with-temp-buffer
@@ -2985,8 +2985,7 @@
       (let ((id (opencode-shell--turn-id (car opencode-shell--turns))))
         (should (equal (opencode-shell--composer-text) "draft text"))
         (should (= (- (point) opencode-shell--composer-start) 5))
-        (goto-char (point-min))
-        (search-forward "ASSISTANT>")
+        (goto-char (opencode-shell--turn-response-begin (car opencode-shell--turns)))
         (let* ((turn (car opencode-shell--turns))
                (user-begin (opencode-shell--turn-user-begin turn))
                (user-end (opencode-shell--turn-user-end turn)))
