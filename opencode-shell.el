@@ -410,6 +410,32 @@ profiles make the result ambiguous."
          (leaf (file-name-nondirectory trimmed)))
     (if (string-empty-p leaf) "root" leaf)))
 
+(defun opencode-shell--sessions-buffer-name (directory)
+  "Return the session browser display name for DIRECTORY."
+  (concat "*oc-sh➜ " (opencode-shell--directory-leaf directory) " sessions*"))
+
+(defun opencode-shell--transcript-buffer-name (directory &optional title)
+  "Return the transcript display name for DIRECTORY with TITLE.
+TITLE is omitted when nil, empty, or the \"Untitled\" placeholder."
+  (concat "*oc-sh➜ "
+          (if (and title (not (string-empty-p title))
+                   (not (equal title "Untitled")))
+              (concat title " — " (opencode-shell--directory-leaf directory))
+            (opencode-shell--directory-leaf directory))
+          "*"))
+
+(defun opencode-shell--rename-transcript-for-title (title)
+  "Rename the current transcript buffer to reflect TITLE.
+Move the associated API log buffer so its name stays in sync."
+  (let* ((new-name (opencode-shell--transcript-buffer-name
+                    opencode-shell--directory title))
+         (old-name (buffer-name)))
+    (unless (equal new-name old-name)
+      (rename-buffer new-name t)
+      (when-let ((log (get-buffer (concat old-name "-log"))))
+        (with-current-buffer log
+          (rename-buffer (concat new-name "-log") t))))))
+
 (defun opencode-shell--sessions-buffer (profile directory)
   "Return the live browser for PROFILE and DIRECTORY, when present."
   (seq-find
@@ -1021,8 +1047,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (opencode-shell--remember-session-location profile directory)
   (let ((buffer (or (opencode-shell--sessions-buffer profile directory)
                     (generate-new-buffer
-                     (format "*Opencode %s sessions*"
-                             (opencode-shell--directory-leaf directory))))))
+                     (opencode-shell--sessions-buffer-name directory)))))
     (with-current-buffer buffer
       (opencode-shell-sessions-mode)
       (setq-local opencode-shell--profile profile)
@@ -1732,8 +1757,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
           (buffer (or (opencode-shell--transcript-buffer
                        profile resolved-directory id)
                       (generate-new-buffer
-                       (format "*Opencode %s shell*"
-                               (opencode-shell--directory-leaf resolved-directory))))))
+                       (opencode-shell--transcript-buffer-name resolved-directory)))))
     (with-current-buffer buffer
       (when (derived-mode-p 'opencode-shell-mode) (opencode-shell--cleanup))
       (opencode-shell-mode)
@@ -3107,6 +3131,7 @@ non-nil, remove cached server messages absent from the snapshot."
                           sessions)))
        (setq opencode-shell--session-title
              (or (opencode-shell--get session 'title) "Untitled"))
+       (opencode-shell--rename-transcript-for-title opencode-shell--session-title)
        (force-mode-line-update)))
    nil nil))
 
