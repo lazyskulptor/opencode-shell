@@ -3961,6 +3961,44 @@
       (should (equal opened
                      (list opencode-shell-test--local-profile "/cached/" t))))))
 
+(ert-deftest opencode-shell-find-session-marks-live-browser-active ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+        (opencode-shell--recent-session-locations
+         (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile)
+                     "/work/")
+               (cons (opencode-shell--profile-key opencode-shell-test--remote-profile)
+                     "/srv/cached/")))
+        (browser (generate-new-buffer " *oc-live-browser*"))
+        requested labels)
+    (unwind-protect
+        (progn
+          (with-current-buffer browser
+            (opencode-shell-sessions-mode)
+            (setq-local opencode-shell--profile opencode-shell-test--local-profile
+                        opencode-shell--directory "/work/"))
+          (cl-letf (((symbol-function 'opencode-shell--request)
+                     (lambda (&rest _) (setq requested t)))
+                    ((symbol-function 'completing-read)
+                     (lambda (_text candidates &rest _)
+                       (setq labels (mapcar #'car candidates))
+                       (caar candidates)))
+                    ((symbol-function 'opencode-shell--open-sessions)
+                     (lambda (&rest _) nil)))
+            (opencode-shell-find-session)
+            (should-not requested)
+            (should (seq-some (lambda (label)
+                                (string-match-p "● local : /work/" label))
+                              labels))
+            (should (< (cl-position-if
+                        (lambda (label) (string-match-p "local : /work/" label)) labels)
+                       (cl-position-if
+                        (lambda (label) (string-match-p "inactive" label)) labels)
+                       (cl-position-if
+                        (lambda (label) (string-match-p "remote : /srv/cached/" label))
+                        labels)))))
+      (when (buffer-live-p browser) (kill-buffer browser)))))
+
 (ert-deftest opencode-shell-forget-session-location-removes-only-exact-saved-entry ()
   (let* ((local-key (opencode-shell--profile-key opencode-shell-test--local-profile))
          (remote-key (opencode-shell--profile-key opencode-shell-test--remote-profile))

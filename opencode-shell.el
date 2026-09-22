@@ -3899,18 +3899,34 @@ ACTIVE means that their session browser is already live."
       (opencode-shell--save-recent-session-locations)
       t)))
 
+(defun opencode-shell--live-browser-locations ()
+  "Return (profile-key . directory) pairs for live session browser buffers."
+  (let (locations)
+    (dolist (buffer (buffer-list) locations)
+      (with-current-buffer buffer
+        (when (derived-mode-p 'opencode-shell-sessions-mode)
+          (push (cons (opencode-shell--profile-key opencode-shell--profile)
+                      (opencode-shell--session-location-directory
+                       opencode-shell--directory))
+                locations))))))
+
 (defun opencode-shell--saved-session-location-entries (profiles)
   "Return saved location entries belonging to PROFILES."
-  (delq nil
-        (mapcar
-         (lambda (location)
-           (when-let ((profile
-                       (seq-find (lambda (item)
-                                   (equal (car location)
-                                          (opencode-shell--profile-key item)))
-                                 profiles)))
-             (list profile (cdr location) 0 nil)))
-         opencode-shell--recent-session-locations)))
+  (let ((live (opencode-shell--live-browser-locations)))
+    (delq nil
+          (mapcar
+           (lambda (location)
+             (when-let ((profile
+                         (seq-find (lambda (item)
+                                     (equal (car location)
+                                            (opencode-shell--profile-key item)))
+                                   profiles)))
+               (list profile (cdr location) 0
+                     (member (cons (opencode-shell--profile-key profile)
+                                   (opencode-shell--session-location-directory
+                                    (cdr location)))
+                             live))))
+           opencode-shell--recent-session-locations))))
 
 (defvar-local opencode-shell--session-location-minibuffer-mode nil)
 
