@@ -129,6 +129,7 @@ and lifecycle keys."
 (defun opencode-shell--server-lifecycle-config (profile)
   "Return normalized, non-secret lifecycle configuration for PROFILE."
   (list :start-command (copy-sequence (plist-get profile :start-command))
+        :restart-command (copy-sequence (plist-get profile :restart-command))
         :health-path (or (plist-get profile :health-path) "/health")
         :server-directory
         (opencode-shell--canonical-directory (plist-get profile :server-directory))
@@ -3863,17 +3864,35 @@ Concurrent starts for one server are coalesced.  A remote profile may use
     (remhash key opencode-shell--servers)))
 
 (defun opencode-shell--restart-server (&optional profile)
-  "Restart an owned PROFILE process after its terminal sentinel runs."
+  "Restart PROFILE's server.
+When :restart-command is configured, it must fully stop the server (e.g.
+via pkill) and return promptly; this client then starts a fresh instance
+via :start-command once the kill command exits.  This works even when the
+current server is not owned by this client.  Without :restart-command,
+only an owned live process can be restarted."
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
          (key (opencode-shell--server-key profile))
          (state (gethash key opencode-shell--servers))
-         (process (plist-get state :process)))
-    (unless (and (plist-get state :owned) (process-live-p process))
+         (process (plist-get state :process))
+         (restart-cmd (plist-get profile :restart-command)))
+    (unless (or (and (plist-get state :owned) (process-live-p process))
+                restart-cmd)
       (user-error "OpenCode server is not owned by this client"))
     (when (plist-get state :restart-profile)
       (user-error "OpenCode server restart is already in progress"))
     (puthash key (plist-put state :restart-profile profile) opencode-shell--servers)
-    (delete-process process)))
+    (if restart-cmd
+        (make-process
+         :name (format "opencode-restart-%s" key)
+         :command restart-cmd
+         :noquery t
+         :sentinel (lambda (_p _event)
+                     (when (plist-get (gethash key opencode-shell--servers) :restart-profile)
+                       (when (and process (process-live-p process))
+                         (delete-process process))
+                       (remhash key opencode-shell--servers)
+                       (opencode-shell--start-server profile))))
+      (delete-process process))))
 
 (defun opencode-shell--stop-all-servers ()
   "Stop owned servers whose shared lifecycle requests exit cleanup."
