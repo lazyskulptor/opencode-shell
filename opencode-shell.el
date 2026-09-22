@@ -1116,8 +1116,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
         (unless directory
           (user-error "Session %s has no server-reported directory" id))
         (if opencode-shell--profile
-            (opencode-shell-open-session id directory opencode-shell--profile)
-          (opencode-shell-open-session id directory)))
+            (opencode-shell-open-session id directory opencode-shell--profile t)
+          (opencode-shell-open-session id directory nil t)))
     (user-error "No session at point")))
 
 (defun opencode-shell--delete-session ()
@@ -1717,8 +1717,9 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
       (opencode-shell--log-lifecycle "poll-start" t))))
 
 ;;;###autoload
-(defun opencode-shell-open-session (id &optional directory profile)
-  "Open exact session ID scoped to DIRECTORY and PROFILE."
+(defun opencode-shell-open-session (id &optional directory profile current-window)
+  "Open exact session ID scoped to DIRECTORY and PROFILE.
+When CURRENT-WINDOW is non-nil, display it in the selected window."
   (interactive "sSession ID: ")
   (let* ((explicit-profile (or profile opencode-shell--profile))
           (profile (or (opencode-shell--resolve-profile profile)
@@ -1749,7 +1750,7 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
       (opencode-shell--begin-initial-hydration)
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
-    (pop-to-buffer buffer)
+    (if current-window (switch-to-buffer buffer) (pop-to-buffer buffer))
     (opencode-shell--refresh-table-layout)
     (goto-char (or (and (markerp opencode-shell--composer-start)
                              (marker-position opencode-shell--composer-start))

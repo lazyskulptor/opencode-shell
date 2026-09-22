@@ -70,9 +70,10 @@
                 '(((id . "s1") (directory . "/scope/exact"))))
     (let (opened)
       (cl-letf (((symbol-function 'opencode-shell-open-session)
-                 (lambda (id directory) (setq opened (list id directory)))))
+                 (lambda (id directory &optional profile current-window)
+                   (setq opened (list id directory profile current-window)))))
         (opencode-shell--open-at-point)
-        (should (equal opened '("s1" "/scope/exact")))))))
+        (should (equal opened '("s1" "/scope/exact" nil t)))))))
 
 (ert-deftest opencode-shell-browser-create-reuses-start-session-flow ()
   (with-temp-buffer
@@ -4552,7 +4553,7 @@
 (ert-deftest opencode-shell-opened-session-keeps-row-directory-for-follow-up-requests ()
   (let ((profile opencode-shell-test--remote-profile)
         (opencode-shell-poll-interval 60) browser transcript requests)
-    (cl-letf (((symbol-function 'pop-to-buffer)
+    (cl-letf (((symbol-function 'switch-to-buffer)
                (lambda (buffer &rest _) (setq transcript buffer)))
               ((symbol-function 'run-at-time) (lambda (&rest _) nil))
               ((symbol-function 'opencode-shell--request)
