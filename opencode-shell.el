@@ -431,10 +431,12 @@ Move the associated API log buffer so its name stays in sync."
                     opencode-shell--directory title))
          (old-name (buffer-name)))
     (unless (equal new-name old-name)
-      (rename-buffer new-name t)
-      (when-let ((log (get-buffer (concat old-name "-log"))))
-        (with-current-buffer log
-          (rename-buffer (concat new-name "-log") t))))))
+      (let ((log (get-buffer (concat old-name "-log"))))
+        (rename-buffer new-name t)
+        (let ((actual-name (buffer-name)))
+          (when log
+            (with-current-buffer log
+              (rename-buffer (concat actual-name "-log") t))))))))
 
 (defun opencode-shell--sessions-buffer (profile directory)
   "Return the live browser for PROFILE and DIRECTORY, when present."
@@ -649,6 +651,11 @@ Move the associated API log buffer so its name stays in sync."
     (((class color) (background light)) :foreground "#00688b" :weight bold)
     (t :inherit font-lock-function-name-face :weight bold))
   "Restrained face for assistant labels." :group 'opencode-shell)
+(defface opencode-shell-prompt-face
+  '((((class color) (background dark)) :foreground "#7ec699" :weight bold)
+    (((class color) (background light)) :foreground "#22863a" :weight bold)
+    (t :inherit font-lock-constant-face :weight bold))
+  "Face for the composer prompt glyph." :group 'opencode-shell)
 (defface opencode-shell-waiting-face '((t :inherit shadow :slant italic))
   "Face for a turn awaiting a response." :group 'opencode-shell)
 (defface opencode-shell-error-face '((t :inherit error))
@@ -1631,7 +1638,7 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
                      'face 'opencode-shell-composer-face)
         (overlay-put opencode-shell--composer-overlay 'line-prefix
                      (propertize (concat opencode-shell--composer-prompt " ")
-                                 'font-lock-face 'opencode-shell-user-face))
+                                 'font-lock-face 'opencode-shell-prompt-face))
         (overlay-put opencode-shell--composer-overlay 'after-string
                      (propertize " "
                                  'face 'opencode-shell-composer-face

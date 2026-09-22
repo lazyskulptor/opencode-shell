@@ -1660,8 +1660,7 @@
       (setq opencode-shell--table-render-width 36)
       (let ((display (opencode-shell--response-display turn)))
         (dolist (line (split-string display "\n" t))
-          (unless (string= line "ASSISTANT>")
-            (should (<= (string-width line) 36))))
+          (should (<= (string-width line) 36)))
         (should (string-match-p "외부" display))
         (should (equal (opencode-shell--turn-assistant turn) raw))))))
 
