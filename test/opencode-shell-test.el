@@ -1754,6 +1754,21 @@
     (parts . (((id . ,(concat id "-tool")) (type . "tool") (tool . "read")
                (state . ((status . ,(or status "completed")))))))))
 
+(defun opencode-shell-test--gutter-overlay-at (position)
+  "Return the role gutter overlay covering POSITION, or nil."
+  (seq-find (lambda (overlay) (overlay-get overlay 'line-prefix))
+            (overlays-at position)))
+
+(defun opencode-shell-test--gutter-text-at (position)
+  "Return the gutter line-prefix text at POSITION, or nil."
+  (when-let ((overlay (opencode-shell-test--gutter-overlay-at position)))
+    (substring-no-properties (overlay-get overlay 'line-prefix))))
+
+(defun opencode-shell-test--gutter-overlay-count ()
+  "Return the number of role gutter overlays in the current buffer."
+  (seq-count (lambda (overlay) (overlay-get overlay 'line-prefix))
+             (overlays-in (point-min) (point-max))))
+
 (ert-deftest opencode-shell-turn-navigation-uses-live-prompt-markers ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -2207,7 +2222,7 @@
            (stale-end (copy-marker (1+ (point-max)))))
       (setf (opencode-shell--turn-response-end turn) stale-end)
       (opencode-shell--render-turns)
-      (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ "))
+      (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-response-begin (car opencode-shell--turns))) "» "))
       (should (string-match-p "answer" (buffer-string)))
       (should (opencode-shell--turn-rendered-p turn)))))
 
@@ -2219,7 +2234,7 @@
       (setq opencode-shell--turns (list turn)
             opencode-shell--submit-in-flight "u1")
       (opencode-shell--render-turns)
-      (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
+      (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-user-begin (car opencode-shell--turns))) "$ "))
       (should (not opencode-shell--composer-label-visible))
       (setf (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)
@@ -2628,9 +2643,13 @@
       (setq opencode-shell--turns (list turn))
       (opencode-shell--render-turns t)
       (let ((body-start (opencode-shell--turn-user-begin turn)))
-        (should (eq (get-text-property
-                     0 'font-lock-face (get-text-property body-start 'line-prefix))
-                    'opencode-shell-user-face))
+        (should (equal (opencode-shell-test--gutter-text-at body-start) "$ "))
+        (should (memq 'opencode-shell-user-face
+                      (get-text-property
+                       0 'face
+                       (overlay-get
+                        (opencode-shell-test--gutter-overlay-at body-start)
+                        'line-prefix))))
         (should (eq (get-text-property body-start 'face)
                     'opencode-shell-composer-face))
         (should (eq (get-text-property (+ body-start 3) 'face)
@@ -2651,14 +2670,81 @@
                               (= (overlay-get overlay 'priority) 1)))
                        (overlays-at (opencode-shell--turn-user-begin turn)))))
         (should (overlayp background)))
-      (should (equal (substring-no-properties
-                      (get-text-property
-                       (opencode-shell--turn-response-begin turn) 'line-prefix))
-                     "❯❯ "))
+      (should (equal (opencode-shell-test--gutter-text-at
+                      (opencode-shell--turn-response-begin turn))
+                     "» "))
       (should-not
        (seq-find (lambda (overlay)
-                   (= (overlay-get overlay 'priority) 1))
+                   (eq (overlay-get overlay 'priority) 1))
                  (overlays-at (opencode-shell--turn-response-begin turn)))))))
+
+(ert-deftest opencode-shell-turn-gutter-first-line-label-and-margin ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u1" :user "one\ntwo\nthree"
+                                           :assistant "reply" :status 'complete)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns t)
+      (let* ((begin (opencode-shell--turn-user-begin turn))
+             (second (save-excursion (goto-char begin) (forward-line 1) (point)))
+             (first-prefix (overlay-get (opencode-shell-test--gutter-overlay-at begin)
+                                        'line-prefix))
+             (second-prefix (overlay-get (opencode-shell-test--gutter-overlay-at second)
+                                         'line-prefix)))
+        ;; First line: glyph then a colorless one-cell margin.
+        (should (equal (substring-no-properties first-prefix) "$ "))
+        (should (equal (get-text-property 0 'face first-prefix)
+                       '(opencode-shell-user-face opencode-shell-user-gutter-face)))
+        (should (equal (get-text-property 1 'display first-prefix) '(space :width 1)))
+        (should-not (get-text-property 1 'face first-prefix))
+        ;; Later lines: same-width colored block then the same margin.
+        (should (equal (substring-no-properties second-prefix) "  "))
+        (should (eq (get-text-property 0 'face second-prefix)
+                    'opencode-shell-user-gutter-face))
+        (should (equal (get-text-property 1 'display second-prefix) '(space :width 1)))
+        (should-not (get-text-property 1 'face second-prefix))
+        ;; Native line numbers are never hidden.
+        (should-not (overlay-get (opencode-shell-test--gutter-overlay-at begin)
+                                 'display-line-numbers-disable))
+        ;; Word-wrapped continuations never repeat the glyph, even on line 1.
+        (should (equal (substring-no-properties
+                        (overlay-get (opencode-shell-test--gutter-overlay-at begin)
+                                     'wrap-prefix))
+                       "  "))
+        (should (equal (substring-no-properties
+                        (overlay-get (opencode-shell-test--gutter-overlay-at second)
+                                     'wrap-prefix))
+                       "  "))))))
+
+(ert-deftest opencode-shell-turn-gutter-uses-single-char-assistant-glyph ()
+  (should (= (length opencode-shell--gutter-glyph-assistant) 1))
+  (should (equal opencode-shell--gutter-glyph-assistant "»"))
+  (should (= (length opencode-shell--gutter-glyph-user) 1)))
+
+(ert-deftest opencode-shell-turn-gutter-labels-are-not-copied ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u1" :user "one\ntwo"
+                                           :assistant "reply" :status 'complete)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns t)
+      (let ((copied (buffer-substring (opencode-shell--turn-user-begin turn)
+                                      (opencode-shell--turn-user-end turn))))
+        (should-not (text-property-not-all 0 (length copied) 'line-prefix nil copied))
+        (should (string-match-p "one" copied))))))
+
+(ert-deftest opencode-shell-turn-gutter-does-not-leak-on-rerender ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u1" :user "one\ntwo"
+                                           :assistant "reply" :status 'complete)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns t)
+      (let ((count (opencode-shell-test--gutter-overlay-count)))
+        (should (> count 0))
+        (opencode-shell--render-turns t)
+        (opencode-shell--render-turns t)
+        (should (= count (opencode-shell-test--gutter-overlay-count)))))))
 
 (ert-deftest opencode-shell-composer-overlay-follows-draft-and-visibility ()
   (with-temp-buffer
@@ -2872,8 +2958,8 @@
     (opencode-shell--render-permissions)
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
-    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
-    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ "))
+    (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-user-begin (car opencode-shell--turns))) "$ "))
+    (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-response-begin (car opencode-shell--turns))) "» "))
     (should (= 0 (how-many "┌─ PERMISSION" (point-min) (point-max))))))
 
 (ert-deftest opencode-shell-mode-and-initial-transcript-have-no-undo-history ()
@@ -2888,8 +2974,8 @@
                  (opencode-shell-test--message "a1" "assistant" "answer" "u1")))
           (should-not buffer-undo-list)
           (should-error (undo-only 1) :type 'user-error)
-          (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))
-          (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-response-begin (car opencode-shell--turns)) 'line-prefix)) "❯❯ ")))
+          (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-user-begin (car opencode-shell--turns))) "$ "))
+          (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-response-begin (car opencode-shell--turns))) "» ")))
       (kill-buffer buffer))))
 
 (ert-deftest opencode-shell-shifts-documented-composer-undo-entry-shapes ()
@@ -2928,7 +3014,7 @@
     (undo-only 1)
     (should (string-empty-p (opencode-shell--composer-text)))
     (should (= 1 (how-many "committed" (point-min) (point-max))))
-    (should (equal (substring-no-properties (get-text-property (opencode-shell--turn-user-begin (car opencode-shell--turns)) 'line-prefix)) "$ "))))
+    (should (equal (opencode-shell-test--gutter-text-at (opencode-shell--turn-user-begin (car opencode-shell--turns))) "$ "))))
 
 (ert-deftest opencode-shell-failure-keeps-hidden-composer-protected ()
   (with-temp-buffer

@@ -551,6 +551,7 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--composer-overlay nil)
 (defvar-local opencode-shell--composer-protection-overlay nil)
 (defvar-local opencode-shell--composer-input-ready nil)
+(defvar-local opencode-shell--turn-gutters nil)
 (defvar-local opencode-shell--render-dirty nil)
 (defvar-local opencode-shell--render-event nil)
 (defvar-local opencode-shell--render-force nil)
@@ -569,6 +570,10 @@ Move the associated API log buffer so its name stays in sync."
   "Structural line above the composer; the prompt glyph is shown via the overlay.")
 (defconst opencode-shell--composer-prompt "➜"
   "Prompt glyph displayed at the start of the composer lines.")
+(defconst opencode-shell--gutter-glyph-user "$"
+  "Gutter glyph shown on the first line of a user turn.")
+(defconst opencode-shell--gutter-glyph-assistant "»"
+  "Single-character gutter glyph shown on the first line of an assistant turn.")
 (defconst opencode-shell--composer-sentinel " "
   "Structural same-line cursor target for an empty composer.")
 (defvar-local opencode-shell--request-status "idle")
@@ -669,6 +674,16 @@ Move the associated API log buffer so its name stays in sync."
     (((class color) (background light)) :background "#f0f2f4" :extend t)
     (t :inherit default))
   "Subtle background face for the writable composer." :group 'opencode-shell)
+(defface opencode-shell-user-gutter-face
+  '((((class color) (background dark)) :background "#4a2c2c")
+    (((class color) (background light)) :background "#f2dcdc")
+    (t :inherit shadow))
+  "Gutter strip background marking user turns." :group 'opencode-shell)
+(defface opencode-shell-assistant-gutter-face
+  '((((class color) (background dark)) :background "#243a3c")
+    (((class color) (background light)) :background "#dceef0")
+    (t :inherit shadow))
+  "Gutter strip background marking assistant turns." :group 'opencode-shell)
 (defface opencode-shell-active-session-face
   '((t :inherit success :weight bold))
   "Face for an active session-browser location." :group 'opencode-shell)
@@ -1654,6 +1669,7 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
+  (setq-local opencode-shell--turn-gutters (make-hash-table :test #'eq))
   (setq-local opencode-shell--turns nil opencode-shell--turn-counter 0
               opencode-shell--rendered-turns nil
                opencode-shell--message-envelopes (make-hash-table :test #'equal)
@@ -1705,6 +1721,7 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
    (dolist (overlay (list opencode-shell--composer-overlay
                           opencode-shell--composer-protection-overlay))
      (when (overlayp overlay) (delete-overlay overlay)))
+   (opencode-shell--clear-all-turn-gutters)
    (setq opencode-shell--composer-overlay nil
          opencode-shell--composer-protection-overlay nil)
   (setq opencode-shell--runtime-key nil)
@@ -2650,36 +2667,98 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
 
 (defun opencode-shell--discard-turn-markers (turn)
   "Detach all rendered region markers owned by TURN."
+  (opencode-shell--clear-turn-gutters turn)
   (dolist (marker (list (opencode-shell--turn-user-begin turn)
                         (opencode-shell--turn-user-end turn)
                         (opencode-shell--turn-response-begin turn)
                         (opencode-shell--turn-response-end turn)))
     (when (markerp marker) (set-marker marker nil))))
 
-(defun opencode-shell--role-line-prefix (glyph face)
-  "Return a (LINE-PREFIX . WRAP-PREFIX) pair for GLYPH with FACE."
-  (let* ((text (concat glyph " "))
-         (indent (make-string (length text) ?\s)))
-    (cons (propertize text 'font-lock-face face)
-          (propertize indent 'font-lock-face face))))
+(defconst opencode-shell--gutter-margin
+  (propertize " " 'display '(space :width 1))
+  "Colorless one-cell margin placed right of a role gutter strip.")
 
-(defun opencode-shell--apply-role-prefix (begin end glyph face)
-  "Apply GLYPH and FACE as a left gutter prefix on BEGIN..END."
-  (let ((prefix (opencode-shell--role-line-prefix glyph face)))
-    (add-text-properties begin end
-                         (list 'line-prefix (car prefix)
-                               'wrap-prefix (cdr prefix)))))
+(defun opencode-shell--clear-turn-gutters (turn)
+  "Delete every role gutter overlay owned by TURN."
+  (when (hash-table-p opencode-shell--turn-gutters)
+    (let ((entry (gethash turn opencode-shell--turn-gutters)))
+      (dolist (role '(:user :response))
+        (dolist (overlay (plist-get entry role))
+          (when (overlayp overlay) (delete-overlay overlay))))
+      (remhash turn opencode-shell--turn-gutters))))
 
-(defun opencode-shell--assistant-prefixed-text (turn)
-  "Return TURN's assistant text with a role gutter prefix."
+(defun opencode-shell--clear-all-turn-gutters ()
+  "Delete every role gutter overlay in the current buffer."
+  (when (hash-table-p opencode-shell--turn-gutters)
+    (maphash (lambda (turn _) (opencode-shell--clear-turn-gutters turn))
+             opencode-shell--turn-gutters)
+    (clrhash opencode-shell--turn-gutters)))
+
+(defun opencode-shell--gutter-line-end (position)
+  "Return the exclusive end of the display line beginning at POSITION."
+  (save-excursion
+    (goto-char position)
+    (min (point-max) (1+ (line-end-position)))))
+
+(defun opencode-shell--apply-turn-gutter (turn role begin end glyph label-face gutter-face)
+  "Apply ROLE gutter overlays for TURN over BEGIN..END.
+The first line shows GLYPH with LABEL-FACE; every line receives a
+GUTTER-FACE background strip no wider than GLYPH, followed by a colorless
+one-cell margin.  Native line numbers are never hidden.  Overlays (not
+text properties) keep gutter glyphs out of copied text."
+  (unless (hash-table-p opencode-shell--turn-gutters)
+    (setq opencode-shell--turn-gutters (make-hash-table :test #'eq)))
+  (let ((entry (or (gethash turn opencode-shell--turn-gutters)
+                   (puthash turn (list :user nil :response nil)
+                            opencode-shell--turn-gutters)))
+        (blank (concat (propertize (make-string (length glyph) ?\s)
+                                   'face gutter-face)
+                       opencode-shell--gutter-margin))
+        (first t)
+        overlays)
+    (dolist (overlay (plist-get entry role))
+      (when (overlayp overlay) (delete-overlay overlay)))
+    (save-excursion
+      (goto-char begin)
+      (while (and (< (point) end) (not (eobp)))
+        (let ((overlay (make-overlay (point)
+                                     (opencode-shell--gutter-line-end (point))
+                                     nil t nil)))
+          (overlay-put overlay 'line-prefix
+                       (if first
+                           (concat (propertize glyph
+                                               'face (list label-face gutter-face))
+                                   opencode-shell--gutter-margin)
+                         blank))
+          ;; Word-wrapped continuations of any line (including the first)
+          ;; keep the color strip aligned without repeating the glyph.
+          (overlay-put overlay 'wrap-prefix blank)
+          (push overlay overlays)
+          (setq first nil))
+        (forward-line 1)))
+    (setq entry (plist-put entry role overlays))
+    (puthash turn entry opencode-shell--turn-gutters)))
+
+(defun opencode-shell--assistant-text (turn)
+  "Return TURN's assistant display text, or nil when it has none."
   (let ((text (opencode-shell--assistant-display-text turn)))
-    (if (string-empty-p text)
-        text
-      (let ((prefix (opencode-shell--role-line-prefix
-                     "❯❯" 'opencode-shell-assistant-face)))
-        (propertize text
-                    'line-prefix (car prefix)
-                    'wrap-prefix (cdr prefix))))))
+    (unless (string-empty-p text) text)))
+
+(defun opencode-shell--apply-response-gutter (turn response-begin response-end)
+  "Apply TURN's assistant gutter within RESPONSE-BEGIN..RESPONSE-END.
+Only a completed turn renders its assistant body; status and tool-name
+text stay unmarked so transient spinners keep no role label."
+  (when (eq (opencode-shell--turn-status turn) 'complete)
+    (let* ((text (opencode-shell--assistant-text turn))
+           (tool-length (length (opencode-shell--tool-name-display turn)))
+           (start (min response-end (+ response-begin tool-length)))
+           (end (min response-end (+ start (length text)))))
+      (when (< start end)
+        (opencode-shell--apply-turn-gutter
+         turn :response start end
+         opencode-shell--gutter-glyph-assistant
+         'opencode-shell-assistant-face
+         'opencode-shell-assistant-gutter-face)))))
 
 (defun opencode-shell--insert-user-prompt (turn)
   "Insert TURN's immutable user prompt and return its bounds."
@@ -2688,8 +2767,10 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (let ((body-begin (point)))
       (insert (propertize body 'face 'opencode-shell-composer-face)
               (propertize "\n" 'face 'opencode-shell-composer-face))
-      (opencode-shell--apply-role-prefix body-begin (point)
-                                         "$" 'opencode-shell-user-face)
+      (opencode-shell--apply-turn-gutter turn :user body-begin (point)
+                                         opencode-shell--gutter-glyph-user
+                                         'opencode-shell-user-face
+                                         'opencode-shell-user-gutter-face)
       (let ((background (make-overlay body-begin (point) nil nil nil)))
         (overlay-put background 'face 'opencode-shell-composer-face)
         (overlay-put background 'priority 1)
@@ -2705,6 +2786,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (let ((response-begin (point)))
       (insert (opencode-shell--response-display turn))
       (let ((response-end (point)))
+        (opencode-shell--apply-response-gutter turn response-begin response-end)
         (add-text-properties user-begin user-end
                              '(read-only t rear-nonsticky (read-only face)))
         (add-text-properties response-begin response-end
@@ -2738,7 +2820,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (concat
    (opencode-shell--tool-name-display turn)
    (if (eq (opencode-shell--turn-status turn) 'complete)
-       (concat (opencode-shell--assistant-prefixed-text turn)
+       (concat (or (opencode-shell--assistant-display-text turn) "")
                (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
      (propertize
       (pcase (opencode-shell--turn-status turn)
@@ -2877,7 +2959,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (set-marker begin position)
         (add-text-properties begin (point)
                            '(read-only t rear-nonsticky (read-only face)))
-        (set-marker end (point))))))
+        (set-marker end (point))
+        (opencode-shell--apply-response-gutter turn position (point))))))
 
 (defun opencode-shell--render-status-animation ()
   "Update transient spinner presentation without modifying buffer text."
@@ -2929,6 +3012,8 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
               (dolist (turn (nthcdr known-count opencode-shell--turns))
                 (opencode-shell--insert-turn-blocks turn))))
         (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
+        ;; Drop gutters of turns no longer in the transcript before rebuilding.
+        (opencode-shell--clear-all-turn-gutters)
         (delete-region opencode-shell--transcript-end opencode-shell--composer-start)
         (delete-region (point-min) opencode-shell--transcript-end)
         (goto-char (point-min))
