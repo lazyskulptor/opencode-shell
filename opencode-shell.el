@@ -3098,7 +3098,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
                  opencode-shell--composer-label-visible
-                 (>= opencode-shell--composer-start
+                 (> opencode-shell--composer-start
                      (length opencode-shell--composer-label)))
         (delete-region (- opencode-shell--composer-start
                           (length opencode-shell--composer-label))
