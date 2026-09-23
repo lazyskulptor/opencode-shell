@@ -560,6 +560,10 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--in-flight nil)
 (defvar-local opencode-shell--capabilities-loaded nil)
 (defvar-local opencode-shell--capabilities-loading nil)
+(defvar opencode-shell--capabilities-cache (make-hash-table :test #'equal)
+  "Global cache of normalized capabilities keyed by server key.")
+(defvar opencode-shell--models-cache nil
+  "Internal cache of the last normalized models pair (RESPONSE . NORMALIZED).")
 (defvar-local opencode-shell--turns nil)
 (defvar-local opencode-shell--rendered-turns nil)
 (defvar-local opencode-shell--turn-counter 0)
@@ -1190,24 +1194,30 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--normalize-models (response)
   "Return models from server-connected providers in RESPONSE."
-  (let* ((connected-present (or (assq 'connected response)
-                                (assoc "connected" response)))
-         (connected (opencode-shell--get response 'connected)))
-    (mapcan
-     (lambda (provider)
-       (let ((provider-id (opencode-shell--get provider 'id)))
-         (when (or (not connected-present) (member provider-id connected))
-           (mapcar
-            (lambda (entry)
-              (let* ((key (and (consp entry) (atom (car entry)) (car entry)))
-                     (model (if key (cdr entry) entry))
-                     (value (or (opencode-shell--model-value model provider-id)
-                                (and key (opencode-shell--model-value
-                                          (format "%s" key) provider-id)))))
-                (cons (opencode-shell--model-name value) value)))
-            (opencode-shell--get provider 'models)))))
-     (or (opencode-shell--get response 'all)
-         (opencode-shell--get response 'providers)))))
+  (if (and opencode-shell--models-cache
+           (eq (car opencode-shell--models-cache) response))
+      (cdr opencode-shell--models-cache)
+    (let* ((connected-present (or (assq 'connected response)
+                                  (assoc "connected" response)))
+           (connected (opencode-shell--get response 'connected))
+           (normalized
+            (mapcan
+             (lambda (provider)
+               (let ((provider-id (opencode-shell--get provider 'id)))
+                 (when (or (not connected-present) (member provider-id connected))
+                   (mapcar
+                    (lambda (entry)
+                      (let* ((key (and (consp entry) (atom (car entry)) (car entry)))
+                             (model (if key (cdr entry) entry))
+                             (value (or (opencode-shell--model-value model provider-id)
+                                        (and key (opencode-shell--model-value
+                                                  (format "%s" key) provider-id)))))
+                        (cons (opencode-shell--model-name value) value)))
+                    (opencode-shell--get provider 'models)))))
+             (or (opencode-shell--get response 'all)
+                 (opencode-shell--get response 'providers)))))
+      (setq opencode-shell--models-cache (cons response normalized))
+      normalized)))
 
 (defun opencode-shell--normalize-agents (response)
   "Return server-advertised visible primary agents from RESPONSE."
@@ -1408,6 +1418,30 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
       (when agent
         (setq opencode-shell--selected-agent agent
               opencode-shell--selected-model (opencode-shell--agent-model agent))))))
+
+(defun opencode-shell--apply-cached-capabilities (&optional profile)
+  "Populate buffer capabilities from global cache for PROFILE if available.
+Return non-nil when cached capabilities were applied."
+  (let* ((profile (or profile opencode-shell--profile))
+         (key (and profile (opencode-shell--server-key profile)))
+         (cached (and key (gethash key opencode-shell--capabilities-cache))))
+    (when cached
+      (setq opencode-shell--models (plist-get cached :models)
+            opencode-shell--agents (plist-get cached :agents)
+            opencode-shell--configured-model (plist-get cached :configured-model)
+            opencode-shell--selected-model
+            (opencode-shell--preserve-choice opencode-shell--selected-model
+                                             opencode-shell--models))
+      (unless (assoc opencode-shell--selected-agent opencode-shell--agents)
+        (setq opencode-shell--selected-agent nil))
+      (opencode-shell--initialize-server-defaults)
+      (setq opencode-shell--capabilities-loaded t)
+      t)))
+
+(defun opencode-shell--reset-capabilities-cache ()
+  "Clear the global capabilities and model normalization caches."
+  (clrhash opencode-shell--capabilities-cache)
+  (setq opencode-shell--models-cache nil))
 
 (defun opencode-shell-help ()
   "Display the transcript Transient menu."
@@ -1873,6 +1907,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (setq-local default-directory
                   (opencode-shell--client-directory resolved-directory profile))
       (setq-local opencode-shell--session-title nil)
+      (opencode-shell--apply-cached-capabilities profile)
       (opencode-shell--begin-initial-hydration)
       (opencode-shell--resync t)
       (opencode-shell--start-polling))
@@ -3367,7 +3402,15 @@ When FULL is non-nil, also refresh metadata and capabilities."
                      (when (zerop remaining)
                        (setq opencode-shell--capabilities-loading nil
                              opencode-shell--capabilities-loaded (not failed))
-                       (unless failed (opencode-shell--initialize-server-defaults))
+                       (unless failed
+                         (when-let ((key (and opencode-shell--profile
+                                              (opencode-shell--server-key opencode-shell--profile))))
+                           (puthash key
+                                    (list :models opencode-shell--models
+                                          :agents opencode-shell--agents
+                                          :configured-model opencode-shell--configured-model)
+                                    opencode-shell--capabilities-cache))
+                         (opencode-shell--initialize-server-defaults))
                        (force-mode-line-update))))
         (opencode-shell--guarded-request
          'providers "GET" "/provider"
@@ -3984,10 +4027,10 @@ Concurrent starts for one server are coalesced.  A remote profile may use
                                 (cons (cons callback profile)
                                       (plist-get state :callbacks)))
                   opencode-shell--servers)))
-     ((not command)
-      (user-error "Profile has no :start-command"))
-     ((and (plist-get state :owned)
-           (process-live-p (plist-get state :process)))
+      ((not command)
+       (user-error "Profile has no :start-command"))
+      ((and (plist-get state :owned)
+            (process-live-p (plist-get state :process)))
       (let ((attempt (gensym "opencode-start-")))
        (puthash key (plist-put (plist-put (plist-put state :checking t)
                                          :attempt attempt)
