@@ -3740,7 +3740,7 @@
   (should (equal (opencode-shell--transcript-buffer-name "/work/project/" "100% done")
                  "*oc-sh➜ 100% done — project*"))
   (should (equal (opencode-shell--sessions-buffer-name "/work/project/")
-                 "*oc-sh➜ project sessions*")))
+                 "*oc+sh$ project sessions*")))
 
 (ert-deftest opencode-shell-rename-transcript-moves-log-buffer ()
   (let ((transcript (generate-new-buffer "*oc-sh➜ project*"))

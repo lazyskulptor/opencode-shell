@@ -413,7 +413,7 @@ profiles make the result ambiguous."
 
 (defun opencode-shell--sessions-buffer-name (directory)
   "Return the session browser display name for DIRECTORY."
-  (concat "*oc-sh➜ " (opencode-shell--directory-leaf directory) " sessions*"))
+  (concat "*oc+sh$ " (opencode-shell--directory-leaf directory) " sessions*"))
 
 (defun opencode-shell--transcript-buffer-name (directory &optional title)
   "Return the transcript display name for DIRECTORY with TITLE.
