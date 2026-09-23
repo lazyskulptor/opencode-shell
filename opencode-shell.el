@@ -1658,7 +1658,7 @@ polluting the user's undo history."
     (opencode-shell--without-user-undo
       (let ((opencode-shell--internal-edit t)
             (inhibit-read-only t)
-            (position (copy-marker (point))))
+            (position (copy-marker (point) t)))
         (goto-char opencode-shell--composer-start)
         (opencode-shell--insert-composer-label)
         (set-marker opencode-shell--composer-start (point))
