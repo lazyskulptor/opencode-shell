@@ -1524,14 +1524,29 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
   (interactive)
   (opencode-shell--move-turn 'next))
 
+(defun opencode-shell--composer-boundary ()
+  "Return the position where the protected composer region begins.
+While the structural composer label is present this is the label's start, so an
+edit may remove the label itself (restored afterwards) while the transcript
+stays protected.  When the label is already gone the boundary is the composer
+start, keeping the transcript protected across follow-up edits."
+  (when (and (markerp opencode-shell--composer-start)
+             (marker-position opencode-shell--composer-start))
+    (if (and (> opencode-shell--composer-start (point-min))
+             (get-text-property (1- opencode-shell--composer-start)
+                                'opencode-shell-composer-label))
+        (- opencode-shell--composer-start
+           (length opencode-shell--composer-label))
+      opencode-shell--composer-start)))
+
 (defun opencode-shell--protect-transcript (begin end)
   "Reject user edits outside or crossing the visible composer boundary."
   (when (and (not opencode-shell--internal-edit)
              (markerp opencode-shell--composer-start)
              (marker-position opencode-shell--composer-start)
              (or (not (opencode-shell--composer-visible-p))
-                 (< begin opencode-shell--composer-start)
-                 (< end opencode-shell--composer-start)))
+                 (< begin (opencode-shell--composer-boundary))
+                 (< end (opencode-shell--composer-boundary))))
     (signal 'text-read-only (list "OpenCode transcript is read-only"))))
 
 (defun opencode-shell--shift-undo-position (position threshold delta)
@@ -1572,6 +1587,13 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
       copy))
    (t entry)))
 
+(defvar opencode-shell--undo-extra-shifts nil
+  "Additional (THRESHOLD . DELTA) shifts applied to preserved undo entries.
+The values are expressed in pre-edit coordinates and applied highest
+threshold first, so a caller can account for internal edits that shift
+buffer positions other than the composer start (for example relocating the
+structural composer sentinel).")
+
 (defmacro opencode-shell--without-user-undo (&rest body)
   "Run BODY without adding package edits to the user's undo history."
   (declare (indent 0) (debug t))
@@ -1581,9 +1603,18 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
        (let ((saved-undo buffer-undo-list)
            (old-composer-start (and (markerp opencode-shell--composer-start)
                                     (marker-position opencode-shell--composer-start)))
+           (extra-shifts (sort (copy-sequence opencode-shell--undo-extra-shifts)
+                               (lambda (a b) (> (car a) (car b)))))
            result)
        (let ((buffer-undo-list t))
          (setq result (progn ,@body)))
+       ;; Interior edits (highest threshold first) are in pre-edit coordinates.
+       (dolist (shift extra-shifts)
+         (setq saved-undo
+               (mapcar (lambda (entry)
+                         (opencode-shell--shift-undo-entry
+                          entry (car shift) (cdr shift)))
+                       saved-undo)))
        (when (and old-composer-start
                   (marker-position opencode-shell--composer-start))
          (let ((delta (- (marker-position opencode-shell--composer-start)
@@ -1597,12 +1628,13 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
          result))))
 
 (defun opencode-shell--insert-composer-label ()
-  "Insert the immutable label immediately before the composer."
+  "Insert the structural label immediately before the composer.
+The label is not marked read-only so a native Evil line deletion on the sole
+composer line can remove it; `opencode-shell--ensure-composer-label' restores
+exactly one label afterwards."
   (insert (propertize opencode-shell--composer-label
-                      'read-only t
                       'opencode-shell-composer-label t
-                      'rear-nonsticky
-                      '(read-only opencode-shell-composer-label))))
+                      'rear-nonsticky '(opencode-shell-composer-label))))
 
 (defun opencode-shell--insert-composer-sentinel ()
   "Insert the property-marked same-line composer sentinel at point."
@@ -1610,8 +1642,43 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
                       'opencode-shell-composer-sentinel t
                       'rear-nonsticky '(opencode-shell-composer-sentinel))))
 
+(defun opencode-shell--ensure-composer-label ()
+  "Restore the structural composer label when an edit removed it.
+Native Evil line deletion on the sole trailing-newline-less composer line also
+removes the preceding label newline; this recreates exactly one label without
+polluting the user's undo history."
+  (when (and (not opencode-shell--internal-edit)
+             (opencode-shell--composer-visible-p)
+             (markerp opencode-shell--composer-start)
+             (marker-position opencode-shell--composer-start)
+             (not (and (> opencode-shell--composer-start (point-min))
+                       (get-text-property
+                        (1- opencode-shell--composer-start)
+                        'opencode-shell-composer-label))))
+    (opencode-shell--without-user-undo
+      (let ((opencode-shell--internal-edit t)
+            (inhibit-read-only t)
+            (position (copy-marker (point))))
+        (goto-char opencode-shell--composer-start)
+        (opencode-shell--insert-composer-label)
+        (set-marker opencode-shell--composer-start (point))
+        (goto-char position)
+        (set-marker position nil)))))
+
+(defun opencode-shell--composer-sentinel-positions ()
+  "Return buffer positions of the structural composer sentinels."
+  (let ((position opencode-shell--composer-start)
+        positions)
+    (while (setq position (text-property-any
+                           position (point-max)
+                           'opencode-shell-composer-sentinel t))
+      (push position positions)
+      (setq position (1+ position)))
+    (nreverse positions)))
+
 (defun opencode-shell--ensure-composer-sentinel (&rest _ignored)
   "Keep exactly one structural sentinel at the composer end."
+  (opencode-shell--ensure-composer-label)
   (when (and (not opencode-shell--internal-edit)
              (opencode-shell--composer-visible-p)
              (markerp opencode-shell--composer-start)
@@ -1621,19 +1688,25 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
               (text-property-any opencode-shell--composer-start
                                  (1- (point-max))
                                  'opencode-shell-composer-sentinel t))
-      (opencode-shell--without-user-undo
-        (let ((opencode-shell--internal-edit t)
-              (inhibit-read-only t)
-              (position (copy-marker (point))))
-          (while-let ((sentinel
-                       (text-property-any opencode-shell--composer-start
-                                          (point-max)
-                                          'opencode-shell-composer-sentinel t)))
-            (delete-region sentinel (1+ sentinel)))
-          (goto-char (point-max))
-          (opencode-shell--insert-composer-sentinel)
-          (goto-char position)
-          (set-marker position nil))))
+      ;; Relocating a sentinel that a user edit pushed away from the composer
+      ;; end shifts later positions, so preserved undo entries need the same
+      ;; shift or undo would operate on stale ranges.
+      (let ((opencode-shell--undo-extra-shifts
+             (mapcar (lambda (pos) (cons pos -1))
+                     (opencode-shell--composer-sentinel-positions)))
+            (position (copy-marker (point))))
+        (opencode-shell--without-user-undo
+          (let ((opencode-shell--internal-edit t)
+                (inhibit-read-only t))
+            (while-let ((sentinel
+                         (text-property-any opencode-shell--composer-start
+                                            (point-max)
+                                            'opencode-shell-composer-sentinel t)))
+              (delete-region sentinel (1+ sentinel)))
+            (goto-char (point-max))
+            (opencode-shell--insert-composer-sentinel)))
+        (goto-char position)
+        (set-marker position nil)))
     (when (and (opencode-shell--point-in-composer-p)
                (= (point) (point-max)))
       (goto-char (1- (point-max))))))

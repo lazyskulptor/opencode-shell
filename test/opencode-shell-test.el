@@ -1495,6 +1495,41 @@
         (opencode-shell--evil-edit-in-composer #'evil-delete)
         (should (equal calls (list allowed-position)))))))
 
+(ert-deftest opencode-shell-composer-append-undo-after-sentinel-relocation ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (buffer-enable-undo)
+    (insert "seed")
+    (undo-boundary)
+    ;; Evil `p' at the composer end appends after the sentinel, so the repair
+    ;; has to relocate the sentinel; the user's undo entry must stay valid.
+    (goto-char (point-max))
+    (insert "XY\nZ")
+    (undo-boundary)
+    (opencode-shell--ensure-composer-sentinel)
+    (should (equal (opencode-shell--composer-text) "seedXY\nZ"))
+    (undo-only 1)
+    (opencode-shell--ensure-composer-sentinel)
+    (should (equal (opencode-shell--composer-text) "seed"))))
+
+(ert-deftest opencode-shell-composer-sole-line-delete-self-heals ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (goto-char opencode-shell--composer-start)
+    (insert "hello")
+    (let ((inhibit-read-only nil))
+      ;; Vim `dd` on the sole, trailing-newline-less composer line also removes
+      ;; the preceding newline, i.e. the structural composer label.
+      (delete-region (- opencode-shell--composer-start
+                        (length opencode-shell--composer-label))
+                     (point-max)))
+    (opencode-shell--ensure-composer-sentinel)
+    (should (string-empty-p (opencode-shell--composer-text)))
+    (should (get-text-property (1- opencode-shell--composer-start)
+                               'opencode-shell-composer-label))
+    (should (get-text-property (1- (point-max))
+                               'opencode-shell-composer-sentinel))))
+
 (ert-deftest opencode-shell-configures-evil-buffer-locally ()
   (let ((original (default-value 'evil-move-beyond-eol)))
     (unwind-protect
@@ -2628,9 +2663,18 @@
                      (goto-char (point-min)) (insert "x"))
                    :type 'text-read-only)
     (should-error (let ((inhibit-read-only nil))
-                    (delete-region (1- opencode-shell--composer-start)
-                                   (1+ opencode-shell--composer-start)))
+                    (delete-region (1- (opencode-shell--composer-boundary))
+                                   opencode-shell--composer-start))
                   :type 'text-read-only)
+    ;; The structural label may be removed by a native line deletion; it is
+    ;; restored afterwards without disturbing the composer.
+    (let ((inhibit-read-only nil))
+      (delete-region (opencode-shell--composer-boundary)
+                     opencode-shell--composer-start))
+    (opencode-shell--ensure-composer-sentinel)
+    (should (get-text-property (1- opencode-shell--composer-start)
+                               'opencode-shell-composer-label))
+    (should (equal (opencode-shell--composer-text) "first\nsecond"))
     (goto-char (1- (point-max)))
     (insert "\nthird")
     (should (equal (opencode-shell--composer-text) "first\nsecond\nthird"))))
@@ -2879,10 +2923,15 @@
     (goto-char opencode-shell--composer-start)
     (insert "\n")
     (should (equal (opencode-shell--composer-text) "\nIA\nnew"))
-    (goto-char (point-min))
-    (should-error (delete-region (line-beginning-position)
-                                 (line-end-position 2))
-                  :type 'text-read-only)))
+    ;; Real `dd' on the sole (trailing-newline-less) composer line also removes
+    ;; the label newline above it; the edit succeeds and the label is restored.
+    (goto-char opencode-shell--composer-start)
+    (let ((inhibit-read-only nil))
+      (delete-region (1- opencode-shell--composer-start) (point-max)))
+    (opencode-shell--ensure-composer-sentinel)
+    (should (string-empty-p (opencode-shell--composer-text)))
+    (should (get-text-property (1- opencode-shell--composer-start)
+                               'opencode-shell-composer-label))))
 
 (ert-deftest opencode-shell-first-composer-line-delete-undo-redo ()
   (with-temp-buffer
