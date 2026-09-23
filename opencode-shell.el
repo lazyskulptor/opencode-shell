@@ -1237,9 +1237,8 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   "Mouse map for the session ID in transcript headers.")
 
 (defun opencode-shell--header ()
-  "Return live transcript title, agent, and model metadata."
-  (let* ((left (format " %s  agent:%s  model:%s"
-                       (or opencode-shell--session-title "Untitled")
+  "Return live transcript agent, model, and session metadata."
+  (let* ((left (format " agent:%s  model:%s"
                        (or opencode-shell--selected-agent "server default")
                        (or (car (rassoc opencode-shell--selected-model
                                        opencode-shell--models))
