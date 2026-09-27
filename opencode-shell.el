@@ -1675,6 +1675,17 @@ exactly one label afterwards."
                       'opencode-shell-composer-sentinel t
                       'rear-nonsticky '(opencode-shell-composer-sentinel))))
 
+(defun opencode-shell--remove-composer-labels (&optional limit)
+  "Remove all characters with the composer label property up to LIMIT."
+  (let ((pos (point-min))
+        (limit (or limit (point-max))))
+    (while (setq pos (text-property-any pos limit 'opencode-shell-composer-label t))
+      (let ((end pos))
+        (while (and (< end limit)
+                    (get-text-property end 'opencode-shell-composer-label))
+          (setq end (1+ end)))
+        (delete-region pos end)))))
+
 (defun opencode-shell--ensure-composer-label ()
   "Restore the structural composer label when an edit removed it.
 Native Evil line deletion on the sole trailing-newline-less composer line also
@@ -1692,6 +1703,7 @@ polluting the user's undo history."
       (let ((opencode-shell--internal-edit t)
             (inhibit-read-only t)
             (position (copy-marker (point) t)))
+        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
         (goto-char opencode-shell--composer-start)
         (opencode-shell--insert-composer-label)
         (set-marker opencode-shell--composer-start (point))
@@ -2645,11 +2657,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                       (- (point) opencode-shell--composer-start)))
           (inhibit-read-only t))
     (save-excursion
-      (when-let ((label-pos (text-property-any
-                            (point-min) opencode-shell--composer-start
-                            'opencode-shell-composer-label t)))
-        (delete-region label-pos
-                       (+ label-pos (length opencode-shell--composer-label)))
+      (when opencode-shell--composer-label-visible
+        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
         (setq opencode-shell--composer-label-visible nil))
       (goto-char opencode-shell--permission-begin)
       (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
@@ -3131,23 +3140,15 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
         (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
-                 opencode-shell--composer-label-visible
-                 (> opencode-shell--composer-start
-                     (length opencode-shell--composer-label)))
-        (delete-region (- opencode-shell--composer-start
-                          (length opencode-shell--composer-label))
-                       opencode-shell--composer-start)
+                 opencode-shell--composer-label-visible)
+        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
         (setq opencode-shell--composer-label-visible nil))
       (when (and append-only
                  (opencode-shell--composer-visible-p)
                  (not opencode-shell--composer-label-visible)
                  (or opencode-shell--submit-in-flight
                      opencode-shell--rendered-turns))
-        (when-let ((label-pos (text-property-any
-                              (point-min) opencode-shell--composer-start
-                              'opencode-shell-composer-label t)))
-          (delete-region label-pos
-                         (+ label-pos (length opencode-shell--composer-label))))
+        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
         (goto-char opencode-shell--composer-start)
         (opencode-shell--insert-composer-label)
         (setq opencode-shell--composer-label-visible t))
