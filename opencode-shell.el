@@ -3769,8 +3769,17 @@ When FULL is non-nil, also refresh metadata and capabilities."
             (- opencode-shell--composer-start
                (length opencode-shell--composer-label))))
     (goto-char opencode-shell--composer-start)
-    (evil-insert-state))
-    (t (evil-open-below count))))
+     (evil-insert-state))
+     (t (evil-open-below count))))
+
+(defun opencode-shell--evil-backspace ()
+  "Delete backward in the Composer without crossing its empty boundary."
+  (interactive)
+  (declare-function evil-delete-backward-char-and-join "evil-commands")
+  (unless (and (opencode-shell--in-composer-p)
+               (string-empty-p (opencode-shell--composer-text))
+               (= (point) opencode-shell--composer-start))
+    (call-interactively #'evil-delete-backward-char-and-join)))
 
 (defun opencode-shell--evil-edit-allowed-p (&optional prompt-line-p)
   "Return non-nil when the current position may invoke an Evil edit.
@@ -3830,8 +3839,10 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
      (define-key opencode-shell-mode-map (vector 'remap command)
        (opencode-shell--evil-gated-command command)))
    (evil-define-key* 'insert opencode-shell-mode-map
-    (kbd "?") #'self-insert-command
-    (kbd "RET") #'newline
+     (kbd "?") #'self-insert-command
+     (kbd "DEL") #'opencode-shell--evil-backspace
+     (kbd "<backspace>") #'opencode-shell--evil-backspace
+     (kbd "RET") #'newline
     (kbd "<return>") #'newline
     (kbd "C-n") #'opencode-shell--next-turn
     (kbd "C-p") #'opencode-shell--previous-turn

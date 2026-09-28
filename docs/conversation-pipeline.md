@@ -82,6 +82,8 @@ as normal `require` loading.
   while Evil mutating commands are inert outside the writable Composer;
   rerenders preserve Composer draft, point, markers, undo history, and window
   state.
+- Evil Backspace at an empty Composer boundary is a no-op; it never deletes or
+  recreates the structural prompt line.
 
 ## Module ownership
 
