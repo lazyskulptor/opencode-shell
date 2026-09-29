@@ -269,6 +269,11 @@ and deferred hidden rendering. They never include SSE payloads, transcript text,
 request bodies, directories, or authorization values. A healthy local runtime
 normally shows one SSE connection regardless of the number of transcript buffers;
 fallback lines followed by reconnect lines indicate automatic recovery.
+SSH-forwarded remote profiles pause HTTP polling after a transport disconnect and
+show one offline notice instead of repeating connection errors. SSH forwarding
+is retried asynchronously with a finite budget; if it remains unavailable,
+`g r` starts a new client-side SSH-first recovery attempt without restarting the
+remote OpenCode service or replaying a submitted prompt.
 
 ## Asynchronous runtime principles
 

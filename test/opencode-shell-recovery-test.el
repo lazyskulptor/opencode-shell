@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'opencode-shell-recovery)
+(require 'opencode-shell-async)
 
 (ert-deftest opencode-shell-recovery-bounds-retries-after-five-failures ()
   (let ((opencode-shell-recovery--states (make-hash-table :test #'equal))
@@ -69,6 +70,34 @@
       (apply (car timer) (cdr timer))
       (should-not woke)
       (should-not (gethash 'remote opencode-shell-recovery--states)))))
+
+(ert-deftest opencode-shell-recovery-pauses-existing-poll-cadence ()
+  (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+        (buffer (generate-new-buffer " *offline-poll-test*"))
+        scheduled cancelled wakes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest args)
+                     (let ((timer (list 'timer args)))
+                       (push timer scheduled) timer)))
+                  ((symbol-function 'timerp)
+                   (lambda (item) (eq (car-safe item) 'timer)))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer) (push timer cancelled)))
+                  ((symbol-function 'opencode-shell-async--deliver-runtime)
+                   (lambda (&rest _) (push t wakes))))
+          (opencode-shell-async-subscribe-runtime
+           'ssh buffer "http://example.test/event" nil nil 2 #'ignore)
+          (let ((initial (car scheduled)))
+            (opencode-shell-async-pause-runtime 'ssh)
+            (should (member initial cancelled))
+            (opencode-shell-async--poll-runtime 'ssh)
+            (should-not wakes)
+            (opencode-shell-async-resume-runtime 'ssh)
+            (should (= (length scheduled) 2))
+            (opencode-shell-async--poll-runtime 'ssh)
+            (should wakes)))
+      (kill-buffer buffer))))
 
 (provide 'opencode-shell-recovery-test)
 ;;; opencode-shell-recovery-test.el ends here

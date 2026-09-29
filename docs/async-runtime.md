@@ -34,6 +34,10 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
    circuit for that runtime while polling remains active.
 8. Buffer text and markers are changed only on Emacs's main thread. The runtime
    minimizes that work instead of attempting unsafe worker-thread rendering.
+9. SSH-forwarded remote profiles suspend the existing HTTP polling timer while
+   offline. Their bounded SSH retry timer is independent of polling; ordinary
+   poll wakes cannot reopen an exhausted retry budget. The health probe runs
+   outside the session HTTP readiness gate to avoid a dependency cycle.
 
 ## Runtime layers
 

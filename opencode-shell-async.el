@@ -91,19 +91,38 @@
 (defun opencode-shell-async--poll-runtime (key)
   "Poll subscribers for KEY at fallback or reconciliation cadence."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (let* ((connected (opencode-shell-sse-connected-p
-                       (plist-get runtime :connection)))
-           (ticks (1+ (or (plist-get runtime :ticks) 0)))
-           (interval (or (plist-get runtime :poll-interval) 2))
-           (reconcile-ticks
-            (max 1 (round (/ opencode-shell-async--reconcile-interval
-                             interval)))))
-      (setf (plist-get runtime :ticks) ticks)
-      (when (or (not connected) (zerop (% ticks reconcile-ticks)))
-        (opencode-shell-async--runtime-log
-         runtime "transport=%s wake=poll"
-         (if connected "sse" "fallback"))
-        (opencode-shell-async--deliver-runtime runtime 'poll)))))
+    (unless (plist-get runtime :paused)
+      (let* ((connected (opencode-shell-sse-connected-p
+                         (plist-get runtime :connection)))
+             (ticks (1+ (or (plist-get runtime :ticks) 0)))
+             (interval (or (plist-get runtime :poll-interval) 2))
+             (reconcile-ticks
+              (max 1 (round (/ opencode-shell-async--reconcile-interval
+                               interval)))))
+        (setf (plist-get runtime :ticks) ticks)
+        (when (or (not connected) (zerop (% ticks reconcile-ticks)))
+          (opencode-shell-async--runtime-log
+           runtime "transport=%s wake=poll"
+           (if connected "sse" "fallback"))
+          (opencode-shell-async--deliver-runtime runtime 'poll))))))
+
+(defun opencode-shell-async-pause-runtime (key)
+  "Suspend KEY's HTTP poll timer without dropping its subscribers."
+  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+    (when (timerp (plist-get runtime :poll-timer))
+      (cancel-timer (plist-get runtime :poll-timer)))
+    (setf (plist-get runtime :poll-timer) nil
+          (plist-get runtime :paused) t)))
+
+(defun opencode-shell-async-resume-runtime (key)
+  "Resume KEY's existing polling cadence after transport recovery."
+  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+    (setf (plist-get runtime :paused) nil)
+    (when (and (> (hash-table-count (plist-get runtime :subscribers)) 0)
+               (not (timerp (plist-get runtime :poll-timer))))
+      (let ((interval (plist-get runtime :poll-interval)))
+        (setf (plist-get runtime :poll-timer)
+              (run-at-time interval interval #'opencode-shell-async--poll-runtime key))))))
 
 (defun opencode-shell-async--schedule-reconnect (key)
   "Schedule a bounded asynchronous reconnect for runtime KEY."
@@ -212,7 +231,7 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
                        (list :subscribers (make-hash-table :test #'eq :weakness 'key)
                              :url url :headers headers :sse-enabled sse-enabled
                              :sse-disabled nil
-                             :poll-interval poll-interval
+                              :poll-interval poll-interval :paused nil
                              :logger logger
                               :backoff 1 :ticks 0 :poll-timer nil
                               :reconnect-timer nil :connection nil
@@ -221,7 +240,8 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
                           :event-callback event-callback)
              (plist-get runtime :subscribers))
     (puthash key runtime opencode-shell-async--runtimes)
-    (unless (timerp (plist-get runtime :poll-timer))
+    (unless (or (plist-get runtime :paused)
+                (timerp (plist-get runtime :poll-timer)))
       (setf (plist-get runtime :poll-timer)
             (run-at-time poll-interval poll-interval
                          #'opencode-shell-async--poll-runtime key)))

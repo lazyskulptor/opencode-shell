@@ -14,7 +14,7 @@
 (defun opencode-shell-recovery--state (key)
   "Return the retry state for server KEY."
   (or (gethash key opencode-shell-recovery--states)
-      (let ((state (list :offline nil :exhausted nil :failures 0
+      (let ((state (list :offline nil :ready nil :exhausted nil :failures 0
                          :retry-timer nil :retry-token nil
                          :deadline nil :attempt nil)))
         (puthash key state opencode-shell-recovery--states)
@@ -24,6 +24,10 @@
   "Return whether KEY's SSH transport is offline."
   (plist-get (gethash key opencode-shell-recovery--states) :offline))
 
+(defun opencode-shell-recovery-ready-p (key)
+  "Return whether KEY has a verified, current SSH forwarding path."
+  (plist-get (gethash key opencode-shell-recovery--states) :ready))
+
 (defun opencode-shell-recovery-exhausted-p (key)
   "Return whether KEY exhausted automatic retry attempts."
   (plist-get (gethash key opencode-shell-recovery--states) :exhausted))
@@ -32,7 +36,8 @@
   "Mark KEY offline, returning non-nil only for a new outage."
   (let* ((state (opencode-shell-recovery--state key))
          (new (not (plist-get state :offline))))
-    (setf (plist-get state :offline) t)
+    (setf (plist-get state :offline) t
+          (plist-get state :ready) nil)
     new))
 
 (defun opencode-shell-recovery--clear-timers (state)
@@ -54,7 +59,8 @@
         (cancel-timer (plist-get state :deadline)))
       (setf (plist-get state :deadline) nil
             (plist-get state :attempt) nil
-            (plist-get state :offline) t)
+            (plist-get state :offline) t
+            (plist-get state :ready) nil)
       (let ((failures (1+ (plist-get state :failures))))
         (setf (plist-get state :failures) failures)
         (if (>= failures opencode-shell-recovery--max-failures)
@@ -92,9 +98,10 @@
 
 (defun opencode-shell-recovery-success (key)
   "Reset KEY's recovery state after verified transport health."
-  (when-let ((state (gethash key opencode-shell-recovery--states)))
+  (let ((state (opencode-shell-recovery--state key)))
     (opencode-shell-recovery--clear-timers state)
     (setf (plist-get state :offline) nil
+          (plist-get state :ready) t
           (plist-get state :exhausted) nil
           (plist-get state :failures) 0)))
 
@@ -103,6 +110,7 @@
   (let ((state (opencode-shell-recovery--state key)))
     (opencode-shell-recovery--clear-timers state)
     (setf (plist-get state :offline) t
+          (plist-get state :ready) nil
           (plist-get state :exhausted) nil
           (plist-get state :failures) 0)))
 
