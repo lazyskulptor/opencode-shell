@@ -141,7 +141,9 @@ and questions; session metadata and model/agent capabilities are full-resync dat
 When a session opens, the Composer stays unavailable until successful message,
 permission, and question snapshots have all arrived, including valid empty
 snapshots. A transient failure keeps input blocked and shows a recovery message;
-use `g r` to retry the authoritative hydration.
+read-only snapshots that never return expire so they cannot hold a polling guard
+forever. Use `g r` to retry authoritative hydration; late replies to expired
+snapshots cannot replace newer results. Prompt submissions are not replayed.
 While the Composer is blocked, its retained region remains read-only and Evil
 editing commands are inert outside the writable Composer.  Blocking returns
 Evil to normal state; completion restores Composer editability but does not

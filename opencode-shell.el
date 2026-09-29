@@ -79,6 +79,8 @@ and lifecycle keys."
 (defvar-local opencode-shell--base-url nil)
 
 (defconst opencode-shell--process-tail-limit 4096)
+(defconst opencode-shell--snapshot-request-timeout 20
+  "Maximum seconds a read-only snapshot may hold an in-flight guard.")
 
 (defvar projectile-mode)
 (declare-function projectile-project-root "projectile")
@@ -3293,22 +3295,40 @@ non-nil, remove cached server messages absent from the snapshot."
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
   "Request PATH once per generation under KEY."
   (unless (alist-get key opencode-shell--in-flight)
-    (let ((generation opencode-shell--generation)
-          (request-mode major-mode))
-      (setf (alist-get key opencode-shell--in-flight) t)
-      (opencode-shell--request
-       method path
-       (lambda (value)
-         (when (and (eq major-mode request-mode)
-                    (= generation opencode-shell--generation))
-           (setf (alist-get key opencode-shell--in-flight) nil)
-           (funcall callback value)))
-       body nil
-       (lambda ()
-         (when (and (eq major-mode request-mode)
-                    (= generation opencode-shell--generation))
-           (setf (alist-get key opencode-shell--in-flight) nil)
-           (when error-callback (funcall error-callback))))))))
+    (let ((origin (current-buffer))
+          (generation opencode-shell--generation)
+          (request-mode major-mode)
+          (attempt (make-symbol "opencode-snapshot")) timer response)
+      (setf (alist-get key opencode-shell--in-flight) attempt)
+      (cl-labels ((current-p ()
+                    (and (eq major-mode request-mode)
+                         (= generation opencode-shell--generation)
+                         (eq attempt (alist-get key opencode-shell--in-flight))))
+                  (settle (success value)
+                    (when (current-p)
+                      (when (timerp timer) (cancel-timer timer))
+                      (setf (alist-get key opencode-shell--in-flight) nil)
+                      (if success (funcall callback value)
+                        (when error-callback (funcall error-callback))))))
+        (when (equal method "GET")
+          (setq timer
+                (run-at-time
+                 opencode-shell--snapshot-request-timeout nil
+                 (lambda ()
+                   (when (buffer-live-p origin)
+                     (with-current-buffer origin
+                       (when (current-p)
+                         (when (buffer-live-p response)
+                           (when-let ((process (get-buffer-process response)))
+                             (delete-process process))
+                           (kill-buffer response))
+                         (settle nil nil))))))))
+        (setq response
+              (opencode-shell--request
+               method path
+               (lambda (value) (settle t value))
+               body nil
+               (lambda () (settle nil nil))))))))
 
 (defun opencode-shell--question-prompt (question)
   "Return a readable answer prompt for QUESTION."
