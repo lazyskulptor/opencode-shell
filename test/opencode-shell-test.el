@@ -1459,6 +1459,103 @@
       (opencode-shell--stop-server profile)
       (should-not (opencode-shell-recovery-offline-p key)))))
 
+(ert-deftest opencode-shell-ssh-offline-read-waits-for-next-healthy-attempt ()
+  (let* ((profile '(:name "ssh-wait" :remote t
+                    :base-url "http://127.0.0.1:4545"
+                    :start-command ("ssh" "-N" "host")))
+         (key (opencode-shell--server-key profile))
+         (opencode-shell-recovery--states (make-hash-table :test #'equal))
+         (opencode-shell--servers (make-hash-table :test #'equal))
+         (sent 0))
+    (with-temp-buffer
+      (setq-local opencode-shell--profile profile)
+      (opencode-shell-recovery-mark-offline key)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (&rest _) (cl-incf sent)))
+                ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+        (opencode-shell--request "GET" "/session" #'ignore)
+        (should (= sent 0))
+        (let ((pending (plist-get (gethash key opencode-shell--servers)
+                                  :callbacks)))
+          (should (= (length pending) 1))
+          (opencode-shell-recovery-success key)
+          (funcall (caar pending) profile)
+          (should (= sent 1)))))))
+
+(ert-deftest opencode-shell-ssh-old-http-error-cannot-reopen-outage ()
+  (let* ((profile '(:name "ssh-old" :remote t
+                    :base-url "http://127.0.0.1:4545"
+                    :start-command ("ssh" "-N" "host")))
+         (key (opencode-shell--server-key profile))
+         (opencode-shell-recovery--states (make-hash-table :test #'equal))
+         transport-callback)
+    (with-temp-buffer
+      (setq-local opencode-shell--profile profile)
+      (opencode-shell-recovery-success key)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (setq transport-callback callback)))
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+        (opencode-shell--request "GET" "/session" #'ignore)
+        (opencode-shell-recovery-mark-offline key)
+        (opencode-shell-recovery-success key)
+        (let ((response (generate-new-buffer " *old-http-reply*")))
+          (with-current-buffer response
+            (funcall transport-callback '(:error (error connection-failed)))))
+        (should (opencode-shell-recovery-ready-p key))
+        (should-not (opencode-shell-recovery-offline-p key))))))
+
+(ert-deftest opencode-shell-ssh-retry-expires-starting-health-attempt ()
+  (let* ((profile '(:name "ssh-starting" :remote t
+                    :base-url "http://127.0.0.1:4545"
+                    :start-command ("ssh" "-N" "host")))
+         (key (opencode-shell--server-key profile))
+         (opencode-shell--servers (make-hash-table :test #'equal))
+         (opencode-shell-recovery--states (make-hash-table :test #'equal))
+         deadline)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_delay _repeat callback &rest args)
+                 (unless deadline (setq deadline (cons callback args)))
+                 nil))
+              ((symbol-function 'opencode-shell--start-server)
+               (lambda (_profile _callback &rest _)
+                 (puthash key (list :starting t :attempt 'attempt :profile profile)
+                          opencode-shell--servers)))
+              ((symbol-function 'message) #'ignore))
+      (opencode-shell--ssh-retry profile)
+      (apply (car deadline) (cdr deadline))
+      (should-not (plist-get (gethash key opencode-shell--servers) :starting)))))
+
+(ert-deftest opencode-shell-ssh-new-subscriber-resumes-paused-recovery ()
+  (let* ((profile '(:name "ssh-new-subscriber" :remote t
+                    :base-url "http://127.0.0.1:4545"
+                    :start-command ("ssh" "-N" "host")))
+         (key (opencode-shell--server-key profile))
+         (opencode-shell-recovery--states (make-hash-table :test #'equal))
+         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
+         (scheduled 0)
+         (opencode-shell-auth-source-function nil))
+    (with-temp-buffer
+      (opencode-shell-mode)
+      (setq-local opencode-shell--profile profile opencode-shell--session-id "s")
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest _) (cl-incf scheduled) nil))
+                ((symbol-function 'opencode-shell-async-subscribe-runtime)
+                 (lambda (&rest _)
+                   (let ((subscribers (make-hash-table :test #'eq)))
+                     (puthash (current-buffer) t subscribers)
+                     (puthash key (list :subscribers subscribers :paused t)
+                              opencode-shell-async--runtimes))))
+                ((symbol-function 'opencode-shell-async-subscribe-animation) #'ignore)
+                ((symbol-function 'opencode-shell-async-pause-runtime) #'ignore)
+                ((symbol-function 'opencode-shell--log-lifecycle) #'ignore))
+        (opencode-shell-recovery-failed key #'ignore (lambda () t))
+        (opencode-shell-recovery-suspend key)
+        (opencode-shell--start-polling)
+        (should (= scheduled 2))
+        (should opencode-shell--runtime-key)))))
+
 (ert-deftest opencode-shell-ssh-gate-coalesces-health-for-two-requests ()
   (let* ((profile '(:name "ssh-shared" :remote t
                     :base-url "http://127.0.0.1:4545"

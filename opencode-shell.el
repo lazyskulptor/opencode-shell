@@ -780,8 +780,9 @@ Move the associated API log buffer so its name stays in sync."
                         (with-current-buffer origin
                           (or (derived-mode-p 'opencode-shell-mode)
                               (derived-mode-p 'opencode-shell-sessions-mode))))
-                   (when-let ((runtime (opencode-shell-async-runtime-get key)))
-                     (> (hash-table-count (plist-get runtime :subscribers)) 0))))))
+                    (when-let ((runtime (opencode-shell-async-runtime-get key)))
+                      (> (hash-table-count (plist-get runtime :subscribers)) 0))
+                    (plist-get (gethash key opencode-shell--servers) :callbacks)))))
         (opencode-shell-recovery-failed
          key (lambda () (opencode-shell--ssh-retry profile nil needed)) needed)))))
 
@@ -793,7 +794,8 @@ Move the associated API log buffer so its name stays in sync."
        key
        (lambda ()
          (when-let ((state (gethash key opencode-shell--servers)))
-           (when (plist-get state :checking)
+            (when (or (plist-get state :checking)
+                      (plist-get state :starting))
              (opencode-shell--fail-start key (plist-get state :attempt)
                                          "SSH readiness timed out")))))
       (opencode-shell--start-server
@@ -807,9 +809,11 @@ Move the associated API log buffer so its name stays in sync."
          (opencode-shell-recovery-failed
           key (lambda () (opencode-shell--ssh-retry profile on-ready needed))
           (or needed
-              (lambda ()
-                (when-let ((runtime (opencode-shell-async-runtime-get key)))
-                  (> (hash-table-count (plist-get runtime :subscribers)) 0))))))))))
+               (lambda ()
+                 (or (when-let ((runtime (opencode-shell-async-runtime-get key)))
+                       (> (hash-table-count (plist-get runtime :subscribers)) 0))
+                     (plist-get (gethash key opencode-shell--servers)
+                                 :callbacks))))))))))
 
 (defun opencode-shell--ssh-reconcile (key)
   "Full-resync KEY's subscribed transcripts after SSH recovery."
@@ -833,6 +837,39 @@ Move the associated API log buffer so its name stays in sync."
                              :failure-callbacks)))
     (opencode-shell-recovery-suspend key)))
 
+(defun opencode-shell--ssh-wait-request
+    (profile key origin generation method path callback body params error-callback)
+  "Defer a read-only request until KEY's existing SSH start succeeds."
+  (if (not (equal method "GET"))
+      (when error-callback (funcall error-callback))
+    (let ((state (or (gethash key opencode-shell--servers)
+                     (list :profile profile
+                           :config (opencode-shell--server-lifecycle-config profile)))))
+      (setf (plist-get state :callbacks)
+            (cons
+             (cons (lambda (_ready)
+                     (when (buffer-live-p origin)
+                       (with-current-buffer origin
+                         (when (and (= generation opencode-shell--generation)
+                                    (opencode-shell-recovery-ready-p key))
+                           (opencode-shell--request-direct
+                            method path callback body params error-callback)))))
+                   profile)
+             (plist-get state :callbacks)))
+      (when error-callback
+        (setf (plist-get state :failure-callbacks)
+              (cons (lambda ()
+                      (when (buffer-live-p origin)
+                        (with-current-buffer origin
+                          (when (= generation opencode-shell--generation)
+                            (funcall error-callback)))))
+                    (plist-get state :failure-callbacks))))
+       (puthash key state opencode-shell--servers)
+       (opencode-shell-recovery-resume
+        key (lambda () (opencode-shell--ssh-retry profile))
+        (lambda () (plist-get (gethash key opencode-shell--servers)
+                              :callbacks))))))
+
 (defun opencode-shell--request (method path callback &optional body params error-callback)
   "Send request after an SSH-backed PROFILE has verified its forwarding."
   (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
@@ -841,15 +878,19 @@ Move the associated API log buffer so its name stays in sync."
          (generation opencode-shell--generation))
     (if (and (opencode-shell--ssh-forwarded-profile-p profile)
              (not (opencode-shell-recovery-ready-p key)))
-        (if (or (opencode-shell-recovery-offline-p key)
-                (opencode-shell-recovery-exhausted-p key))
+        (if (opencode-shell-recovery-exhausted-p key)
             (when error-callback (funcall error-callback))
+          (if (opencode-shell-recovery-offline-p key)
+              (opencode-shell--ssh-wait-request
+               profile key origin generation method path callback body params
+               error-callback)
           (unless (plist-get (gethash key opencode-shell--servers) :checking)
             (opencode-shell-recovery-watch-attempt
              key
              (lambda ()
                (when-let ((state (gethash key opencode-shell--servers)))
-                 (when (plist-get state :checking)
+                  (when (or (plist-get state :checking)
+                            (plist-get state :starting))
                    (opencode-shell--fail-start key (plist-get state :attempt)
                                                "SSH readiness timed out"))))))
           (opencode-shell--start-server
@@ -865,14 +906,18 @@ Move the associated API log buffer so its name stays in sync."
                (with-current-buffer origin
                  (when (= generation opencode-shell--generation)
                    (opencode-shell--ssh-disconnected profile)
-                   (when error-callback (funcall error-callback))))))))
+                   (when error-callback (funcall error-callback)))))))))
       (opencode-shell--request-direct method path callback body params error-callback))))
 
 (defun opencode-shell--request-direct (method path callback &optional body params error-callback)
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
 BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
 called after a transport, status, or decoding failure."
-  (let* ((url-proxy-services
+  (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
+         (ssh (opencode-shell--ssh-forwarded-profile-p profile))
+         (key (opencode-shell--server-key profile))
+         (transport-epoch (and ssh (opencode-shell-recovery-epoch key)))
+         (url-proxy-services
           (if (opencode-shell--profile-remote-p
                (or opencode-shell--profile (opencode-shell--default-profile)))
               url-proxy-services
@@ -898,8 +943,10 @@ called after a transport, status, or decoding failure."
      (opencode-shell--url path params)
      (lambda (status)
        (let ((response (current-buffer)))
-         (unwind-protect
-              (if-let ((err (plist-get status :error)))
+          (unwind-protect
+              (unless (and ssh (not (= transport-epoch
+                                       (opencode-shell-recovery-epoch key))))
+               (if-let ((err (plist-get status :error)))
                    (when (and (buffer-live-p origin)
                               (with-current-buffer origin
                                 (= request-generation opencode-shell--generation)))
@@ -962,8 +1009,8 @@ called after a transport, status, or decoding failure."
                        (when error-callback
                          (opencode-shell-async-enqueue
                           origin (list 'request-error request-id)
-                          request-generation error-callback)))))))
-           (kill-buffer response))))
+                           request-generation error-callback))))))))
+            (kill-buffer response))))
      nil t t)))
 
 (defun opencode-shell--time (session)
@@ -2020,9 +2067,14 @@ polluting the user's undo history."
                 opencode-shell--session-id
                  #'opencode-shell--receive-application-event)))
         (ignore runtime)
-        (when (opencode-shell-recovery-offline-p key)
-          (setq-local opencode-shell--connection-stale t)
-          (opencode-shell-async-pause-runtime key))
+         (when (opencode-shell-recovery-offline-p key)
+           (setq-local opencode-shell--connection-stale t)
+           (opencode-shell-async-pause-runtime key)
+           (opencode-shell-recovery-resume
+            key (lambda () (opencode-shell--ssh-retry profile))
+            (lambda ()
+              (when-let ((current (opencode-shell-async-runtime-get key)))
+                (> (hash-table-count (plist-get current :subscribers)) 0)))))
         (setq opencode-shell--runtime-key key)
         (opencode-shell-async-subscribe-animation
          buffer opencode-shell-animation-interval
@@ -4264,12 +4316,14 @@ Concurrent starts for one server are coalesced.  A remote profile may use
       (let ((attempt (gensym "opencode-start-")))
         (puthash key (plist-put (plist-put (plist-put state :checking t)
                                           :attempt attempt)
-                                :callbacks (and callback (list (cons callback profile))))
+                                :callbacks (append (and callback (list (cons callback profile)))
+                                                   (plist-get state :callbacks)))
                   opencode-shell--servers)
         (setq state (gethash key opencode-shell--servers))
         (setf (plist-get state :profile) profile
               (plist-get state :failure-callbacks)
-              (and failure-callback (list failure-callback)))
+              (append (and failure-callback (list failure-callback))
+                      (plist-get state :failure-callbacks)))
         (opencode-shell--server-ready
          profile (lambda (ready &optional _)
                    (when (opencode-shell--attempt-current-p key attempt)
@@ -4280,9 +4334,12 @@ Concurrent starts for one server are coalesced.  A remote profile may use
       (let ((attempt (gensym "opencode-start-")))
         (puthash key (list :checking t :attempt attempt :config config
                            :profile profile
-                           :failure-callbacks (and failure-callback
-                                                   (list failure-callback))
-                           :callbacks (and callback (list (cons callback profile))))
+                           :failure-callbacks
+                           (append (and failure-callback (list failure-callback))
+                                   (plist-get state :failure-callbacks))
+                           :callbacks
+                           (append (and callback (list (cons callback profile)))
+                                   (plist-get state :callbacks)))
                 opencode-shell--servers)
        (opencode-shell--server-ready
         profile (lambda (ready &optional _)

@@ -116,5 +116,22 @@
       (should-not (plist-get (gethash 'remote opencode-shell-recovery--states)
                              :retry-token)))))
 
+(ert-deftest opencode-shell-recovery-new-demand-resumes-without-resetting-budget ()
+  (let ((opencode-shell-recovery--states (make-hash-table :test #'equal))
+        scheduled woke)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (delay _repeat callback &rest args)
+                 (push (list delay callback args) scheduled)
+                 nil)))
+      (opencode-shell-recovery-failed 'remote #'ignore (lambda () t))
+      (opencode-shell-recovery-suspend 'remote)
+      (opencode-shell-recovery-resume
+       'remote (lambda () (setq woke t)) (lambda () t))
+      (should (= (length scheduled) 2))
+      (should (= (plist-get (gethash 'remote opencode-shell-recovery--states)
+                            :failures) 1))
+      (apply (nth 1 (car scheduled)) (nth 2 (car scheduled)))
+      (should woke))))
+
 (provide 'opencode-shell-recovery-test)
 ;;; opencode-shell-recovery-test.el ends here
