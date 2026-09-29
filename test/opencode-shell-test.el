@@ -3813,14 +3813,12 @@
 
 (defconst opencode-shell-test--local-profile
   '(:name "local" :base-url "http://127.0.0.1:7777/"
-    :directory "/client/project" :workspace "/server/project"
     :start-command ("opencode" "serve") :server-directory "/tmp"
     :startup-timeout 2 :auth-source (:host "localhost" :port 7777)))
 
 (defconst opencode-shell-test--remote-profile
   '(:name "remote" :base-url "https://code.example.test"
-    :directory "/ssh:code.example.test:/srv/project"
-    :workspace "/srv/project"
+    :directory "/ssh:code.example.test:/home/test/"
     :start-command ("opencode" "serve")))
 
 (ert-deftest opencode-shell-project-directory-precedence-and-fallbacks ()
@@ -3871,10 +3869,10 @@
 (ert-deftest opencode-shell-current-server-directory-maps-project-root ()
   (let ((default-directory "/client/project/nested/"))
     (cl-letf (((symbol-function 'opencode-shell--project-directory)
-               (lambda (&optional _) "/client/project/")))
+                (lambda (&optional _) "/client/project/")))
       (should (equal (opencode-shell--current-server-directory
                       opencode-shell-test--local-profile)
-                     "/server/project/")))))
+                     "/client/project/")))))
 
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
@@ -3898,8 +3896,7 @@
     (should (equal (opencode-shell--profile-key opencode-shell-test--local-profile)
                    (opencode-shell--profile-key (copy-tree opencode-shell-test--local-profile))))
     (should (equal (opencode-shell--default-profile)
-                    (list :name "default" :base-url opencode-shell-base-url
-                          :directory opencode-shell-directory)))
+                    (list :name "default" :base-url opencode-shell-base-url)))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt candidates &rest _)
                  (setq choice candidates) "remote")))
@@ -3915,19 +3912,19 @@
           (list opencode-shell-test--local-profile
                 opencode-shell-test--remote-profile
                 nested)))
-    (setf (plist-get nested :name) "nested"
-          (plist-get nested :directory) "/client/project/nested")
+    (setq nested (plist-put (plist-put nested :name "nested")
+                            :directory "/client/project/nested"))
     (should (eq (opencode-shell--profile-for-directory
                  "/client/project/src/")
                 opencode-shell-test--local-profile))
     (should (eq (opencode-shell--profile-for-directory
-                 "/ssh:code.example.test:/srv/project/src/")
-                opencode-shell-test--remote-profile))
+                 "/ssh:code.example.test:/home/test/workspace/src/")
+                 opencode-shell-test--remote-profile))
     (should (eq (opencode-shell--profile-for-directory
                  "/client/project/nested/src/")
                 nested))
-    (should-error (opencode-shell--profile-for-directory "/outside/")
-                  :type 'user-error)))
+    (should (eq (opencode-shell--profile-for-directory "/outside/")
+                opencode-shell-test--local-profile))))
 
 (ert-deftest opencode-shell-entry-infers-profile-without-prompting ()
   (let ((opencode-shell-profiles
@@ -3947,8 +3944,8 @@
       (should (eq started opencode-shell-test--local-profile)))))
 
 (ert-deftest opencode-shell-profile-for-directory-rejects-ambiguous-match ()
-  (let* ((first '(:name "first" :directory "/work"))
-         (second '(:name "second" :directory "/work"))
+  (let* ((first '(:name "first" :base-url "http://127.0.0.1:1"))
+         (second '(:name "second" :base-url "http://127.0.0.1:2"))
          (opencode-shell-profiles (list first second)))
     (should-error (opencode-shell--profile-for-directory "/work/project/")
                   :type 'user-error)))
@@ -3970,15 +3967,15 @@
   (should (opencode-shell--profile-remote-p opencode-shell-test--remote-profile))
   (should (equal (opencode-shell--server-directory
                   "/client/project/src/a.el" opencode-shell-test--local-profile)
-                 "/server/project/src/a.el"))
+                 "/client/project/src/a.el"))
   (should (equal (opencode-shell--server-directory
-                   "/ssh:code.example.test:/srv/project/src/a.el"
+                   "/ssh:code.example.test:/home/test/workspace/src/a.el"
                    opencode-shell-test--remote-profile)
-                  "/srv/project/src/a.el"))
+                 "/home/test/workspace/src/a.el"))
   (should (equal (opencode-shell--server-directory
                   "/client/project/src/./lib/../a.el"
                   opencode-shell-test--local-profile)
-                 "/server/project/src/a.el"))
+                 "/client/project/src/a.el"))
   (should (equal (opencode-shell--server-directory
                   "/client/project/../outside/a.el"
                   opencode-shell-test--local-profile)
@@ -3995,18 +3992,19 @@
                   "/ssh:code.example.test:/srv/project/../outside/a.el"
                   opencode-shell-test--remote-profile)
                  "/srv/outside/a.el"))
-  (let ((broad '(:name "workspace" :directory "/Workspace"
-                 :workspace "/server/Workspace")))
-    (should (equal (opencode-shell--server-directory
-                    "/Workspace/personal/translator/" broad)
-                   "/server/Workspace/personal/translator/"))
-    (should (equal (opencode-shell--server-directory "/Workspace/" broad)
-                   "/server/Workspace/")))
-  (let ((nested '(:name "nested" :directory "/work"
-                  :workspace "/work/server")))
-    (should (equal (opencode-shell--server-directory
-                    "/work/server/project/" nested)
-                   "/work/server/project/"))))
+  (should (equal (opencode-shell--client-directory
+                  "/home/test/workspace/project/" opencode-shell-test--remote-profile)
+                 "/ssh:code.example.test:/home/test/workspace/project/"))
+  (should-error
+   (opencode-shell--server-directory
+    "/ssh:other.example.test:/home/test/workspace/project/"
+    opencode-shell-test--remote-profile)
+   :type 'user-error))
+
+(ert-deftest opencode-shell-directoryless-local-profile-is-inferred ()
+  (let ((opencode-shell-profiles (list opencode-shell-test--local-profile)))
+    (should (eq (opencode-shell--profile-for-directory "/any/project/")
+                opencode-shell-test--local-profile))))
 
 (ert-deftest opencode-shell-session-buffers-use-client-default-directory ()
   (let ((profile opencode-shell-test--local-profile) browser transcript)
@@ -4024,13 +4022,13 @@
             (opencode-shell--sessions "/server/project/src/" profile)
             (opencode-shell-open-session "session" "/server/project/src/" profile)
             (should (equal (buffer-local-value 'default-directory browser)
-                           "/client/project/src/"))
+                            "/server/project/src/"))
             (should (equal (buffer-local-value 'default-directory transcript)
-                           "/client/project/src/")))
+                            "/server/project/src/")))
         (when (buffer-live-p browser) (kill-buffer browser))
         (when (buffer-live-p transcript) (kill-buffer transcript))))))
 
-(ert-deftest opencode-shell-profile-scopes-url-directory-workspace-and-auth ()
+(ert-deftest opencode-shell-profile-scopes-url-directory-and-auth ()
   (let ((opencode-shell-auth-source-function
          (lambda (profile)
            (should (equal profile opencode-shell-test--local-profile))
@@ -4347,9 +4345,9 @@
       (should-error (opencode-shell--register-profile-commands) :type 'user-error)
       (should (eq (symbol-function 'opencode-shell-reserved-sessions) #'ignore)))))
 
-(ert-deftest opencode-shell-directory-scoped-launch-isolates-buffers ()
+(ert-deftest opencode-shell-directory-scoped-launch-uses-native-path ()
   (let* ((profile '(:name "workspace" :base-url "http://127.0.0.1:4096"
-                      :directory "/Workspace" :workspace "/server/Workspace"))
+                       :server-directory "/tmp"))
          (default-directory "/Workspace/personal/translator/")
          requests buffers)
     (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
@@ -4362,11 +4360,11 @@
           (progn
              (opencode-shell profile)
               (should (equal (cl-subseq (car requests) 0 3)
-                             '("GET" "/session/status" "/server/Workspace/")))
+                              '("GET" "/session/status" "/Workspace/")))
             (opencode-shell--sessions "/Workspace/" profile)
              (should (equal (cl-subseq (car requests) 0 3)
                             '("GET" "/session/status" "/Workspace/")))
-             (should (= (length (delete-dups buffers)) 2)))
+              (should (= (length (delete-dups buffers)) 1)))
         (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers)))))
 
 (ert-deftest opencode-shell--sessions-requires-and-stores-absolute-directory ()
@@ -4387,9 +4385,8 @@
               (buffer-list))))))
 
 (ert-deftest opencode-shell-current-directory-rejects-unmappable-profile-path ()
-  (let ((default-directory "/unrelated/local/")
-        (profile '(:name "remote" :directory "/client/root"
-                    :workspace "/server/root")))
+  (let ((default-directory "/ssh:other.example.test:/home/test/project/")
+        (profile '(:name "remote" :directory "/ssh:code.example.test:/home/test/")))
     (should-error (opencode-shell--current-server-directory profile)
                   :type 'user-error)))
 

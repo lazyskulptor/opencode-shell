@@ -62,7 +62,7 @@ stored in profile or server state.  Set this to nil to disable auth-source."
 
 (defcustom opencode-shell-profiles nil
   "Named OpenCode connection profiles, represented as plists.
-Supported keys include `:name', `:base-url', `:directory', `:workspace',
+Supported keys include `:name', `:base-url', optional remote `:directory',
 `:match', `:remote', auth-source lookup keys,
 and lifecycle keys."
   :type '(repeat plist) :group 'opencode-shell)
@@ -82,7 +82,6 @@ and lifecycle keys."
   "Private interactive commands used only by OpenCode mode maps.")
 (defvar-local opencode-shell--profile nil)
 (defvar-local opencode-shell--base-url nil)
-(defvar-local opencode-shell--workspace nil)
 
 (defconst opencode-shell--process-tail-limit 4096)
 
@@ -91,8 +90,8 @@ and lifecycle keys."
 
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
-  (list :name "default" :base-url opencode-shell-base-url
-        :directory opencode-shell-directory))
+  (list :name "default" :base-url opencode-shell-base-url))
+
 
 (defun opencode-shell--profile-name (profile)
   "Return a stable display name for PROFILE."
@@ -221,23 +220,31 @@ profiles make the result ambiguous."
   (unless opencode-shell-profiles
     (user-error "No OpenCode profiles configured"))
   (opencode-shell--validate-profiles)
-  (let ((directory (opencode-shell--canonical-directory
-                    (or directory default-directory)))
-        best best-length ambiguous)
+  (let* ((directory (opencode-shell--canonical-directory
+                     (or directory default-directory)))
+         (remote (file-remote-p directory))
+         best best-length ambiguous local-defaults)
     (dolist (profile opencode-shell-profiles)
       (when-let ((root (opencode-shell--canonical-directory
                         (plist-get profile :directory))))
-        (when (string-prefix-p root directory)
+        (when (and (equal remote (file-remote-p root))
+                   (string-prefix-p root directory))
           (let ((length (length root)))
             (cond ((or (null best-length) (> length best-length))
                    (setq best profile best-length length ambiguous nil))
                   ((= length best-length)
-                   (setq ambiguous t)))))))
+                   (setq ambiguous t))))))
+      (when (and (not remote)
+                 (not (plist-get profile :directory))
+                 (not (opencode-shell--profile-remote-p profile)))
+        (push profile local-defaults)))
     (cond (ambiguous
            (user-error "Multiple OpenCode profiles match %s" directory))
           (best best)
-          (t (user-error "No OpenCode profile matches %s" directory)))))
-
+          ((= (length local-defaults) 1) (car local-defaults))
+          ((> (length local-defaults) 1)
+           (user-error "Multiple local OpenCode profiles match %s" directory))
+           (t (user-error "No OpenCode profile matches %s" directory)))))
 (defun opencode-shell--profile-for-command (value)
   "Resolve explicit profile VALUE or infer one from `default-directory'."
   (cond ((and value (listp value)) value)
@@ -279,26 +286,21 @@ profiles make the result ambiguous."
   "Return current `default-directory' as an absolute PROFILE server path."
   (let* ((directory (opencode-shell--project-directory))
          (client-root (plist-get profile :directory))
-         (workspace (plist-get profile :workspace))
-         (native (expand-file-name
-                  (or (file-remote-p directory 'localname) directory)))
-         (root-native (and client-root
-                           (expand-file-name
-                            (or (file-remote-p client-root 'localname)
-                                client-root))))
-         (mapped (or (null workspace) (null root-native)
-                     (string-prefix-p (file-name-as-directory root-native)
-                                      (file-name-as-directory native))
-                     (string-prefix-p (file-name-as-directory
-                                            (expand-file-name workspace))
-                                      (file-name-as-directory native))))
-         (server-directory (and mapped
-                                (opencode-shell--server-directory directory profile))))
+         (remote (file-remote-p directory))
+         (root-remote (and client-root (file-remote-p client-root)))
+         (server-directory
+          (and (or (not root-remote)
+                   (and (equal remote root-remote)
+                        (string-prefix-p
+                         (file-name-as-directory
+                          (file-remote-p client-root 'localname))
+                         (file-name-as-directory
+                          (file-remote-p directory 'localname)))))
+               (opencode-shell--server-directory directory profile))))
     (unless (and (stringp server-directory)
                  (file-name-absolute-p server-directory))
       (user-error "Current directory cannot be mapped to the OpenCode server"))
     (file-name-as-directory server-directory)))
-
 (defun opencode-shell--create-and-open-session (profile directory)
   "Create and open a title-less PROFILE session in DIRECTORY."
   (let ((buffer (generate-new-buffer " *opencode-create-session*")))
@@ -362,40 +364,18 @@ profiles make the result ambiguous."
 (defun opencode-shell--server-directory (directory profile)
   "Map Emacs DIRECTORY to the path understood by PROFILE's server."
   (when directory
-    (let* ((native (expand-file-name
-                    (or (file-remote-p directory 'localname) directory)))
-            (client-root (plist-get profile :directory))
-            (root-native (and client-root
-                              (expand-file-name
-                               (or (file-remote-p client-root 'localname)
-                                   client-root))))
-            (workspace (and-let* ((path (plist-get profile :workspace)))
-                         (expand-file-name path))))
-      (cond ((and workspace
-                  (string-prefix-p (file-name-as-directory workspace)
-                                   (file-name-as-directory native)))
-             native)
-            ((and workspace root-native
-                  (string-prefix-p (file-name-as-directory root-native)
-                                   (file-name-as-directory native)))
-             (expand-file-name (file-relative-name native root-native) workspace))
-            (t native)))))
-
+    (let ((remote (file-remote-p directory))
+          (root (plist-get profile :directory)))
+      (when (and remote root (not (equal remote (file-remote-p root))))
+        (user-error "Current directory cannot be mapped to the OpenCode server"))
+      (expand-file-name (or (file-remote-p directory 'localname) directory)))))
 (defun opencode-shell--client-directory (directory profile)
   "Map server-native DIRECTORY to the path understood by Emacs for PROFILE."
   (let* ((server-directory (expand-file-name (or directory default-directory)))
-         (workspace (and-let* ((path (plist-get profile :workspace)))
-                      (file-name-as-directory (expand-file-name path))))
-         (client-root (and-let* ((path (plist-get profile :directory)))
-                        (file-name-as-directory (expand-file-name path)))))
+         (client-root (plist-get profile :directory))
+         (remote (and client-root (file-remote-p client-root))))
     (file-name-as-directory
-     (if (and workspace client-root
-              (string-prefix-p workspace
-                               (file-name-as-directory server-directory)))
-         (expand-file-name (file-relative-name server-directory workspace)
-                           client-root)
-       server-directory))))
-
+     (if remote (concat remote server-directory) server-directory))))
 (defun opencode-shell--profile-directory (profile directory)
   "Return DIRECTORY in PROFILE server-native form."
   (opencode-shell--server-directory directory profile))
@@ -1082,7 +1062,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (setq-local opencode-shell--profile profile)
       (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
                                                 opencode-shell-base-url))
-      (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory (file-name-as-directory directory))
       (setq-local default-directory
                   (opencode-shell--client-directory directory profile))
@@ -1900,7 +1879,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                        (opencode-shell--default-profile)))
           (resolved-directory
            (opencode-shell--server-directory
-            (or directory (plist-get profile :directory) opencode-shell-directory)
+            (or directory (opencode-shell--current-server-directory profile))
             profile))
           (buffer (or (opencode-shell--transcript-buffer
                        profile resolved-directory id)
@@ -1914,7 +1893,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (setq-local opencode-shell--profile profile)
       (setq-local opencode-shell--base-url (or (plist-get profile :base-url)
                                                 opencode-shell-base-url))
-      (setq-local opencode-shell--workspace (plist-get profile :workspace))
       (setq-local opencode-shell--directory resolved-directory)
       (setq-local default-directory
                   (opencode-shell--client-directory resolved-directory profile))
