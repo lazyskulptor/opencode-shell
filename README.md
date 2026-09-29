@@ -58,7 +58,7 @@ back to the current Emacs directory.
 ## Profiles
 
 `opencode-shell-profiles` is a list of named plists. A profile can select its
-`:base-url`, client `:directory`, server `:workspace`,
+`:base-url`, optional remote client `:directory`,
 authentication source, and local server lifecycle settings. Session inventory
 is scoped to the invocation buffer's `default-directory`, translated to the
 server-native absolute path.
@@ -70,15 +70,21 @@ from nested directories share one project session history. Each alias also gener
 command creates a title-less session in the current directory and opens it.
 
 Profile `:name` values and identity keys must be unique; set an explicit `:id`
-when an identity must survive a name or URL change. A string `:match` is a
-canonical directory root, while regex matching is opt-in via `:match-regexp`.
-Root matching chooses the most specific match. Remote profiles match TRAMP directories by
-their remote identity and translate between the native local/remote client path
-and `:workspace` path visible to the server, preserving relative descendants.
-Local profiles use the same root-to-workspace translation. This keeps request directory/workspace
-scoping consistent without sending TRAMP syntax to the server. Buffers are
+when an identity must survive a name or URL change. A remote profile's
+`:directory` is a TRAMP root, normally the remote user's home. Root matching
+chooses the most specific matching remote identity. OpenCode request paths come
+from the current TRAMP path's native localname, preserving relative descendants
+without sending TRAMP syntax to the server. Local profiles omit `:directory`:
+their current native project root is already the server path. When exactly one
+directory-less local profile is configured it is selected automatically; multiple
+such local profiles require explicit selection. Buffers are
 profile-qualified, so identical session IDs on different servers never share a
 browser or transcript buffer.
+
+`:workspace` is no longer supported. Migrate a remote profile by setting its
+single `:directory` to the corresponding TRAMP user-home root; remove both path
+keys from local profiles. `:server-directory` is unrelated to request mapping:
+it is only the working directory of a locally started OpenCode process.
 
 Profiles may provide an argv-style start command, server working directory,
 health path, and bounded startup timeout. A remote profile's start command runs

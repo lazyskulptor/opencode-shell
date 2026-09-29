@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Simplify profile path mapping to one optional remote `:directory` anchor.
+  TRAMP request paths now use their native localname; local profiles use their
+  current project path without a mapping root. Remove the obsolete `:workspace`
+  setting; `:server-directory` remains lifecycle-only.
+
 ## 0.1.0 - 2026-09-11
 
 - Add compact session browser, transcript, prompting, abort, model/agent selection, polling, pending permission/question actions, safe Markdown presentation, and ERT coverage.
