@@ -3926,6 +3926,47 @@
     (should (eq (opencode-shell--profile-for-directory "/outside/")
                 opencode-shell-test--local-profile))))
 
+(ert-deftest opencode-shell-profile-for-directory-matches-tramp-home-alias ()
+  (let ((opencode-shell-profiles
+         (list opencode-shell-test--local-profile
+               opencode-shell-test--remote-profile)))
+    (dolist (path '("/ssh:code.example.test:~/"
+                    "/ssh:code.example.test:~/workspace/project/"
+                    "/ssh:code.example.test:/home/test/workspace/project/"))
+      (should (eq (opencode-shell--profile-for-directory path)
+                  opencode-shell-test--remote-profile)))
+    (dolist (path '("/ssh:other.example.test:~/"
+                    "/ssh:code.example.test:~otheruser/workspace/"))
+      (should-error (opencode-shell--profile-for-directory path)
+                    :type 'user-error))))
+
+(ert-deftest opencode-shell-current-server-directory-maps-tramp-home-alias ()
+  (let ((profile opencode-shell-test--remote-profile))
+    (dolist (mapping '(("/ssh:code.example.test:~/" . "/home/test/")
+                       ("/ssh:code.example.test:~/workspace/project/"
+                        . "/home/test/workspace/project/")))
+      (cl-letf (((symbol-function 'opencode-shell--project-directory)
+                 (lambda (&optional _) (car mapping))))
+        (should (equal (opencode-shell--current-server-directory profile)
+                       (cdr mapping)))
+        (should (equal (file-name-as-directory
+                        (opencode-shell--server-directory (car mapping) profile))
+                       (cdr mapping)))))))
+
+(ert-deftest opencode-shell-directory-scoped-launch-uses-tramp-home-alias ()
+  (let ((opencode-shell-profiles (list opencode-shell-test--remote-profile))
+        (default-directory "/ssh:code.example.test:~/workspace/project/")
+        opened)
+    (cl-letf (((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) default-directory))
+              ((symbol-function 'opencode-shell--start-server)
+               (lambda (profile callback) (funcall callback profile)))
+              ((symbol-function 'opencode-shell--sessions)
+               (lambda (directory &optional _profile _current-window)
+                 (setq opened directory))))
+      (opencode-shell)
+      (should (equal opened "/home/test/workspace/project/")))))
+
 (ert-deftest opencode-shell-entry-infers-profile-without-prompting ()
   (let ((opencode-shell-profiles
          (list opencode-shell-test--local-profile

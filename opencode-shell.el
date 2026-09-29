@@ -185,6 +185,19 @@ and lifecycle keys."
     (file-name-as-directory
      (if (file-remote-p directory) directory (expand-file-name directory)))))
 
+(defun opencode-shell--profile-client-directory (directory profile)
+  "Expand DIRECTORY's TRAMP home alias using PROFILE's configured home."
+  (let* ((root (plist-get profile :directory))
+         (remote (file-remote-p directory))
+         (localname (and remote (file-remote-p directory 'localname))))
+    (if (and root remote
+             (equal remote (file-remote-p root))
+             (string-prefix-p "~/" localname))
+        (concat remote
+                (expand-file-name (substring localname 2)
+                                  (file-remote-p root 'localname)))
+      directory)))
+
 (defun opencode-shell--read-profile ()
   "Read and return a configured profile."
   (unless opencode-shell-profiles (user-error "No OpenCode profiles configured"))
@@ -222,7 +235,10 @@ profiles make the result ambiguous."
       (when-let ((root (opencode-shell--canonical-directory
                         (plist-get profile :directory))))
         (when (and (equal remote (file-remote-p root))
-                   (string-prefix-p root directory))
+                   (string-prefix-p root
+                                    (opencode-shell--canonical-directory
+                                     (opencode-shell--profile-client-directory
+                                      directory profile))))
           (let ((length (length root)))
             (cond ((or (null best-length) (> length best-length))
                    (setq best profile best-length length ambiguous nil))
@@ -279,7 +295,8 @@ profiles make the result ambiguous."
 
 (defun opencode-shell--current-server-directory (profile)
   "Return current `default-directory' as an absolute PROFILE server path."
-  (let* ((directory (opencode-shell--project-directory))
+  (let* ((directory (opencode-shell--profile-client-directory
+                     (opencode-shell--project-directory) profile))
          (client-root (plist-get profile :directory))
          (remote (file-remote-p directory))
          (root-remote (and client-root (file-remote-p client-root)))
@@ -359,6 +376,7 @@ profiles make the result ambiguous."
 (defun opencode-shell--server-directory (directory profile)
   "Map Emacs DIRECTORY to the path understood by PROFILE's server."
   (when directory
+    (setq directory (opencode-shell--profile-client-directory directory profile))
     (let ((remote (file-remote-p directory))
           (root (plist-get profile :directory)))
       (when (and remote root (not (equal remote (file-remote-p root))))

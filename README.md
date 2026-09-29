@@ -72,8 +72,10 @@ command creates a title-less session in the current directory and opens it.
 Profile `:name` values and identity keys must be unique; set an explicit `:id`
 when an identity must survive a name or URL change. A remote profile's
 `:directory` is a TRAMP root, normally the remote user's home. Root matching
-chooses the most specific matching remote identity. OpenCode request paths come
-from the current TRAMP path's native localname, preserving relative descendants
+chooses the most specific matching remote identity. A same-host TRAMP `~/` path
+uses the profile's absolute home root, so `~/workspace/` and its absolute
+spelling address the same server directory. OpenCode request paths come
+from the resolved TRAMP path's native localname, preserving relative descendants
 without sending TRAMP syntax to the server. Local profiles omit `:directory`:
 their current native project root is already the server path. When exactly one
 directory-less local profile is configured it is selected automatically; multiple
