@@ -99,5 +99,22 @@
             (should wakes)))
       (kill-buffer buffer))))
 
+(ert-deftest opencode-shell-recovery-suspends-timer-without-forgetting-offline ()
+  (let ((opencode-shell-recovery--states (make-hash-table :test #'equal))
+        pending cancelled)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_delay _repeat callback &rest args)
+                 (setq pending (list 'timer callback args))))
+              ((symbol-function 'timerp)
+               (lambda (value) (eq (car-safe value) 'timer)))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer) (setq cancelled timer))))
+      (opencode-shell-recovery-failed 'remote #'ignore (lambda () t))
+      (opencode-shell-recovery-suspend 'remote)
+      (should (eq cancelled pending))
+      (should (opencode-shell-recovery-offline-p 'remote))
+      (should-not (plist-get (gethash 'remote opencode-shell-recovery--states)
+                             :retry-token)))))
+
 (provide 'opencode-shell-recovery-test)
 ;;; opencode-shell-recovery-test.el ends here
