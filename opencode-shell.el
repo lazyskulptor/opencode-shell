@@ -34,11 +34,6 @@
   "OpenCode server base URL."
   :type 'string :group 'opencode-shell)
 
-(defcustom opencode-shell-directory nil
-  "Directory used to scope OpenCode requests, or nil."
-  :type '(choice (const :tag "Unscoped" nil) directory)
-  :group 'opencode-shell)
-
 (defcustom opencode-shell-recent-locations-file
   (locate-user-emacs-file "opencode-shell-locations.eld")
   "File used to persist recently opened session browser locations."
@@ -91,7 +86,6 @@ and lifecycle keys."
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
   (list :name "default" :base-url opencode-shell-base-url))
-
 
 (defun opencode-shell--profile-name (profile)
   "Return a stable display name for PROFILE."
@@ -245,6 +239,7 @@ profiles make the result ambiguous."
           ((> (length local-defaults) 1)
            (user-error "Multiple local OpenCode profiles match %s" directory))
            (t (user-error "No OpenCode profile matches %s" directory)))))
+
 (defun opencode-shell--profile-for-command (value)
   "Resolve explicit profile VALUE or infer one from `default-directory'."
   (cond ((and value (listp value)) value)

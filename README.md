@@ -49,9 +49,9 @@ troubleshooting. See [Contributing](CONTRIBUTING.md) for development workflow an
 
 Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
 original single-server setup, the local endpoint defaults to
-`http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it and
-optionally configure `opencode-shell-directory`, then run `M-x opencode-shell`
-to select a server and open sessions for the current project root. Root detection
+`http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it,
+then run `M-x opencode-shell` to select a server and open sessions for the
+current project root. Root detection
 prefers active Projectile and `project.el` projects, then a Git root, and falls
 back to the current Emacs directory.
 
