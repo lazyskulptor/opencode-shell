@@ -550,6 +550,7 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--selected-model nil)
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--runtime-key nil)
+(defvar-local opencode-shell--connection-stale nil)
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--composer-overlay nil)
@@ -762,6 +763,16 @@ Move the associated API log buffer so its name stays in sync."
         (origin (current-buffer)))
     (when (opencode-shell-recovery-mark-offline key)
       (opencode-shell-async-pause-runtime key)
+      (dolist (buffer (buffer-list))
+        (with-current-buffer buffer
+          (when (and (derived-mode-p 'opencode-shell-mode)
+                     opencode-shell--profile
+                     (equal key (opencode-shell--server-key opencode-shell--profile)))
+            (setq-local opencode-shell--connection-stale t
+                        opencode-shell--in-flight nil
+                        opencode-shell--capabilities-loading nil)
+            (dolist (resource '(messages permissions questions))
+              (opencode-shell--settle-hydration resource nil)))))
       (message "OpenCode: SSH transport offline; retry with g r")
       (let ((needed
              (lambda ()
@@ -790,6 +801,7 @@ Move the associated API log buffer so its name stays in sync."
        (lambda (_ready)
          (opencode-shell-recovery-success key)
          (opencode-shell-async-resume-runtime key)
+         (opencode-shell--ssh-reconcile key)
          (when on-ready (funcall on-ready)))
        (lambda ()
          (opencode-shell-recovery-failed
@@ -798,6 +810,28 @@ Move the associated API log buffer so its name stays in sync."
               (lambda ()
                 (when-let ((runtime (opencode-shell-async-runtime-get key)))
                   (> (hash-table-count (plist-get runtime :subscribers)) 0))))))))))
+
+(defun opencode-shell--ssh-reconcile (key)
+  "Full-resync KEY's subscribed transcripts after SSH recovery."
+  (when-let ((runtime (opencode-shell-async-runtime-get key)))
+    (maphash
+     (lambda (buffer _subscription)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (when (and (derived-mode-p 'opencode-shell-mode)
+                      opencode-shell--connection-stale)
+             (setq opencode-shell--connection-stale nil)
+             (opencode-shell--resync t)))))
+     (plist-get runtime :subscribers))))
+
+(defun opencode-shell--ssh-suspend-if-unused (key)
+  "Suspend KEY's offline recovery when no transcript or command awaits it."
+  (when (and key (opencode-shell-recovery-offline-p key)
+             (not (opencode-shell-async-runtime-get key))
+             (not (plist-get (gethash key opencode-shell--servers) :callbacks))
+             (not (plist-get (gethash key opencode-shell--servers)
+                             :failure-callbacks)))
+    (opencode-shell-recovery-suspend key)))
 
 (defun opencode-shell--request (method path callback &optional body params error-callback)
   "Send request after an SSH-backed PROFILE has verified its forwarding."
@@ -1934,7 +1968,8 @@ polluting the user's undo history."
                #'opencode-shell--render-if-visible t)
   (when opencode-shell--runtime-key
     (opencode-shell-async-unsubscribe-runtime
-     opencode-shell--runtime-key (current-buffer)))
+      opencode-shell--runtime-key (current-buffer))
+    (opencode-shell--ssh-suspend-if-unused opencode-shell--runtime-key))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (opencode-shell--clear-spinner-overlays)
    (dolist (overlay (list opencode-shell--composer-overlay
@@ -1956,7 +1991,8 @@ polluting the user's undo history."
   (opencode-shell-async-cancel)
   (when opencode-shell--runtime-key
     (opencode-shell-async-unsubscribe-runtime
-     opencode-shell--runtime-key (current-buffer)))
+      opencode-shell--runtime-key (current-buffer))
+    (opencode-shell--ssh-suspend-if-unused opencode-shell--runtime-key))
   (opencode-shell-async-unsubscribe-animation (current-buffer))
   (opencode-shell--clear-spinner-overlays)
   (setq opencode-shell--runtime-key nil)
@@ -1971,9 +2007,9 @@ polluting the user's undo history."
              (base (string-remove-suffix
                     "/" (or opencode-shell--base-url
                             (plist-get profile :base-url) opencode-shell-base-url)))
-             (auth (opencode-shell--auth-header profile))
+              (auth (opencode-shell--auth-header profile))
               (runtime
-               (opencode-shell-async-subscribe-runtime
+                (opencode-shell-async-subscribe-runtime
                 key buffer (concat base "/event") (and auth (list auth))
                 (not (opencode-shell--profile-remote-p profile))
                 opencode-shell-poll-interval
@@ -1982,8 +2018,11 @@ polluting the user's undo history."
                   (when opencode-shell-log-requests
                     (opencode-shell--log "OpenCode async %s" event)))
                 opencode-shell--session-id
-                #'opencode-shell--receive-application-event)))
+                 #'opencode-shell--receive-application-event)))
         (ignore runtime)
+        (when (opencode-shell-recovery-offline-p key)
+          (setq-local opencode-shell--connection-stale t)
+          (opencode-shell-async-pause-runtime key))
         (setq opencode-shell--runtime-key key)
         (opencode-shell-async-subscribe-animation
          buffer opencode-shell-animation-interval
@@ -3299,6 +3338,12 @@ CHANGED-TURNS into the response blocks pending incremental update."
 
 (defun opencode-shell--render-if-visible ()
   "Schedule one render when a dirty transcript becomes visible."
+  (when (and opencode-shell--connection-stale opencode-shell--profile
+             (get-buffer-window (current-buffer) t)
+             (opencode-shell-recovery-ready-p
+              (opencode-shell--server-key opencode-shell--profile)))
+    (setq opencode-shell--connection-stale nil)
+    (opencode-shell--resync t))
   (when (and opencode-shell--render-dirty
              (get-buffer-window (current-buffer) t))
         (opencode-shell--schedule-render opencode-shell--render-event
@@ -3501,7 +3546,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
            (when (buffer-live-p origin)
              (with-current-buffer origin
                (when (= generation opencode-shell--generation)
-                 (opencode-shell--resync t)))))
+                 (unless (when-let ((runtime (opencode-shell-async-runtime-get
+                                             (opencode-shell--server-key profile))))
+                           (gethash origin (plist-get runtime :subscribers)))
+                   (setq opencode-shell--connection-stale nil)
+                   (opencode-shell--resync t))))))
          (lambda () (buffer-live-p origin))))
     (opencode-shell--resync-snapshots full resource)))
 
@@ -3623,6 +3672,11 @@ When FULL is non-nil, also refresh metadata and capabilities."
 (defun opencode-shell--submit ()
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
+  (when (and opencode-shell--profile
+             (opencode-shell--ssh-forwarded-profile-p opencode-shell--profile)
+             (not (opencode-shell-recovery-ready-p
+                   (opencode-shell--server-key opencode-shell--profile))))
+    (user-error "OpenCode SSH transport offline; retry with g r"))
   (let ((text (opencode-shell--composer-text)))
     (when opencode-shell--submit-in-flight
       (user-error "A prompt delivery is already being reconciled"))
@@ -4115,7 +4169,9 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
     (when (and state
                (memq (process-status process) '(exit signal failed))
                (eq process (plist-get state :process)))
-      (if-let ((restart-profile (plist-get state :restart-profile)))
+      (if (plist-get state :stopping)
+          (remhash key opencode-shell--servers)
+        (if-let ((restart-profile (plist-get state :restart-profile)))
           (let ((callbacks (plist-get state :callbacks)))
             (remhash key opencode-shell--servers)
             (opencode-shell--start-server
@@ -4140,7 +4196,7 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
            (remhash key opencode-shell--servers)
            (when-let ((profile (plist-get state :profile)))
              (when (opencode-shell--ssh-forwarded-profile-p profile)
-               (opencode-shell--ssh-disconnected profile))))))))
+                (opencode-shell--ssh-disconnected profile)))))))))
 
 (defun opencode-shell--spawn-server (profile attempt)
   "Start PROFILE exactly once and begin bounded health polling."
@@ -4241,9 +4297,10 @@ Concurrent starts for one server are coalesced.  A remote profile may use
           (key (opencode-shell--server-key profile))
          (state (gethash key opencode-shell--servers))
          (process (plist-get state :process)))
-    (unless (and (plist-get state :owned) (process-live-p process))
-      (user-error "OpenCode server is not owned by this client"))
-    (delete-process process)
+     (unless (and (plist-get state :owned) (process-live-p process))
+       (user-error "OpenCode server is not owned by this client"))
+     (puthash key (plist-put state :stopping t) opencode-shell--servers)
+     (delete-process process)
     (remhash key opencode-shell--servers)))
 
 (defun opencode-shell--restart-server (&optional profile)

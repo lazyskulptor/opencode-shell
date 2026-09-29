@@ -38,6 +38,10 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
    offline. Their bounded SSH retry timer is independent of polling; ordinary
    poll wakes cannot reopen an exhausted retry budget. The health probe runs
    outside the session HTTP readiness gate to avoid a dependency cycle.
+10. Once SSH forwarding and endpoint health return, subscribed remote transcripts
+    reuse the existing full authoritative resync in their original buffers.
+    Idle unsubscribed buffers resync when displayed or explicitly requested;
+    connection recovery never resets server-owned turn progress or Composer drafts.
 
 ## Runtime layers
 

@@ -199,6 +199,33 @@
       (opencode-shell--settle-hydration resource t))
     (should-not (opencode-shell--composer-visible-p))))
 
+(ert-deftest opencode-shell-pipeline-reconnect-defers-to-server-turn-state ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--begin-initial-hydration)
+    (let (callbacks)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path success &optional _body _failure)
+                   (setf (alist-get key callbacks) success))))
+        (opencode-shell--resync t)
+        (funcall (alist-get 'permissions callbacks) nil)
+        (funcall (alist-get 'questions callbacks) nil)
+        (funcall
+         (alist-get 'messages callbacks)
+         (list (opencode-shell-pipeline-test--message "u1" "user" "question")
+               '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                 (parts . (((type . "text") (text . "still working")))))))
+        (should-not (opencode-shell--composer-visible-p))
+        (opencode-shell--resync nil 'messages)
+        (funcall
+         (alist-get 'messages callbacks)
+         (list (opencode-shell-pipeline-test--message "u1" "user" "question")
+               '((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                          (finish . "stop") (time . ((completed . 1)))))
+                 (parts . (((type . "text") (text . "done")))))))
+        (should (opencode-shell--composer-visible-p))))))
+
 (ert-deftest opencode-shell-pipeline-resync-settles-out-of-order-authoritative-callbacks ()
   (with-temp-buffer
     (opencode-shell-mode)

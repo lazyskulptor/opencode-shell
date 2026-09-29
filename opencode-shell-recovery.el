@@ -120,5 +120,10 @@
     (opencode-shell-recovery--clear-timers state)
     (remhash key opencode-shell-recovery--states)))
 
+(defun opencode-shell-recovery-suspend (key)
+  "Stop KEY's retry timers without losing its offline/exhausted state."
+  (when-let ((state (gethash key opencode-shell-recovery--states)))
+    (opencode-shell-recovery--clear-timers state)))
+
 (provide 'opencode-shell-recovery)
 ;;; opencode-shell-recovery.el ends here

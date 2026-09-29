@@ -95,6 +95,7 @@ as normal `require` loading.
 | `opencode-shell.el` | commands, HTTP outcomes, buffer-local model, projection | network and visible-buffer edits |
 | `opencode-shell-event.el` | validated event classification | none |
 | `opencode-shell-async.el` | shared runtime, keyed delivery, timers | processes, timers, queued callbacks |
+| `opencode-shell-recovery.el` | bounded SSH retry/offline policy | one server-keyed retry timer, no SSH/HTTP payloads |
 
 ## Data flow
 

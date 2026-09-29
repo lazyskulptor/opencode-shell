@@ -274,6 +274,9 @@ show one offline notice instead of repeating connection errors. SSH forwarding
 is retried asynchronously with a finite budget; if it remains unavailable,
 `g r` starts a new client-side SSH-first recovery attempt without restarting the
 remote OpenCode service or replaying a submitted prompt.
+Active remote transcripts keep their original buffers and reconcile full server
+snapshots when forwarding returns; an idle transcript refreshes on next display
+or `g r`. A working SSH connection does not itself complete a server-side turn.
 
 ## Asynchronous runtime principles
 
