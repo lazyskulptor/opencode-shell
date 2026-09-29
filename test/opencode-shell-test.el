@@ -212,10 +212,10 @@
       (should (equal opencode-shell--session-id "ses-source"))
       (should (eq opencode-shell--turns turns))
       (should (equal (opencode-shell--composer-text) "draft"))
-      (should (equal opencode-shell--directory "/server/project/new/"))
+       (should (equal opencode-shell--directory "/client/project/new/"))
       (should (equal (opencode-shell--session-directory-override
                       opencode-shell-test--local-profile "ses-source")
-                     "/server/project/new/"))
+                      "/client/project/new/"))
       (should (equal default-directory "/client/project/new/")))))
 
 (ert-deftest opencode-shell-move-directory-maps-remote-scope-in-place ()
@@ -284,7 +284,7 @@
     (opencode-shell-mode)
     (setq-local opencode-shell--session-id "ses-source"
                 opencode-shell--profile opencode-shell-test--local-profile
-                opencode-shell--directory "/server/project/")
+                opencode-shell--directory "/client/project/")
     (cl-letf (((symbol-function 'read-directory-name)
                (lambda (&rest _) "/client/project/nested/"))
               ((symbol-function 'opencode-shell--project-directory)
@@ -4061,7 +4061,7 @@
                (lambda (&optional directory profile _current-window)
                    (setq opened (list directory profile)))))
       (opencode-shell opencode-shell-test--local-profile)
-       (should (equal opened (list "/server/project/" opencode-shell-test--local-profile))))
+        (should (equal opened (list "/client/project/" opencode-shell-test--local-profile))))
     (let ((opencode-shell-poll-interval 60) buffers)
       (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
                ((symbol-function 'opencode-shell--resync) #'ignore)
@@ -4069,7 +4069,7 @@
         (unwind-protect
             (progn
               (opencode-shell-open-session "same-id" nil opencode-shell-test--local-profile)
-              (opencode-shell-open-session "same-id" nil opencode-shell-test--remote-profile)
+              (opencode-shell-open-session "same-id" "/home/test/" opencode-shell-test--remote-profile)
               (should (= (length (delete-dups buffers)) 2)))
           (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))))
 
@@ -4313,14 +4313,14 @@
                      (lambda (profile directory)
                        (push (list profile directory) opened))))
             (call-interactively 'opencode-shell-local-sessions)
-            (let ((default-directory "/ssh:code.example.test:/srv/project/"))
+             (let ((default-directory "/ssh:code.example.test:/home/test/workspace/project/"))
               (call-interactively 'opencode-shell-remote-sessions)))
           (should (equal (mapcar (lambda (entry)
                                    (cons (opencode-shell--profile-name (car entry))
                                          (cdr entry)))
                                  opened)
-                          '(("remote" "/srv/project/")
-                            ("local" "/server/project/"))))
+                           '(("remote" "/home/test/workspace/project/")
+                             ("local" "/client/project/"))))
           (setq opencode-shell-profiles (list opencode-shell-test--local-profile))
           (opencode-shell--register-profile-commands)
           (should-not (fboundp 'opencode-shell-remote-sessions))
@@ -4385,10 +4385,11 @@
               (buffer-list))))))
 
 (ert-deftest opencode-shell-current-directory-rejects-unmappable-profile-path ()
-  (let ((default-directory "/ssh:other.example.test:/home/test/project/")
-        (profile '(:name "remote" :directory "/ssh:code.example.test:/home/test/")))
-    (should-error (opencode-shell--current-server-directory profile)
-                  :type 'user-error)))
+  (let ((profile '(:name "remote" :directory "/ssh:code.example.test:/home/test/")))
+    (cl-letf (((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) "/ssh:other.example.test:/home/test/project/")))
+      (should-error (opencode-shell--current-server-directory profile)
+                    :type 'user-error))))
 
 (ert-deftest opencode-shell-server-health-reuse-does-not-spawn ()
   (let ((opencode-shell--servers (make-hash-table :test #'equal)) spawned callback)
