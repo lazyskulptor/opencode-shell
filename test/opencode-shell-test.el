@@ -2890,7 +2890,7 @@
      (list (opencode-shell-test--message "u1" "user" "question")
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-    (should (string-match-p "Receiving" (buffer-string)))
+    (should (string-match-p "partial\nReceiving" (buffer-string)))
     (should-not (string-match-p "ASSISTANT>" (buffer-string)))))
 
 (ert-deftest opencode-shell-updating-local-turn-keeps-receiving-visible ()
@@ -2903,7 +2903,7 @@
        (list (opencode-shell-test--message "u1" "user" "question")
              '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
                (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-      (should (string-match-p "Receiving" (buffer-string)))
+      (should (string-match-p "partial\nReceiving" (buffer-string)))
       (should-not (string-match-p "ASSISTANT>" (buffer-string))))))
 
 (ert-deftest opencode-shell-full-rerender-keeps-one-prompt-label ()

@@ -41,6 +41,20 @@
     (should-not (opencode-shell--composer-visible-p))
     (should (not opencode-shell--composer-label-visible))))
 
+(ert-deftest opencode-shell-pipeline-streamed-response-precedes-spinner ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (list (opencode-shell-pipeline-test--message "u1" "user" "question")
+           '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+             (parts . (((id . "p1") (type . "text") (text . "partial"))
+                       ((id . "p2") (type . "tool") (tool . "read")
+                        (state . ((status . "running") (input . "SECRET")))))))))
+    (let ((display (opencode-shell--response-display (car opencode-shell--turns))))
+      (should (string-match-p "TOOL> read: running\n\npartial\nReceiving" display))
+      (should-not (string-match-p "SECRET" display))
+      (should-not (opencode-shell--composer-visible-p)))))
+
 (ert-deftest opencode-shell-pipeline-characterizes-response-protection ()
   (with-temp-buffer
     (opencode-shell-mode)

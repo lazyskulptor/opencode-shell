@@ -54,6 +54,11 @@ logs consume only these neutral helpers.
 Initial insertion, incremental updates, forced rerenders, and interaction-card
 relocation all consume its bytes and properties; `opencode-shell--insert-turn-blocks`
 only establishes user/response bounds and read-only protection.
+For active turns the projector places merged assistant text and normalized,
+payload-free tool status above a live status spinner. Visible partial text does
+not imply completion or Composer readiness; terminal evidence still comes from
+the existing lifecycle rules. Reasoning and raw tool payloads stay out of the
+transcript. Completed turns retain their existing response layout.
 Initial session hydration tracks messages, permissions, and questions as three
 authoritative resources. Only successful current-generation callbacks settle a
 resource; unchanged and empty snapshots still count, while failures remain

@@ -158,6 +158,11 @@ current session receives transcript progress, and cycles independently of pollin
 Spinner frames use overlay presentation, so they do not change transcript bytes,
 markers, point, or undo history and do not issue requests. Reasoning-only updates show `Thinking`;
 text or tool activity shows `Receiving`.
+While a turn is active, received assistant text and payload-free tool names with
+their current statuses appear above the still-running spinner. The Composer stays
+blocked until authoritative turn completion; reasoning text and tool input/output
+are never displayed. Intermediate updates share the existing idle-coalesced
+render path, including its hidden-buffer and editor-state protections.
 Assistant completion comes from the matching message's `time.completed`
 metadata together with either a genuinely terminal `finish` value or a
 terminal `error`; `step-finish` is retained only as compatible evidence when

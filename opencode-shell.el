@@ -3184,31 +3184,41 @@ text stay unmarked so transient spinners keep no role label."
            (eq turn (opencode-shell--permission-status-turn)))
       ""
     (concat
-   (opencode-shell--tool-name-display turn)
-   (if (eq (opencode-shell--turn-status turn) 'complete)
-       (concat (or (opencode-shell--assistant-display-text turn) "")
-               (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
-     (propertize
-      (pcase (opencode-shell--turn-status turn)
-        ('sending (opencode-shell--status-display "Sending"))
-        ('thinking (opencode-shell--status-display "Thinking"))
-        ('receiving (opencode-shell--status-display "Receiving"))
-        ('recovering (opencode-shell--status-display "Recovering"))
-        ('aborting (opencode-shell--status-display "Aborting"))
-        ('error "Request state is uncertain; resync with g r\n\n")
-        (_ (opencode-shell--status-display "Waiting for response")))
-       'face (if (eq (opencode-shell--turn-status turn) 'error)
-                 'opencode-shell-error-face 'opencode-shell-waiting-face))))))
+    (opencode-shell--tool-name-display turn)
+    (if (eq (opencode-shell--turn-status turn) 'complete)
+        (concat (or (opencode-shell--assistant-display-text turn) "")
+                (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
+      (let ((text (opencode-shell--assistant-display-text turn)))
+        (concat (if (string-empty-p text) ""
+                  (concat text (unless (string-suffix-p "\n" text) "\n")))
+                (propertize
+                 (pcase (opencode-shell--turn-status turn)
+                   ('sending (opencode-shell--status-display "Sending"))
+                   ('thinking (opencode-shell--status-display "Thinking"))
+                   ('receiving (opencode-shell--status-display "Receiving"))
+                   ('recovering (opencode-shell--status-display "Recovering"))
+                   ('aborting (opencode-shell--status-display "Aborting"))
+                   ('error "Request state is uncertain; resync with g r\n\n")
+                   (_ (opencode-shell--status-display "Waiting for response")))
+                 'face (if (eq (opencode-shell--turn-status turn) 'error)
+                           'opencode-shell-error-face
+                         'opencode-shell-waiting-face))))))))
 
 (defun opencode-shell--tool-name-display (turn)
   "Return payload-free tool names observed in TURN."
-  (let ((names (opencode-shell-response-tool-names
-                (opencode-shell--turn-parts turn))))
-    (if names
+  (let* ((complete (eq (opencode-shell--turn-status turn) 'complete))
+         (tools (if complete
+                    (opencode-shell-response-tool-names
+                     (opencode-shell--turn-parts turn))
+                  (opencode-shell-response-tool-progress
+                   (opencode-shell--turn-parts turn)))))
+    (if tools
         (propertize
-         (concat (mapconcat (lambda (name) (format "TOOL> %s" name))
-                            names "\n")
-                 "\n\n")
+         (concat (mapconcat (lambda (tool)
+                              (if complete (format "TOOL> %s" tool)
+                                (format "TOOL> %s: %s" (car tool) (cdr tool))))
+                            tools "\n")
+                  "\n\n")
          'font-lock-face 'shadow)
       "")))
 

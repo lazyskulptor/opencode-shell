@@ -300,5 +300,36 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest opencode-shell-acceptance-streamed-response-preserves-draft-and-spinner ()
+  (let* ((buffer (generate-new-buffer " *accept-streamed-response*"))
+         (window (selected-window))
+         (previous (window-buffer window)))
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (opencode-shell-mode)
+            (setq opencode-shell--session-id "s")
+            (goto-char opencode-shell--composer-start)
+            (insert "draft")
+            (goto-char (+ opencode-shell--composer-start 2))
+            (opencode-shell--render-messages
+             '(((info . ((id . "u1") (role . "user")))
+                (parts . (((type . "text") (text . "question")))))
+               ((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                (parts . (((id . "p1") (type . "text") (text . "partial")))))))
+            (should (string-match-p "partial\nReceiving" (buffer-string)))
+            (should opencode-shell--spinner-overlays)
+            (should-not (opencode-shell--composer-visible-p))
+            (should (equal (opencode-shell--composer-text) "draft"))
+            (should (= 2 (- (point) opencode-shell--composer-start)))
+            (opencode-shell--receive-permissions
+             '(((id . "p") (sessionID . "s") (permission . "read"))))
+            (should (string-match-p "partial\nReceiving" (buffer-string)))
+            (should (= 1 (how-many "Receiving" (point-min) (point-max))))
+            (should (equal (opencode-shell--composer-text) "draft"))))
+      (set-window-buffer window previous)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (provide 'opencode-shell-acceptance-test)
 ;;; opencode-shell-acceptance-test.el ends here
