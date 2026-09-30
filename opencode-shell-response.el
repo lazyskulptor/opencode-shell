@@ -93,6 +93,18 @@
                                   :name)))
         (unless (member name names) (push name names))))))
 
+(defun opencode-shell-response-tool-progress (parts)
+  "Return ordered (NAME . STATUS) pairs from PARTS without tool payloads."
+  (let (progress)
+    (dolist (part parts (nreverse progress))
+      (let* ((model (opencode-shell-response-normalize-part part))
+             (name (plist-get model :name)))
+        (when name
+          (if-let ((known (assoc name progress)))
+              (setcdr known (or (plist-get model :status) "pending"))
+            (push (cons name (or (plist-get model :status) "pending"))
+                  progress)))))))
+
 (defun opencode-shell-response-envelope-complete-p (info parts)
   "Return non-nil when INFO and PARTS contain authoritative completion evidence."
   (let ((finish (opencode-shell-response--get info 'finish)))
