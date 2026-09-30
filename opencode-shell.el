@@ -813,7 +813,7 @@ Move the associated API log buffer so its name stays in sync."
                  (or (when-let ((runtime (opencode-shell-async-runtime-get key)))
                        (> (hash-table-count (plist-get runtime :subscribers)) 0))
                      (plist-get (gethash key opencode-shell--servers)
-                                 :callbacks))))))))))
+                                  :callbacks)))))) t))))
 
 (defun opencode-shell--ssh-reconcile (key)
   "Full-resync KEY's subscribed transcripts after SSH recovery."
@@ -858,11 +858,12 @@ Move the associated API log buffer so its name stays in sync."
              (plist-get state :callbacks)))
       (when error-callback
         (setf (plist-get state :failure-callbacks)
-              (cons (lambda ()
-                      (when (buffer-live-p origin)
-                        (with-current-buffer origin
-                          (when (= generation opencode-shell--generation)
-                            (funcall error-callback)))))
+              (cons (cons 'deferred
+                          (lambda ()
+                            (when (buffer-live-p origin)
+                              (with-current-buffer origin
+                                (when (= generation opencode-shell--generation)
+                                  (funcall error-callback))))))
                     (plist-get state :failure-callbacks))))
        (puthash key state opencode-shell--servers)
        (opencode-shell-recovery-resume
@@ -4139,13 +4140,15 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
 (defun opencode-shell--finish-start (key attempt)
   "Finish coalesced server start KEY for ATTEMPT."
   (let* ((state (gethash key opencode-shell--servers))
-         (callbacks (plist-get state :callbacks)))
+         (callbacks (append (plist-get state :retry-callbacks)
+                            (plist-get state :callbacks))))
      (when (opencode-shell--attempt-current-p key attempt)
        (when (opencode-shell--ssh-forwarded-profile-p (plist-get state :profile))
          (opencode-shell-recovery-success key)
          (opencode-shell-async-resume-runtime key))
-       (setq state (plist-put state :callbacks nil)
-             state (plist-put state :failure-callbacks nil)
+        (setq state (plist-put state :callbacks nil)
+              state (plist-put state :retry-callbacks nil)
+              state (plist-put state :failure-callbacks nil)
             state (plist-put state :checking nil)
             state (plist-put state :starting nil)
             state (plist-put state :attempt nil))
@@ -4160,20 +4163,35 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
           (profile (plist-get state :profile))
           (failures (plist-get state :failure-callbacks))
           (ssh (and profile (opencode-shell--ssh-forwarded-profile-p profile))))
-    (when (opencode-shell--attempt-current-p key attempt)
+    (when (and state (opencode-shell--attempt-current-p key attempt))
       (when (and (plist-get state :starting)
-                 (not ssh) (processp process) (process-live-p process))
+                  (not ssh) (processp process) (process-live-p process))
         (delete-process process))
-      (if (and ssh (processp process) (process-live-p process))
+      (if ssh
           (progn
+            (unless (and (processp process) (process-live-p process))
+              (setf (plist-get state :process) nil
+                    (plist-get state :owned) nil))
             (setf (plist-get state :checking) nil
                   (plist-get state :starting) nil
                   (plist-get state :attempt) nil
-                  (plist-get state :callbacks) nil
-                  (plist-get state :failure-callbacks) nil))
-        (remhash key opencode-shell--servers))
-      (unless ssh (message "OpenCode: %s" message-text))
-      (dolist (callback failures) (funcall callback)))))
+                  (plist-get state :retry-callbacks) nil
+                  (plist-get state :failure-callbacks)
+                  (seq-filter #'consp failures))
+            (puthash key state opencode-shell--servers)
+            (opencode-shell--ssh-disconnected profile)
+            (dolist (failure failures)
+              (when (functionp failure) (funcall failure)))
+            (when (opencode-shell-recovery-exhausted-p key)
+              (dolist (failure (plist-get state :failure-callbacks))
+                (funcall (cdr failure)))
+              (setf (plist-get state :callbacks) nil
+                    (plist-get state :failure-callbacks) nil)
+              (unless (plist-get state :owned)
+                (remhash key opencode-shell--servers))))
+        (remhash key opencode-shell--servers)
+        (message "OpenCode: %s" message-text)
+        (dolist (failure failures) (funcall failure))))))
 
 (defun opencode-shell--process-tail (process)
   "Return PROCESS's bounded output tail, or nil when empty."
@@ -4286,7 +4304,8 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
                key attempt
                (format "could not start server: %s" (error-message-string err))))))))
 
-(defun opencode-shell--start-server (&optional profile callback failure-callback)
+(defun opencode-shell--start-server
+    (&optional profile callback failure-callback retry-callback)
   "Start PROFILE's configured process and invoke CALLBACK when healthy.
 Concurrent starts for one server are coalesced.  A remote profile may use
 `:start-command' to establish its transport, such as an SSH tunnel."
@@ -4300,10 +4319,11 @@ Concurrent starts for one server are coalesced.  A remote profile may use
            (plist-get state :starting)
            (plist-get state :restart-profile))
        (when callback
-         (puthash key (plist-put state :callbacks
-                                 (cons (cons callback profile)
-                                       (plist-get state :callbacks)))
-                    opencode-shell--servers))
+          (let ((slot (if retry-callback :retry-callbacks :callbacks)))
+            (puthash key (plist-put state slot
+                                    (cons (cons callback profile)
+                                          (plist-get state slot)))
+                     opencode-shell--servers)))
         (when failure-callback
          (puthash key (plist-put state :failure-callbacks
                                  (cons failure-callback
@@ -4316,12 +4336,16 @@ Concurrent starts for one server are coalesced.  A remote profile may use
       (let ((attempt (gensym "opencode-start-")))
         (puthash key (plist-put (plist-put (plist-put state :checking t)
                                           :attempt attempt)
-                                :callbacks (append (and callback (list (cons callback profile)))
-                                                   (plist-get state :callbacks)))
+                                 :callbacks (append (and (not retry-callback) callback
+                                                         (list (cons callback profile)))
+                                                    (plist-get state :callbacks)))
                   opencode-shell--servers)
         (setq state (gethash key opencode-shell--servers))
-        (setf (plist-get state :profile) profile
-              (plist-get state :failure-callbacks)
+         (setf (plist-get state :profile) profile
+               (plist-get state :retry-callbacks)
+               (append (and retry-callback callback (list (cons callback profile)))
+                       (plist-get state :retry-callbacks))
+               (plist-get state :failure-callbacks)
               (append (and failure-callback (list failure-callback))
                       (plist-get state :failure-callbacks)))
         (opencode-shell--server-ready
@@ -4338,8 +4362,13 @@ Concurrent starts for one server are coalesced.  A remote profile may use
                            (append (and failure-callback (list failure-callback))
                                    (plist-get state :failure-callbacks))
                            :callbacks
-                           (append (and callback (list (cons callback profile)))
-                                   (plist-get state :callbacks)))
+                           (append (and (not retry-callback) callback
+                                        (list (cons callback profile)))
+                                   (plist-get state :callbacks))
+                           :retry-callbacks
+                           (append (and retry-callback callback
+                                        (list (cons callback profile)))
+                                   (plist-get state :retry-callbacks)))
                 opencode-shell--servers)
        (opencode-shell--server-ready
         profile (lambda (ready &optional _)
