@@ -298,9 +298,19 @@ profiles make the result ambiguous."
 
 (defun opencode-shell--current-server-directory (profile)
   "Return current `default-directory' as an absolute PROFILE server path."
-  (let* ((directory (opencode-shell--profile-client-directory
-                     (opencode-shell--project-directory) profile))
-         (client-root (plist-get profile :directory))
+  (let* ((client-root (plist-get profile :directory))
+         (current (opencode-shell--canonical-directory
+                   (opencode-shell--profile-client-directory default-directory profile)))
+         (project (opencode-shell--canonical-directory
+                   (opencode-shell--profile-client-directory
+                    (opencode-shell--project-directory) profile)))
+         (directory
+          (if (and client-root (file-remote-p current)
+                   (equal project (opencode-shell--canonical-directory client-root))
+                   (not (equal current project))
+                   (string-prefix-p project current))
+              current
+            project))
          (remote (file-remote-p directory))
          (root-remote (and client-root (file-remote-p client-root)))
          (server-directory

@@ -63,8 +63,10 @@ authentication source, and local server lifecycle settings. Session inventory
 is scoped to the invocation buffer's `default-directory`, translated to the
 server-native absolute path.
 `M-x opencode-shell` always selects a server first. Browser and new-session
-commands map the detected client project root to the server workspace, so calls
-from nested directories share one project session history. Each alias also generates
+commands use the detected client project root as the server-native directory, so
+calls from nested directories share one project session history. If remote root
+detection returns only the configured home while invoked below it, the invocation
+directory is used instead. Each alias also generates
 `opencode-shell-<alias>-sessions` and `opencode-shell-<alias>-start`, such as
 `opencode-shell-local-sessions` and `opencode-shell-local-start`. The start
 command creates a title-less session in the current directory and opens it.

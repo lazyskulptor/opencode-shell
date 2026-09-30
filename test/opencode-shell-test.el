@@ -4516,7 +4516,21 @@
                 (lambda (&optional _) "/client/project/")))
       (should (equal (opencode-shell--current-server-directory
                       opencode-shell-test--local-profile)
-                     "/client/project/")))))
+                      "/client/project/")))))
+
+(ert-deftest opencode-shell-remote-launch-ignores-overbroad-home-project-root ()
+  (let ((default-directory "/ssh:code.example.test:/home/test/workspace/project/")
+        (opencode-shell-profiles (list opencode-shell-test--remote-profile))
+        opened)
+    (cl-letf (((symbol-function 'opencode-shell--project-directory)
+               (lambda (&optional _) "/ssh:code.example.test:/home/test/"))
+              ((symbol-function 'opencode-shell--start-server)
+               (lambda (profile callback &rest _) (funcall callback profile)))
+              ((symbol-function 'opencode-shell--sessions)
+               (lambda (directory &optional _profile _current-window)
+                 (setq opened directory))))
+      (opencode-shell)
+      (should (equal opened "/home/test/workspace/project/")))))
 
 (ert-deftest opencode-shell-profile-helpers-are-defined-before-public-commands ()
   (dolist (symbol '(opencode-shell--profile-key opencode-shell--profile-name
