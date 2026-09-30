@@ -3446,6 +3446,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
 When FORCE is non-nil, rebuild turn blocks during the next render.  Merge
 CHANGED-TURNS into the response blocks pending incremental update."
   (let ((slow (and changed-turns (not force) (not opencode-shell--render-force)
+                   (not (opencode-shell-async-queued-p 'render))
                    (seq-every-p (lambda (turn)
                                   (memq (opencode-shell--turn-status turn)
                                         '(thinking receiving)))

@@ -3988,6 +3988,26 @@
         (should (equal (mapcar #'cadr scheduled) '(0.25 0.5)))
         (should (= (length cancelled) 1))))))
 
+(ert-deftest opencode-shell-intermediate-does-not-demote-queued-urgent-render ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn :id "u" :user "q" :status 'waiting))
+          (real-timerp (symbol-function 'timerp))
+          scheduled)
+      (setq opencode-shell--turns (list turn))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (delay _repeat &rest _)
+                   (push delay scheduled) 'timer))
+                ((symbol-function 'timerp)
+                 (lambda (timer) (or (eq timer 'timer)
+                                     (funcall real-timerp timer)))))
+        (opencode-shell--schedule-render "messages:1" nil (list turn))
+        (setf (opencode-shell--turn-status turn) 'receiving)
+        (opencode-shell--schedule-render "event:message.part.updated" nil (list turn))
+        (should (equal scheduled '(0.25)))
+        (should (assoc 'render opencode-shell-async--queue))))))
+
 (ert-deftest opencode-shell-idle-key-keeps-latest-and-cancels-stale-work ()
   (with-temp-buffer
     (setq-local opencode-shell--generation 1)

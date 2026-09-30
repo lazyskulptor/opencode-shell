@@ -303,6 +303,11 @@ Only the latest pending value for KEY and GENERATION is retained."
               (run-with-idle-timer opencode-shell-async--idle-delay nil
                                    #'opencode-shell-async-drain buffer))))))
 
+(defun opencode-shell-async-queued-p (key &optional buffer)
+  "Return non-nil if normal idle work under KEY is pending in BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    (assoc key opencode-shell-async--queue)))
+
 (defun opencode-shell-async--drain-idle-key (buffer key token)
   "Run BUFFER's current KEY job only when TOKEN and generation still match."
   (when (buffer-live-p buffer)
