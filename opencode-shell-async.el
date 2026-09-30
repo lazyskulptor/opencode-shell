@@ -39,6 +39,9 @@
 (defvar-local opencode-shell-async--idle-timer nil
   "Idle timer draining `opencode-shell-async--queue'.")
 
+(defvar-local opencode-shell-async--idle-keys nil
+  "Keyed longer-idle jobs kept apart from the normal delivery queue.")
+
 (defun opencode-shell-async-runtime-get (key)
   "Return shared runtime registered under KEY."
   (gethash key opencode-shell-async--runtimes))
@@ -300,13 +303,54 @@ Only the latest pending value for KEY and GENERATION is retained."
               (run-with-idle-timer opencode-shell-async--idle-delay nil
                                    #'opencode-shell-async-drain buffer))))))
 
+(defun opencode-shell-async--drain-idle-key (buffer key token)
+  "Run BUFFER's current KEY job only when TOKEN and generation still match."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((entry (alist-get key opencode-shell-async--idle-keys)))
+        (when (and entry (eq token (nth 0 entry)))
+          (setq opencode-shell-async--idle-keys
+                (assq-delete-all key opencode-shell-async--idle-keys))
+          (when (or (null (nth 2 entry))
+                    (and (boundp 'opencode-shell--generation)
+                         (= (nth 2 entry) opencode-shell--generation)))
+            (apply (nth 3 entry) (nth 4 entry))))))))
+
+(defun opencode-shell-async-enqueue-idle
+    (buffer key generation delay function &rest arguments)
+  "Coalesce KEY's latest FUNCTION for BUFFER after DELAY seconds of Emacs idle.
+Other queued work retains its normal idle cadence.  Repeated updates keep the
+first pending timer so a continuous stream cannot postpone rendering forever."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((known (alist-get key opencode-shell-async--idle-keys))
+             (token (or (car known) (make-symbol "idle-job")))
+             (timer (or (nth 1 known)
+                        (run-with-idle-timer
+                         delay nil #'opencode-shell-async--drain-idle-key
+                         buffer key token))))
+        (setf (alist-get key opencode-shell-async--idle-keys)
+              (list token timer generation function arguments))))))
+
+(defun opencode-shell-async-cancel-idle-key (key &optional buffer)
+  "Cancel the longer-idle job under KEY for BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    (when-let ((entry (alist-get key opencode-shell-async--idle-keys)))
+      (when (timerp (nth 1 entry)) (cancel-timer (nth 1 entry)))
+      (setq opencode-shell-async--idle-keys
+            (assq-delete-all key opencode-shell-async--idle-keys)))))
+
 (defun opencode-shell-async-cancel (&optional buffer)
   "Cancel queued work for BUFFER or the current buffer."
   (with-current-buffer (or buffer (current-buffer))
     (when (timerp opencode-shell-async--idle-timer)
       (cancel-timer opencode-shell-async--idle-timer))
+    (dolist (entry opencode-shell-async--idle-keys)
+      (when (timerp (nth 1 (cdr entry)))
+        (cancel-timer (nth 1 (cdr entry)))))
     (setq opencode-shell-async--idle-timer nil
-          opencode-shell-async--queue nil)))
+          opencode-shell-async--queue nil
+          opencode-shell-async--idle-keys nil)))
 
 (defun opencode-shell-async--animation-tick ()
   "Run animation callbacks only for live, visible subscribed buffers."

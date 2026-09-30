@@ -3445,17 +3445,37 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
   "Mark presentation dirty and coalesce visible rendering under EVENT.
 When FORCE is non-nil, rebuild turn blocks during the next render.  Merge
 CHANGED-TURNS into the response blocks pending incremental update."
-  (setq opencode-shell--render-dirty t
-        opencode-shell--render-event (or event opencode-shell--render-event)
-        opencode-shell--render-force (or force opencode-shell--render-force)
-        opencode-shell--render-dirty-turns
-        (seq-uniq (append opencode-shell--render-dirty-turns changed-turns) #'eq))
-  (when (get-buffer-window (current-buffer) t)
-    (opencode-shell-async-enqueue
-     (current-buffer) 'render opencode-shell--generation
-     #'opencode-shell--flush-render))
-  (unless (get-buffer-window (current-buffer) t)
-    (opencode-shell--log-lifecycle "render-deferred:hidden")))
+  (let ((slow (and changed-turns (not force) (not opencode-shell--render-force)
+                   (seq-every-p (lambda (turn)
+                                  (memq (opencode-shell--turn-status turn)
+                                        '(thinking receiving)))
+                                changed-turns)
+                   (or (and (stringp event)
+                            (or (string-prefix-p "event:message.part.updated" event)
+                                (string-prefix-p "messages" event)))
+                       (null event))
+                   (or (null opencode-shell--render-event)
+                       (and (stringp opencode-shell--render-event)
+                            (or (string-prefix-p "event:message.part.updated"
+                                                 opencode-shell--render-event)
+                                (string-prefix-p "messages"
+                                                 opencode-shell--render-event)))))))
+    (setq opencode-shell--render-dirty t
+          opencode-shell--render-event (or event opencode-shell--render-event)
+          opencode-shell--render-force (or force opencode-shell--render-force)
+          opencode-shell--render-dirty-turns
+          (seq-uniq (append opencode-shell--render-dirty-turns changed-turns) #'eq))
+    (when (get-buffer-window (current-buffer) t)
+      (if slow
+          (opencode-shell-async-enqueue-idle
+           (current-buffer) 'render opencode-shell--generation 0.5
+           #'opencode-shell--flush-render)
+        (opencode-shell-async-cancel-idle-key 'render)
+        (opencode-shell-async-enqueue
+         (current-buffer) 'render opencode-shell--generation
+         #'opencode-shell--flush-render)))
+    (unless (get-buffer-window (current-buffer) t)
+      (opencode-shell--log-lifecycle "render-deferred:hidden"))))
 
 (defun opencode-shell--render-if-visible ()
   "Schedule one render when a dirty transcript becomes visible."
