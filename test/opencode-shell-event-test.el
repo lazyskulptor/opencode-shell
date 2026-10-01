@@ -141,7 +141,6 @@
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
         (opencode-shell--receive-application-event part-event)
         (opencode-shell-async-drain (current-buffer))
-        (opencode-shell--flush-render)
         (should (zerop snapshot-count))
         (should (opencode-shell--turn-parts (car opencode-shell--turns)))
         (should (string-match-p "TOOL> bash" (buffer-string)))

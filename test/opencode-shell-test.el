@@ -3118,8 +3118,7 @@
                      (cl-incf updates)
                      (funcall original turn))))
           (opencode-shell--render-messages changed 2 t)
-          (opencode-shell-async-drain (current-buffer))
-          (opencode-shell--flush-render))
+          (opencode-shell-async-drain (current-buffer)))
         (should (= updates 1))))))
 
 (ert-deftest opencode-shell-spinner-overlay-invalidates-redisplay-without-buffer-edits ()
@@ -3962,33 +3961,26 @@
         (should (eq value 'latest))
         (should-not opencode-shell-async--queue)))))
 
-(ert-deftest opencode-shell-intermediate-render-has-own-idle-cadence ()
+(ert-deftest opencode-shell-intermediate-reuses-normal-idle-render ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "u" :user "q" :status 'receiving))
           (real-timerp (symbol-function 'timerp))
-          scheduled cancelled)
+          scheduled)
       (setq opencode-shell--turns (list turn))
       (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
                 ((symbol-function 'run-with-idle-timer)
-                 (lambda (delay _repeat function &rest args)
-                   (let ((timer (list 'idle delay function args)))
-                     (push timer scheduled)
-                     timer)))
+                 (lambda (delay _repeat &rest _)
+                   (push delay scheduled) 'timer))
                 ((symbol-function 'timerp)
-                 (lambda (timer) (or (and (consp timer) (eq (car timer) 'idle))
-                                     (funcall real-timerp timer))))
-                ((symbol-function 'cancel-timer)
-                 (lambda (timer) (push timer cancelled))))
+                 (lambda (timer) (or (eq timer 'timer)
+                                     (funcall real-timerp timer)))))
         (opencode-shell--schedule-render "event:message.part.updated" nil (list turn))
         (opencode-shell--schedule-render "event:message.part.updated" nil (list turn))
-        (should (equal (mapcar #'cadr scheduled) '(0.5)))
-        (setf (opencode-shell--turn-status turn) 'complete)
-        (opencode-shell--schedule-render "event:message.updated" nil (list turn))
-        (should (equal (mapcar #'cadr scheduled) '(0.25 0.5)))
-        (should (= (length cancelled) 1))))))
+        (should (equal scheduled '(0.25)))
+        (should (assoc 'render opencode-shell-async--queue))))))
 
-(ert-deftest opencode-shell-intermediate-does-not-demote-queued-urgent-render ()
+(ert-deftest opencode-shell-intermediate-coalesces-with-queued-render ()
   (with-temp-buffer
     (opencode-shell-mode)
     (let ((turn (opencode-shell--make-turn :id "u" :user "q" :status 'waiting))
@@ -4007,41 +3999,6 @@
         (opencode-shell--schedule-render "event:message.part.updated" nil (list turn))
         (should (equal scheduled '(0.25)))
         (should (assoc 'render opencode-shell-async--queue))))))
-
-(ert-deftest opencode-shell-idle-key-keeps-latest-and-cancels-stale-work ()
-  (with-temp-buffer
-    (setq-local opencode-shell--generation 1)
-    (let (scheduled cancelled values)
-      (cl-letf (((symbol-function 'run-with-idle-timer)
-                 (lambda (delay _repeat function &rest args)
-                   (let ((timer (list 'idle delay function args)))
-                     (push timer scheduled) timer)))
-                ((symbol-function 'timerp)
-                 (lambda (timer) (eq (car-safe timer) 'idle)))
-                ((symbol-function 'cancel-timer)
-                 (lambda (timer) (push timer cancelled))))
-        (opencode-shell-async-enqueue-idle
-         (current-buffer) 'render 1 0.5
-         (lambda (value) (push value values)) 'first)
-        (opencode-shell-async-enqueue-idle
-         (current-buffer) 'render 1 0.5
-         (lambda (value) (push value values)) 'latest)
-        (should (= (length scheduled) 1))
-        (apply (nth 2 (car scheduled)) (nth 3 (car scheduled)))
-        (should (equal values '(latest)))
-        (opencode-shell-async-enqueue-idle
-         (current-buffer) 'render 1 0.5
-         (lambda (value) (push value values)) 'stale)
-        (setq-local opencode-shell--generation 2)
-        (apply (nth 2 (car scheduled)) (nth 3 (car scheduled)))
-        (should (equal values '(latest)))
-        (opencode-shell-async-enqueue-idle
-         (current-buffer) 'render 2 0.5
-         (lambda (value) (push value values)) 'cancelled)
-        (opencode-shell-async-cancel)
-        (should (= (length cancelled) 1))
-        (apply (nth 2 (car scheduled)) (nth 3 (car scheduled)))
-        (should (equal values '(latest)))))))
 
 (ert-deftest opencode-shell-sse-runtime-opens-circuit-after-bounded-failures ()
   (let* ((key 'circuit)

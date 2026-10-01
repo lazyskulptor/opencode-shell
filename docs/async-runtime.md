@@ -18,11 +18,9 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
    enqueue keyed work.
 3. Keyed work is latest-value coalesced and drained after 0.25 seconds of Emacs
    idle time; it never uses a wall-clock fallback that can interrupt unrelated
-   editing. Active assistant text/tool presentation alone uses a keyed 0.5-second
-   idle slot; the first timer is retained under a continuous stream so progress
-   cannot starve. Completion and interaction changes use the normal cadence and
-   cancel pending intermediate display. Closing a buffer, changing generation,
-   reloading, or stopping a runtime cancels or invalidates idle work.
+   editing. Intermediate text/tool display uses this same keyed queue as
+   completion and interaction changes. Closing a buffer, changing generation,
+   reloading, or stopping a runtime cancels pending work.
 4. Hidden buffers do not render. Their authoritative state remains current and
    is rendered once when a window displays them again.
 5. A server/profile owns at most one SSE connection and one runtime cadence,
@@ -67,9 +65,7 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
   not modify displayed text. Live transcripts recreate a missing cache at this
   ownership boundary; stale work after a major-mode transition is discarded.
 - **Presentation:** idle, visible-only, coalesced transcript/browser rendering.
-  Active assistant text/tool updates use a slower keyed presentation job without
-  delaying other queued work; the same canonical response projector handles
-  both interim and final output.
+  The same canonical response projector handles interim and final output.
   The bounded right-growing spinner is an overlay driven by its own animation
   timer and reset by current-session transcript progress, not polling. Composer
   text, point, markers, and undo history remain stable.
