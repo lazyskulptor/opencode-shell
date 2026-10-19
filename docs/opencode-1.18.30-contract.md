@@ -26,18 +26,29 @@ Permission list snapshots may overlap reply callbacks. The client therefore keys
 pending and resolved state by permission `id`, treats duplicate snapshots and
 callbacks idempotently, and does not declare an active response ready while a
 permission is pending or its reply is in flight. The list is the server's current
-pending snapshot. The UI presents only its first current-session request,
+pending snapshot. The UI presents only its first request belonging to the
+current session or any descendant of it (a direct subagent, or a subagent of a
+subagent, determined by walking the `parentID` chain up to the current session),
 replaces that card with the explicit reply result, and then advances to the next
 request. `once` resolves one request; server-side `always` may resolve other
-matching same-session requests, while `reject` may remove all remaining requests
-in that session. Later snapshots remove those siblings from the local queue
-without synthetic result lines. Emacs sends `always` directly and leaves
-persistent matching to OpenCode. Every reply outcome, success or failure, immediately refetches `/permission`
-rather than waiting for the next poll tick, so implicitly settled siblings
-correct on screen sooner; if a `/permission` request is already in flight, the
-refetch is deferred until that request settles, whether it succeeds or fails.
+matching requests in that same scope, while `reject` may remove all remaining
+requests in that session. Later snapshots remove those siblings from the local
+queue without synthetic result lines. Emacs sends `always` directly and leaves
+persistent matching to OpenCode. Every reply outcome, success or failure,
+immediately refetches `/permission` rather than waiting for the next poll tick,
+so implicitly settled siblings correct on screen sooner; if a `/permission`
+request is already in flight, the refetch is deferred until that request
+settles, whether it succeeds or fails. A request from an unrecognized session
+triggers a `GET /session` lookup (with the same high `limit` as the session
+browser, so a descendant beyond the first page is still found) that walks the
+`parentID` chain. A session whose chain ends at a root other than the current
+session is ruled out permanently and not re-queried on later polls; a session
+whose chain reaches an ancestor still absent from the snapshot is left
+unresolved and re-probed on a subsequent poll, so a subagent not yet indexed
+when it first raised a request is not dropped forever.
 
-Question list responses are likewise authoritative current pending snapshots.
+Question list responses are likewise authoritative current pending snapshots,
+scoped the same way (current session plus its direct subagent children).
 Pending questions and question replies in flight block prompt readiness just like
 permissions; timer polling includes `/question` so user input requests cannot be
 hidden behind a perpetually running question tool.

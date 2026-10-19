@@ -616,6 +616,8 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--permission-refresh-pending nil)
 (defvar-local opencode-shell--questions-pending nil)
 (defvar-local opencode-shell--question-refresh-pending nil)
+(defvar-local opencode-shell--known-descendant-session-ids nil)
+(defvar-local opencode-shell--probed-session-ids nil)
 (defvar-local opencode-shell--last-lifecycle-signature nil)
 (defvar-local opencode-shell--table-render-width nil)
 (defvar-local opencode-shell--table-rerendering nil)
@@ -2038,6 +2040,8 @@ polluting the user's undo history."
               opencode-shell--message-state-revision 0
               opencode-shell--render-dirty-turns nil
               opencode-shell--permissions nil
+              opencode-shell--known-descendant-session-ids nil
+              opencode-shell--probed-session-ids nil
               opencode-shell--request-status "idle")
   (let ((inhibit-read-only t)
         (buffer-undo-list t))
@@ -2765,13 +2769,93 @@ Return a plist containing affected turns and whether a full render is required."
       (opencode-shell-interaction-active-p opencode-shell--interaction-state)
       opencode-shell--questions-pending))
 
+(defun opencode-shell--interaction-session-id (item)
+  "Return ITEM's session ID under either casing."
+  (or (opencode-shell--get item 'sessionID)
+      (opencode-shell--get item 'sessionId)))
+
+(defun opencode-shell--interaction-session-visible-p (session)
+  "Return non-nil when SESSION is the current session or a known descendant."
+  (or (equal session opencode-shell--session-id)
+      (member session opencode-shell--known-descendant-session-ids)))
+
+(defun opencode-shell--session-parent-map (sessions)
+  "Return a hash table mapping each session id in SESSIONS to its parent id.
+Roots map to nil; ids absent from SESSIONS are simply not present."
+  (let ((map (make-hash-table :test #'equal)))
+    (dolist (session sessions map)
+      (when-let ((id (opencode-shell--get session 'id)))
+        (let ((parent (or (opencode-shell--get session 'parentID)
+                          (opencode-shell--get session 'parentId))))
+          (puthash id (and parent (not (equal parent "")) parent) map))))))
+
+(defun opencode-shell--session-lineage (session parent-map target)
+  "Classify SESSION against TARGET by walking PARENT-MAP toward the root.
+Return `descendant' when TARGET is SESSION or one of its ancestors, `foreign'
+when the chain ends at a root other than TARGET, or `unknown' when an ancestor
+is missing from PARENT-MAP (not yet indexed) so classification must wait."
+  (let ((current session)
+        (seen (make-hash-table :test #'equal)))
+    (catch 'done
+      (while t
+        (when (equal current target) (throw 'done 'descendant))
+        (when (gethash current seen) (throw 'done 'foreign))
+        (puthash current t seen)
+        (let ((parent (gethash current parent-map 'absent)))
+          (cond
+           ((eq parent 'absent) (throw 'done 'unknown))
+           ((null parent) (throw 'done 'foreign))
+           (t (setq current parent))))))))
+
+(defun opencode-shell--unresolved-interaction-sessions (items)
+  "Return ITEMS' distinct sessions not yet known to belong here or ruled out."
+  (seq-uniq
+   (seq-remove
+    (lambda (session)
+      (or (null session)
+          (opencode-shell--interaction-session-visible-p session)
+          (member session opencode-shell--probed-session-ids)))
+    (mapcar #'opencode-shell--interaction-session-id items))))
+
+(defun opencode-shell--discover-descendant-sessions (items)
+  "Resolve ITEMS' unrecognized sessions against this session's subagent subtree.
+Bubbles up permissions and questions raised by any descendant session (a direct
+subagent or a subagent of a subagent, found by walking the `parentID' chain up
+to the current session) so they surface and can be answered here instead of
+silently stalling the subagent forever.
+
+A session whose chain ends at a root other than the current session is ruled
+out permanently; one whose chain reaches an ancestor still absent from the
+`/session' snapshot is left unresolved so a subagent not yet indexed is
+re-probed on a later poll rather than dropped forever.  Overrides the default
+row truncation so a descendant beyond the first page is still found."
+  (when-let ((unresolved (opencode-shell--unresolved-interaction-sessions items)))
+    (opencode-shell--guarded-request
+     'descendant-sessions "GET" "/session"
+     (lambda (sessions)
+       (let ((parent-map (opencode-shell--session-parent-map sessions))
+             new foreign)
+         (dolist (id unresolved)
+           (pcase (opencode-shell--session-lineage
+                   id parent-map opencode-shell--session-id)
+             ('descendant (push id new))
+             ('foreign (push id foreign))))
+         (when foreign
+           (setq opencode-shell--probed-session-ids
+                 (seq-uniq (append opencode-shell--probed-session-ids foreign))))
+         (when new
+           (setq opencode-shell--known-descendant-session-ids
+                 (append opencode-shell--known-descendant-session-ids new))
+           (opencode-shell--refresh-permissions)
+           (opencode-shell--refresh-questions))))
+     nil nil '((limit . 1000)))))
+
 (defun opencode-shell--session-permissions (items)
-  "Return permission ITEMS belonging to the current session."
+  "Return permission ITEMS belonging to the current session or its subagents."
   (seq-filter
    (lambda (item)
-     (let ((session (or (opencode-shell--get item 'sessionID)
-                        (opencode-shell--get item 'sessionId))))
-       (equal session opencode-shell--session-id)))
+     (opencode-shell--interaction-session-visible-p
+      (opencode-shell--interaction-session-id item)))
    items))
 
 (defun opencode-shell--permission-id (item)
@@ -2789,12 +2873,11 @@ Return a plist containing affected turns and whether a full render is required."
            (push item result))))))
 
 (defun opencode-shell--session-questions (items)
-  "Return question ITEMS belonging to the current session."
+  "Return question ITEMS belonging to the current session or its subagents."
   (seq-filter
    (lambda (item)
-     (equal (or (opencode-shell--get item 'sessionID)
-                (opencode-shell--get item 'sessionId))
-            opencode-shell--session-id))
+     (opencode-shell--interaction-session-visible-p
+      (opencode-shell--interaction-session-id item)))
    items))
 
 (defun opencode-shell--question-id (item)
@@ -2816,6 +2899,7 @@ Return a plist containing affected turns and whether a full render is required."
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-question-refresh-pending)
   (opencode-shell--settle-hydration 'questions t)
+  (opencode-shell--discover-descendant-sessions items)
   (let ((questions (opencode-shell--deduplicate-questions
                     (opencode-shell--session-questions items))))
     (unless (equal questions opencode-shell--questions-pending)
@@ -2899,6 +2983,27 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
       (car opencode-shell--permissions)
       (user-error "No pending permission")))
 
+(defun opencode-shell--insert-button-text (label)
+  "Insert LABEL at point and return its (BEGIN . END) buffer positions."
+  (let ((begin (point)))
+    (insert label)
+    (cons begin (point))))
+
+(defun opencode-shell--activate-button (span command)
+  "Make buffer SPAN clickable, invoking COMMAND on mouse-1.
+SPAN is a (BEGIN . END) pair, as returned by
+`opencode-shell--insert-button-text'.  Other keys fall back to whichever
+keymap already covers SPAN, so bare keyboard shortcuts keep working."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map (get-text-property (car span) 'keymap))
+    (define-key map [mouse-1] command)
+    (add-text-properties
+     (car span) (cdr span)
+     (list 'mouse-face 'highlight 'follow-link 'mouse-face
+           'help-echo (format "mouse-1: %s"
+                              (buffer-substring-no-properties (car span) (cdr span)))
+           'keymap map))))
+
 (defun opencode-shell--render-permissions ()
   "Render pending permissions as one boxed read-only region before composer."
   (opencode-shell--without-user-undo
@@ -2923,20 +3028,29 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (let ((begin (point))
               (permission (format "%s" (or (opencode-shell--get item 'permission)
                                              "permission")))
-              (context (opencode-shell--permission-context item)))
+              (context (opencode-shell--permission-context item))
+              once always reject)
           (insert (propertize "┌─ PERMISSION ─────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
                   "│\n"
                   "│  " permission "\n"
                   (if context (concat "│\n│  " context "\n") "")
                   "│\n"
-                  "│  C-c C-y once  C-c C-l always  C-c C-n reject\n"
-                  "└───────────────────────────────────────────\n")
+                  "│  C-c C-y ")
+          (setq once (opencode-shell--insert-button-text "once"))
+          (insert "  C-c C-l ")
+          (setq always (opencode-shell--insert-button-text "always"))
+          (insert "  C-c C-n ")
+          (setq reject (opencode-shell--insert-button-text "reject"))
+          (insert "\n└───────────────────────────────────────────\n")
           (add-text-properties
            begin (point)
            `(read-only t rear-nonsticky (read-only keymap)
                keymap ,opencode-shell-permission-map
-               opencode-shell-permission ,item))))
+               opencode-shell-permission ,item))
+          (opencode-shell--activate-button once #'opencode-shell--permission-allow-once)
+          (opencode-shell--activate-button always #'opencode-shell--permission-allow-always)
+          (opencode-shell--activate-button reject #'opencode-shell--permission-reject)))
       (when (and (null opencode-shell--permissions)
                  opencode-shell--questions-pending)
         (let* ((item (car opencode-shell--questions-pending))
@@ -2945,7 +3059,8 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                (prompt (or (opencode-shell--get question 'question)
                            "Answer required"))
                (header (opencode-shell--get question 'header))
-               (begin (point)))
+               (begin (point))
+               answer reject)
           (insert (propertize "┌─ QUESTION ───────────────────────────────\n"
                               'font-lock-face 'opencode-shell-permission-face)
                   "│\n"
@@ -2954,13 +3069,18 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                     "")
                   "│  " prompt "\n"
                   "│\n"
-                  "│  RET/a answer  r reject\n"
-                  "└───────────────────────────────────────────\n")
+                  "│  RET/a ")
+          (setq answer (opencode-shell--insert-button-text "answer"))
+          (insert "  r ")
+          (setq reject (opencode-shell--insert-button-text "reject"))
+          (insert "\n└───────────────────────────────────────────\n")
           (add-text-properties
            begin (point)
            `(read-only t rear-nonsticky (read-only keymap)
              keymap ,opencode-shell-question-map
-             opencode-shell-question ,item))))
+             opencode-shell-question ,item))
+          (opencode-shell--activate-button answer #'opencode-shell--questions)
+          (opencode-shell--activate-button reject #'opencode-shell--question-reject)))
       (set-marker opencode-shell--permission-status-begin (point))
       (when-let ((status (opencode-shell--permission-status-display)))
         (insert status))
@@ -3003,6 +3123,7 @@ request settles."
 When DEFER-RENDER is non-nil, coalesce presentation at idle time."
   (opencode-shell--consume-permission-refresh-pending)
   (opencode-shell--settle-hydration 'permissions t)
+  (opencode-shell--discover-descendant-sessions items)
   (let ((permissions
          (seq-remove
           (lambda (item)
@@ -3565,8 +3686,9 @@ non-nil, remove cached server messages absent from the snapshot."
                     opencode-shell--render-event nil
                     opencode-shell--render-dirty-turns nil))))))))
 
-(defun opencode-shell--guarded-request (key method path callback &optional body error-callback)
-  "Request PATH once per generation under KEY."
+(defun opencode-shell--guarded-request (key method path callback &optional body error-callback params)
+  "Request PATH once per generation under KEY.
+PARAMS, when non-nil, are query parameters forwarded to the underlying request."
   (unless (alist-get key opencode-shell--in-flight)
     (let ((origin (current-buffer))
           (generation opencode-shell--generation)
@@ -3600,7 +3722,7 @@ non-nil, remove cached server messages absent from the snapshot."
               (opencode-shell--request
                method path
                (lambda (value) (settle t value))
-               body nil
+               body params
                (lambda () (settle nil nil))))))))
 
 (defun opencode-shell--question-prompt (question)

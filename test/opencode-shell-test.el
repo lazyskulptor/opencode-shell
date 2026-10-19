@@ -695,6 +695,211 @@
          '(((id . "p1") (sessionID . "s") (permission . "bash"))))
         (should (equal (car events) "permissions"))))))
 
+(ert-deftest opencode-shell-subagent-permission-bubbles-up-to-parent ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (_method path callback &rest _)
+                 (cond
+                  ((equal path "/session")
+                   (funcall callback '(((id . "parent"))
+                                       ((id . "child") (parentID . "parent")))))
+                  ((equal path "/permission")
+                   (funcall callback '(((id . "p1") (sessionID . "child")
+                                        (permission . "bash")))))
+                  (t (funcall callback nil)))))
+              ((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (opencode-shell--receive-permissions
+       '(((id . "p1") (sessionID . "child") (permission . "bash"))))
+      (should (equal opencode-shell--known-descendant-session-ids '("child")))
+      (should (equal (mapcar #'opencode-shell--permission-id
+                             opencode-shell--permissions)
+                     '("p1"))))))
+
+(ert-deftest opencode-shell-subagent-question-bubbles-up-to-parent ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (_method path callback &rest _)
+                 (cond
+                  ((equal path "/session")
+                   (funcall callback '(((id . "parent"))
+                                       ((id . "child") (parentID . "parent")))))
+                  ((equal path "/question")
+                   (funcall callback '(((id . "q1") (sessionID . "child")
+                                        (question . "Proceed?")))))
+                  (t (funcall callback nil)))))
+              ((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (opencode-shell--receive-questions
+       '(((id . "q1") (sessionID . "child") (question . "Proceed?"))))
+      (should (equal opencode-shell--known-descendant-session-ids '("child")))
+      (should (equal (mapcar #'opencode-shell--question-id
+                             opencode-shell--questions-pending)
+                     '("q1"))))))
+
+(ert-deftest opencode-shell-foreign-session-permission-is-probed-once ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((session-requests 0))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (cond
+                    ((equal path "/session")
+                     (cl-incf session-requests)
+                     (funcall callback '(((id . "parent")) ((id . "other")))))
+                    (t (funcall callback nil)))))
+                ((symbol-function 'opencode-shell--start-polling) #'ignore))
+        (dotimes (_ 3)
+          (opencode-shell--receive-permissions
+           '(((id . "p1") (sessionID . "other") (permission . "bash")))))
+        (should (= session-requests 1))
+        (should-not opencode-shell--known-descendant-session-ids)
+        (should-not opencode-shell--permissions)))))
+
+(ert-deftest opencode-shell-child-session-lookup-overrides-row-limit ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let (session-params)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &optional _body params &rest _)
+                   (when (equal path "/session")
+                     (setq session-params params))
+                   (funcall callback nil)))
+                ((symbol-function 'opencode-shell--start-polling) #'ignore))
+        (opencode-shell--receive-permissions
+         '(((id . "p1") (sessionID . "child") (permission . "bash"))))
+        (should (equal session-params '((limit . 1000))))))))
+
+(ert-deftest opencode-shell-absent-subagent-child-is-reprobed-until-indexed ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((session-requests 0) child-indexed)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (cond
+                    ((equal path "/session")
+                     (cl-incf session-requests)
+                     (funcall callback
+                              (if child-indexed
+                                  '(((id . "parent"))
+                                    ((id . "child") (parentID . "parent")))
+                                '(((id . "parent"))))))
+                    ((equal path "/permission")
+                     (funcall callback '(((id . "p1") (sessionID . "child")
+                                          (permission . "bash")))))
+                    (t (funcall callback nil)))))
+                ((symbol-function 'opencode-shell--start-polling) #'ignore))
+        ;; First snapshot: the child is not yet indexed in /session, so it stays
+        ;; unresolved and is not cached as a foreign session.
+        (opencode-shell--receive-permissions
+         '(((id . "p1") (sessionID . "child") (permission . "bash"))))
+        (should-not opencode-shell--known-descendant-session-ids)
+        (should-not opencode-shell--permissions)
+        (should-not (member "child" opencode-shell--probed-session-ids))
+        ;; Once the child appears, a later snapshot re-probes and resolves it.
+        (setq child-indexed t)
+        (opencode-shell--receive-permissions
+         '(((id . "p1") (sessionID . "child") (permission . "bash"))))
+        (should (equal opencode-shell--known-descendant-session-ids '("child")))
+        (should (equal (mapcar #'opencode-shell--permission-id
+                               opencode-shell--permissions)
+                       '("p1")))
+        (should (= session-requests 2))))))
+
+(ert-deftest opencode-shell-grandchild-subagent-permission-bubbles-up ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "root")
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (_method path callback &rest _)
+                 (cond
+                  ((equal path "/session")
+                   (funcall callback
+                            '(((id . "root"))
+                              ((id . "child") (parentID . "root"))
+                              ((id . "grandchild") (parentID . "child")))))
+                  ((equal path "/permission")
+                   (funcall callback '(((id . "p1") (sessionID . "grandchild")
+                                        (permission . "bash")))))
+                  (t (funcall callback nil)))))
+              ((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (opencode-shell--receive-permissions
+       '(((id . "p1") (sessionID . "grandchild") (permission . "bash"))))
+      (should (member "grandchild" opencode-shell--known-descendant-session-ids))
+      (should (equal (mapcar #'opencode-shell--permission-id
+                             opencode-shell--permissions)
+                     '("p1"))))))
+
+(ert-deftest opencode-shell-unrelated-subtree-session-is-ruled-out ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "root")
+    (let ((session-requests 0))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (cond
+                    ((equal path "/session")
+                     (cl-incf session-requests)
+                     ;; "other" descends from an unrelated root, not from "root".
+                     (funcall callback
+                              '(((id . "root"))
+                                ((id . "elsewhere"))
+                                ((id . "other") (parentID . "elsewhere")))))
+                    (t (funcall callback nil)))))
+                ((symbol-function 'opencode-shell--start-polling) #'ignore))
+        (dotimes (_ 3)
+          (opencode-shell--receive-permissions
+           '(((id . "p1") (sessionID . "other") (permission . "bash")))))
+        (should (= session-requests 1))
+        (should (member "other" opencode-shell--probed-session-ids))
+        (should-not opencode-shell--known-descendant-session-ids)
+        (should-not opencode-shell--permissions)))))
+
+(ert-deftest opencode-shell-permission-button-click-dispatches-command ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let (replied)
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell--permission-reply)
+                 (lambda (reply) (setq replied reply))))
+        (opencode-shell--receive-permissions
+         '(((id . "p1") (sessionID . "s") (permission . "bash"))))
+        (goto-char (point-min))
+        (should (search-forward "once" nil t))
+        (goto-char (match-beginning 0))
+        (let ((command (lookup-key (get-text-property (point) 'keymap)
+                                   [mouse-1])))
+          (should (eq command #'opencode-shell--permission-allow-once))
+          (call-interactively command))
+        (should (equal replied "once"))))))
+
+(ert-deftest opencode-shell-question-button-click-dispatches-command ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let (rejected-id)
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell-interaction-active-p)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'opencode-shell--interaction-request)
+                 (lambda (_kind id &rest _) (setq rejected-id id))))
+        (opencode-shell--receive-questions
+         '(((id . "q1") (sessionID . "s") (question . "Proceed?"))))
+        (goto-char (point-min))
+        (should (search-forward "reject" nil t))
+        (goto-char (match-beginning 0))
+        (let ((command (lookup-key (get-text-property (point) 'keymap)
+                                   [mouse-1])))
+          (should (eq command #'opencode-shell--question-reject))
+          (call-interactively command))
+        (should (equal rejected-id "q1"))))))
+
 (ert-deftest opencode-shell-permission-pending-label-shows-patterns ()
   (let (candidates)
     (cl-letf (((symbol-function 'opencode-shell--request)
