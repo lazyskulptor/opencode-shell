@@ -9,28 +9,9 @@ sessions. Keep AI coding conversations, inline tool approvals, interactive
 questions, subagent navigation, and local/remote (TRAMP + SSH) project sessions
 inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybindings.
 
-```text
-┌─ *opencode:local: Refactor auth middleware [ses_9f2a…]* ─────────────────────┐
-│ Header: Refactor auth middleware | agent: build | model: anthropic/claude-… │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ █ Inspect the session timeout handler and fix the race condition.            │
-│                                                                              │
-│ TOOL> read                                                                   │
-│ TOOL> edit                                                                   │
-│                                                                              │
-│ ┃ I updated the timeout handler so expired buffers are cleaned up safely.    │
-│                                                                              │
-│   ↳ subagent ses_child_42  [open]                                            │
-│                                                                              │
-│ ┌─ PERMISSION ─────────────────────────────                                  │
-│ │  bash                                                                      │
-│ │  make test                                                                 │
-│ │  C-c C-y [once]  C-c C-l [always]  C-c C-n [reject]                        │
-│ └───────────────────────────────────────────                                 │
-│ Prompt>                                                                      │
-│ Run the full verification suite after the test passes.█                      │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/screenshot.svg" alt="opencode-shell in Emacs (Composer & Inline Permission)" width="100%">
+</p>
 
 ## Highlights
 

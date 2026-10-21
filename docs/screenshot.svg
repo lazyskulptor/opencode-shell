@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 560" width="1240" height="560">
+  <defs>
+    <clipPath id="frame-clip">
+      <rect x="0" y="0" width="1240" height="560" rx="10" ry="10"/>
+    </clipPath>
+    <clipPath id="left-clip">
+      <rect x="0" y="34" width="619" height="526"/>
+    </clipPath>
+    <clipPath id="right-clip">
+      <rect x="621" y="34" width="619" height="526"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#frame-clip)">
+    <!-- Frame Background -->
+    <rect x="0" y="0" width="1240" height="560" fill="#3F3F3F"/>
+    <!-- macOS Emacs NS Titlebar -->
+    <rect x="0" y="0" width="1240" height="34" fill="#232323"/>
+    <circle cx="20" cy="17" r="6" fill="#ff5f56"/>
+    <circle cx="40" cy="17" r="6" fill="#ffbd2e"/>
+    <circle cx="60" cy="17" r="6" fill="#27c93f"/>
+    <text x="620" y="22" fill="#b8b8b8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="600" text-anchor="middle">Emacs — *opencode: Refactor auth middleware*</text>
+
+    <g clip-path="url(#left-clip)">
+      <rect x="0" y="34" width="619" height="26" fill="#2B2B2B"/>
+      <text x="10" y="51" fill="#F0DFAF" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" xml:space="preserve"> agent:build  model:claude-sonnet-4-5</text>
+      <text x="607" y="51" fill="#F0DFAF" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end" xml:space="preserve">session:ses_9f4a2c18 </text>
+      <rect x="0" y="68" width="619" height="21" fill="#2f3338"/>
+      <rect x="8" y="68" width="15" height="21" fill="#4a2c2c"/>
+      <text x="11.5" y="83" fill="#dca3a3" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">$</text>
+      <text fill="#DCDCCC" x="30" y="83" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Extract bearer token verification into</tspan></text>
+      <rect x="0" y="89" width="619" height="21" fill="#2f3338"/>
+      <text fill="#DCDCCC" x="12" y="104" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">src/auth/verify.ts and run unit tests.</tspan></text>
+      <text fill="#DCDCCC" x="12" y="146" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#9f9f9f">TOOL&gt; read</tspan></text>
+      <text fill="#DCDCCC" x="12" y="167" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#9f9f9f">TOOL&gt; edit</tspan></text>
+      <text fill="#DCDCCC" x="12" y="188" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#9f9f9f">TOOL&gt; task</tspan></text>
+      <rect x="8" y="215" width="15" height="21" fill="#243a3c"/>
+      <text x="11.5" y="230" fill="#8cd0d3" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">»</text>
+      <text fill="#DCDCCC" x="30" y="230" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Extracted `verifyBearerToken` into</tspan></text>
+      <text fill="#DCDCCC" x="12" y="251" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">`src/auth/verify.ts` (18/18 tests pass):</tspan></text>
+      <text fill="#DCDCCC" x="12" y="293" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#93E0E3">export function verifyBearerToken(h?: string) {</tspan></text>
+      <text fill="#DCDCCC" x="12" y="314" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#93E0E3">  const tok = parseBearerHeader(h);</tspan></text>
+      <text fill="#DCDCCC" x="12" y="335" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#93E0E3">  return verifyJwtSignature(tok);</tspan></text>
+      <text fill="#DCDCCC" x="12" y="356" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#93E0E3">}</tspan></text>
+      <rect x="0" y="383" width="619" height="21" fill="#2f3338"/>
+      <text x="10" y="398" fill="#7ec699" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">➜</text>
+      <text fill="#DCDCCC" x="30" y="398" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Run the OAuth integration test suite.</tspan><tspan fill="#DCDCCC"> </tspan><tspan fill="#DCDCCC" font-weight="bold">▋</tspan></text>
+      <rect x="0" y="534" width="619" height="26" fill="#2B2B2B"/>
+      <text x="10" y="551" fill="#8FB28F" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" xml:space="preserve"> -U:---  *opencode: Refactor auth*   (OpenCode [idle]) — Composer Ready</text>
+    </g>
+    <rect x="619" y="34" width="2" height="526" fill="#232323"/>
+    <g clip-path="url(#right-clip)">
+      <rect x="621" y="34" width="619" height="26" fill="#2B2B2B"/>
+      <text x="631" y="51" fill="#F0DFAF" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" xml:space="preserve"> agent:build  model:claude-sonnet-4-5</text>
+      <text x="1228" y="51" fill="#F0DFAF" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end" xml:space="preserve">session:ses_9f4a2c18 </text>
+      <rect x="621" y="68" width="619" height="21" fill="#2f3338"/>
+      <rect x="629" y="68" width="15" height="21" fill="#4a2c2c"/>
+      <text x="632.5" y="83" fill="#dca3a3" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">$</text>
+      <text fill="#DCDCCC" x="651" y="83" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Extract bearer token verification into</tspan></text>
+      <rect x="621" y="89" width="619" height="21" fill="#2f3338"/>
+      <text fill="#DCDCCC" x="633" y="104" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">src/auth/verify.ts and run unit tests.</tspan></text>
+      <text fill="#DCDCCC" x="633" y="146" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#9f9f9f">TOOL&gt; edit</tspan></text>
+      <rect x="629" y="173" width="15" height="21" fill="#243a3c"/>
+      <text x="632.5" y="188" fill="#8cd0d3" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">»</text>
+      <text fill="#DCDCCC" x="651" y="188" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Extracted `verifyBearerToken` into</tspan></text>
+      <text fill="#DCDCCC" x="633" y="209" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">`src/auth/verify.ts` (18/18 tests pass).</tspan></text>
+      <rect x="621" y="236" width="619" height="21" fill="#2f3338"/>
+      <rect x="629" y="236" width="15" height="21" fill="#4a2c2c"/>
+      <text x="632.5" y="251" fill="#dca3a3" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" font-weight="bold">$</text>
+      <text fill="#DCDCCC" x="651" y="251" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">Run the OAuth integration test suite.</tspan></text>
+      <text fill="#DCDCCC" x="633" y="272" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DFAF8F" font-weight="bold">┌─ PERMISSION ─────────────────────────────</tspan></text>
+      <text fill="#DCDCCC" x="633" y="293" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│</tspan></text>
+      <text fill="#DCDCCC" x="633" y="314" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│  bash</tspan></text>
+      <text fill="#DCDCCC" x="633" y="335" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│</tspan></text>
+      <text fill="#DCDCCC" x="633" y="356" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│  npm run test:oauth</tspan></text>
+      <text fill="#DCDCCC" x="633" y="377" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│</tspan></text>
+      <text fill="#DCDCCC" x="633" y="398" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">│  C-c C-y </tspan><tspan fill="#DCDCCC">once</tspan><tspan fill="#DCDCCC">  C-c C-l </tspan><tspan fill="#DCDCCC">always</tspan><tspan fill="#DCDCCC">  C-c C-n </tspan><tspan fill="#DCDCCC">reject</tspan></text>
+      <text fill="#DCDCCC" x="633" y="419" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#DCDCCC">└───────────────────────────────────────────</tspan></text>
+      <text fill="#DCDCCC" x="633" y="440" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#9f9f9f">TOOL&gt; bash: running</tspan></text>
+      <text fill="#DCDCCC" x="633" y="482" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12.5" xml:space="preserve"><tspan fill="#b3b3b3">Receiving </tspan><tspan fill="#b3b3b3">▰</tspan></text>
+      <rect x="621" y="534" width="619" height="26" fill="#2B2B2B"/>
+      <text x="631" y="551" fill="#8FB28F" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="12" xml:space="preserve"> -U:---  *opencode: Refactor auth*   (OpenCode [streaming]) — Permission &amp; Live SSE</text>
+    </g>
+    <rect x="0.5" y="0.5" width="1239" height="559" rx="10" ry="10" fill="none" stroke="#555555" stroke-width="1"/>
+  </g>
+</svg>
