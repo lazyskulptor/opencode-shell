@@ -2,58 +2,128 @@
 
 [![License: MIT](https://img.shields.io/github/license/lazyskulptor/opencode-shell)](LICENSE)
 [![Emacs 27.1+](https://img.shields.io/badge/Emacs-27.1%2B-7F5AB6?logo=gnu-emacs&logoColor=white)](https://www.gnu.org/software/emacs/)
-[![OpenCode 1.18.30](https://img.shields.io/badge/OpenCode-1.18.30-111111)](https://opencode.ai/)
+[![OpenCode 1.18+](https://img.shields.io/badge/OpenCode-1.18%2B-111111)](https://opencode.ai/)
 
-An unofficial Emacs client for sessions owned by an OpenCode 1.18.30 HTTP
-server. Keep OpenCode conversations, approvals, questions, and project-scoped
-sessions in an editor-native workflow. This is an independent early-beta client,
-not an ACP bridge.
+An editor-native Emacs client for [OpenCode](https://opencode.ai/) HTTP
+sessions. Keep AI coding conversations, inline tool approvals, interactive
+questions, subagent navigation, and local/remote (TRAMP + SSH) project sessions
+inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybindings.
+
+```text
+┌─ *opencode:local: Refactor auth middleware [ses_9f2a…]* ─────────────────────┐
+│ Header: Refactor auth middleware | agent: build | model: anthropic/claude-… │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ █ Inspect the session timeout handler and fix the race condition.            │
+│                                                                              │
+│ TOOL> read                                                                   │
+│ TOOL> edit                                                                   │
+│                                                                              │
+│ ┃ I updated the timeout handler so expired buffers are cleaned up safely.    │
+│                                                                              │
+│   ↳ subagent ses_child_42  [open]                                            │
+│                                                                              │
+│ ┌─ PERMISSION ─────────────────────────────                                  │
+│ │  bash                                                                      │
+│ │  make test                                                                 │
+│ │  C-c C-y [once]  C-c C-l [always]  C-c C-n [reject]                        │
+│ └───────────────────────────────────────────                                 │
+│ Prompt>                                                                      │
+│ Run the full verification suite after the test passes.█                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Highlights
 
-- Browse, create, resume, fork, and relocate project-scoped OpenCode sessions.
-- Write prompts in a multiline Emacs composer while completed transcript regions
-  remain read-only.
-- Answer pending permissions and questions inline without losing the current
-  draft.
-- Use validated SSE message/part deltas for responsive updates, with bounded
-  asynchronous polling and authoritative snapshot recovery.
-- Protect editor state: spinner updates, unchanged snapshots, and hidden-buffer
-  reconciliation preserve text, point, markers, viewport, draft, and undo history.
-- Connect to local or remote profiles with directory translation, auth-source
-  lookup, and safe local-server lifecycle controls.
+- **Editor-native transcript & composer**: Write multiline prompts in a normal
+  writable region at the bottom of the buffer (`dd`, `I`, `A`, `o`, `O`, and
+  standard undo work naturally) while completed turns above remain read-only.
+- **Inline permissions & questions**: Approve (`once` / `always` / `reject`) or
+  answer agent questions inline without losing your current draft or point.
+- **Subagent awareness**: Permissions and questions from nested subagents bubble
+  up to the parent buffer, and spawned subagent sessions appear as clickable
+  inline links right under the turn that launched them.
+- **Session lifecycle management**: Browse, filter, create, resume, fork from
+  any historical prompt (`M-x opencode-shell-fork-session`), LLM-rename
+  (`M-x opencode-shell-rename-session`), or relocate project sessions.
+- **Non-blocking SSE + snapshot architecture**: Real-time `/event` SSE deltas
+  with coalesced idle rendering, zero synchronous waits, and authoritative
+  snapshot recovery that never clobbers your cursor, viewport, or undo history.
+- **Local & remote (TRAMP / SSH) profiles**: Automatically start a local
+  `opencode serve` process or manage an SSH port-forward to a remote server with
+  automatic TRAMP path translation and `auth-source` integration.
 
-## Quick start
+## Installation & Quick Start
 
-1. Start an OpenCode 1.18.30-compatible HTTP server. The default local endpoint
-   is `http://127.0.0.1:4199`.
-2. Clone this repository and add its directory to `load-path`.
-3. Evaluate `(require 'opencode-shell)`.
-4. Run `M-x opencode-shell` from a project directory, select a server, then open
-   or create a session.
+### `use-package` with `straight.el`
 
-For a local development checkout, evaluate the following in Emacs:
+```elisp
+(use-package opencode-shell
+  :straight (opencode-shell :type git :host github
+                            :repo "lazyskulptor/opencode-shell"
+                            :files ("*.el"))
+  :bind (("C-c o l" . opencode-shell)
+         ("C-c o s" . opencode-shell-start)
+         ("C-c o b" . opencode-shell-switch-buffer)
+         ("C-c o f" . opencode-shell-find-session))
+  :config
+  (setq opencode-shell-profiles
+        '((:name "local"
+           :base-url "http://127.0.0.1:4199"
+           :start-command ("opencode" "serve" "--port" "4199")
+           :stop-on-exit t))))
+```
+
+### `use-package` with built-in `:vc` (Emacs 29+)
+
+```elisp
+(use-package opencode-shell
+  :vc (:url "https://github.com/lazyskulptor/opencode-shell" :rev :newest)
+  :bind (("C-c o l" . opencode-shell)
+         ("C-c o s" . opencode-shell-start)
+         ("C-c o b" . opencode-shell-switch-buffer)
+         ("C-c o f" . opencode-shell-find-session)))
+```
+
+### Manual checkout
 
 ```elisp
 (add-to-list 'load-path "/path/to/opencode-shell")
 (require 'opencode-shell)
 ```
 
+1. Open any file inside your project and run `M-x opencode-shell-start` (or
+   `C-c o s`) to start a new session in the project root, or `M-x opencode-shell`
+   (`C-c o l`) to browse existing sessions.
+2. Type your prompt below `Prompt>` and press `C-c C-c` (or `RET` in Evil normal
+   state / `s-RET`) to send.
+3. Press `?` in any browser or transcript buffer to open the interactive
+   Transient command menu.
+
+## Keybindings at a Glance
+
+| Context | Key (Vanilla / Evil) | Action |
+| :--- | :--- | :--- |
+| **Global** | `C-c o s` | Start a new session in the current project root |
+| | `C-c o l` | Open the session browser for the current project |
+| | `C-c o b` | Switch between live transcript buffers |
+| | `C-c o f` | Open a session browser from saved project locations |
+| **Transcript** | `C-c C-c` / `s-RET` / Evil `RET` | Submit the prompt in `Prompt>` |
+| | `C-n` / `C-p` | Jump to next / previous user prompt (and `Prompt>`) |
+| | `C-c C-v` | Select model (per agent) |
+| | `C-c C-m` / `C-<tab>` | Select or cycle primary agent |
+| | `C-c C-o` | Open spawned subagent session |
+| | `a` (normal) | Abort active response |
+| | `g` / `g r` (normal) | Resync session snapshot |
+| | `?` (normal) | Open Transient help & command menu |
+| **Permissions & Questions** | `C-c C-p` | Jump to pending permission / question card |
+| | `C-c C-y` / `C-c C-l` / `C-c C-n` | Allow once / Allow always / Reject permission |
+| | `RET` or `a` / `r` | Answer / Reject pending question |
+
 Use `M-x opencode-shell-log` to inspect privacy-safe lifecycle diagnostics when
 troubleshooting. See [Contributing](CONTRIBUTING.md) for development workflow and
 [the conversation pipeline](docs/conversation-pipeline.md),
 [testing guide](docs/testing.md), and
 [async runtime design](docs/async-runtime.md) for detailed contributor contracts.
-
-## Installation and configuration
-
-Add this checkout to `load-path`, then `(require 'opencode-shell)`. For the
-original single-server setup, the local endpoint defaults to
-`http://127.0.0.1:4199`; configure `opencode-shell-base-url` to override it,
-then run `M-x opencode-shell` to select a server and open sessions for the
-current project root. Root detection
-prefers active Projectile and `project.el` projects, then a Git root, and falls
-back to the current Emacs directory.
 
 ## Profiles
 
