@@ -1,7 +1,7 @@
 # opencode-shell
 
 [![License: MIT](https://img.shields.io/github/license/lazyskulptor/opencode-shell)](LICENSE)
-[![Emacs 27.1+](https://img.shields.io/badge/Emacs-27.1%2B-7F5AB6?logo=gnu-emacs&logoColor=white)](https://www.gnu.org/software/emacs/)
+[![Emacs 28.1+](https://img.shields.io/badge/Emacs-28.1%2B-7F5AB6?logo=gnu-emacs&logoColor=white)](https://www.gnu.org/software/emacs/)
 [![OpenCode 1.18+](https://img.shields.io/badge/OpenCode-1.18%2B-111111)](https://opencode.ai/)
 
 An editor-native Emacs client for [OpenCode](https://opencode.ai/) HTTP
@@ -121,8 +121,8 @@ inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybinding
 | `C-c C-v` | `opencode-shell--select-model` | Select model for the active agent (persisted per agent) |
 | `C-c C-m` / `C-<tab>` | `opencode-shell--select-agent` / `next-agent` | Select or cycle visible primary agents |
 | `C-c C-a` / normal `a` | `opencode-shell--abort` | Abort the active assistant response |
-| `C-c C-g` / normal `g` / `g r` | `opencode-shell--resync` | Resync authoritative session snapshot (and retry SSH recovery if offline) |
-| normal `?` | `opencode-shell-help` | Open transcript Transient menu |
+| `C-c C-r` / normal `g` / `g r` | `opencode-shell--resync` | Resync authoritative session snapshot (and retry SSH recovery if offline) |
+| `C-c ?` / normal `?` | `opencode-shell-help` | Open transcript Transient menu |
 | Header mouse-1 | `opencode-shell-copy-session-id` | Click `session:<id>` in the header line to copy the session ID |
 
 ### Inline Permissions, Questions & Subagents

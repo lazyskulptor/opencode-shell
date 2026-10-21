@@ -2,9 +2,8 @@
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, processes
+
 ;;; Commentary:
 
 ;; Small, safe Markdown fontification for `opencode-shell'.  Source text is

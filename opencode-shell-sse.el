@@ -2,7 +2,6 @@
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
-;; Package-Requires: ((emacs "27.1"))
 
 ;;; Commentary:
 

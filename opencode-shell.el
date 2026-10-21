@@ -1,10 +1,12 @@
-;;; opencode-shell.el --- Unofficial Emacs client for OpenCode -*- lexical-binding: t; -*-
+;;; opencode-shell.el --- Interactive client for OpenCode HTTP sessions -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (transient "0.3.7"))
+;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, processes
+;; URL: https://github.com/lazyskulptor/opencode-shell
+
 ;;; Commentary:
 
 ;; Unofficial Emacs client for sessions owned by an OpenCode HTTP server.
@@ -1828,7 +1830,7 @@ Return non-nil when cached capabilities were applied."
     (define-key map (kbd "C-c C-v") #'opencode-shell--select-model)
     (define-key map (kbd "C-c C-m") #'opencode-shell--select-agent)
     (define-key map (kbd "C-<tab>") #'opencode-shell--next-agent)
-    (define-key map (kbd "C-c C-g") #'opencode-shell--resync)
+    (define-key map (kbd "C-c C-r") #'opencode-shell--resync)
     (define-key map (kbd "C-c C-a") #'opencode-shell--abort)
     (define-key map (kbd "C-c C-p") #'opencode-shell--permissions)
     (define-key map (kbd "C-c C-y") #'opencode-shell--permission-allow-once)
@@ -1836,7 +1838,7 @@ Return non-nil when cached capabilities were applied."
     (define-key map (kbd "C-c C-n") #'opencode-shell--permission-reject)
     (define-key map (kbd "C-c C-q") #'opencode-shell--questions)
     (define-key map (kbd "C-c C-o") #'opencode-shell--open-descendant-session)
-    (define-key map (kbd "C-c C-h") #'describe-mode)
+    (define-key map (kbd "C-c ?") #'opencode-shell-help)
     (define-key map (kbd "C-n") #'opencode-shell--next-turn)
     (define-key map (kbd "C-p") #'opencode-shell--previous-turn)
     map))
@@ -2180,8 +2182,7 @@ polluting the user's undo history."
             #'opencode-shell--schedule-table-layout nil t)
   (add-hook 'window-configuration-change-hook
             #'opencode-shell--render-if-visible nil t)
-  (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t)
-  )
+  (add-hook 'kill-buffer-hook #'opencode-shell--cleanup nil t))
 
 (defun opencode-shell--cleanup ()
   "Cancel timers, close the session log, and invalidate callbacks."
@@ -4546,11 +4547,13 @@ When FULL is non-nil, also refresh metadata and capabilities."
         (overlay-put opencode-shell--composer-protection-overlay
                      'modification-hooks nil)))))
 
-(defvar evil-move-beyond-eol nil)
+(defvar evil-move-beyond-eol)
 (defvar evil-local-mode)
 
 (defun opencode-shell--configure-evil-buffer ()
   "Apply Evil policy local to an OpenCode transcript buffer."
+  (unless (default-boundp 'evil-move-beyond-eol)
+    (set-default 'evil-move-beyond-eol nil))
   (setq-local evil-move-beyond-eol t))
 
 (defun opencode-shell--evil-open-below (count)
@@ -5340,16 +5343,22 @@ ACTIVE means that their session browser is already live."
 (dolist (command opencode-shell--mode-commands)
   (put command 'completion-predicate #'ignore))
 
-(with-eval-after-load 'evil
-  (opencode-shell--setup-evil)
-  ;; Remove relocation hooks left in buffers by older loaded versions.
-  (remove-hook 'opencode-shell-mode-hook
-               (intern "opencode-shell--enable-evil-composer-hook"))
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (derived-mode-p 'opencode-shell-mode)
-        (remove-hook 'evil-insert-state-entry-hook
-                     (intern "opencode-shell--evil-move-to-composer") t)))))
+(defun opencode-shell--activate-evil ()
+  "Activate Evil integration and clean up legacy buffer hooks when Evil is loaded."
+  (when (featurep 'evil)
+    (opencode-shell--setup-evil)
+    (remove-hook 'opencode-shell-mode-hook
+                 (intern "opencode-shell--enable-evil-composer-hook"))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (derived-mode-p 'opencode-shell-mode)
+          (remove-hook 'evil-insert-state-entry-hook
+                       (intern "opencode-shell--evil-move-to-composer") t))))))
+
+(opencode-shell--activate-evil)
+(add-hook 'evil-mode-hook #'opencode-shell--activate-evil)
+(add-hook 'opencode-shell-mode-hook #'opencode-shell--activate-evil)
+(add-hook 'opencode-shell-sessions-mode-hook #'opencode-shell--activate-evil)
 
 (provide 'opencode-shell)
 ;;; opencode-shell.el ends here
