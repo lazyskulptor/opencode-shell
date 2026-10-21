@@ -24,14 +24,16 @@ inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybinding
   up to the parent buffer, and spawned subagent sessions appear as clickable
   inline links right under the turn that launched them.
 - **Session lifecycle management**: Browse, filter, create, resume, fork from
-  any historical prompt (`M-x opencode-shell-fork-session`), LLM-rename
-  (`M-x opencode-shell-rename-session`), or relocate project sessions.
+  any historical prompt, auto-rename via OpenCode's `title` agent, or move
+  sessions across project directories.
 - **Non-blocking SSE + snapshot architecture**: Real-time `/event` SSE deltas
   with coalesced idle rendering, zero synchronous waits, and authoritative
   snapshot recovery that never clobbers your cursor, viewport, or undo history.
 - **Local & remote (TRAMP / SSH) profiles**: Automatically start a local
   `opencode serve` process or manage an SSH port-forward to a remote server with
   automatic TRAMP path translation and `auth-source` integration.
+
+---
 
 ## Installation & Quick Start
 
@@ -72,364 +74,157 @@ inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybinding
 (require 'opencode-shell)
 ```
 
-1. Open any file inside your project and run `M-x opencode-shell-start` (or
-   `C-c o s`) to start a new session in the project root, or `M-x opencode-shell`
+### Quick Start
+
+1. Open any file inside your project and run `M-x opencode-shell-start`
+   (`C-c o s`) to start a new session in the project root, or `M-x opencode-shell`
    (`C-c o l`) to browse existing sessions.
-2. Type your prompt below `Prompt>` and press `C-c C-c` (or `RET` in Evil normal
-   state / `s-RET`) to send.
-3. Press `?` in any browser or transcript buffer to open the interactive
-   Transient command menu.
+2. Type your prompt at the bottom composer (`➜`) and press `C-c C-c` (or `RET`
+   in Evil normal state / `s-RET`) to send.
+3. Press `?` in any browser or transcript buffer to open the Transient command menu.
 
-## Keybindings at a Glance
+---
 
-| Context | Key (Vanilla / Evil) | Action |
+## Commands & Keybindings
+
+### Global Entry Points
+
+| Key | Command | Description |
 | :--- | :--- | :--- |
-| **Global** | `C-c o s` | Start a new session in the current project root |
-| | `C-c o l` | Open the session browser for the current project |
-| | `C-c o b` | Switch between live transcript buffers |
-| | `C-c o f` | Open a session browser from saved project locations |
-| **Transcript** | `C-c C-c` / `s-RET` / Evil `RET` | Submit the prompt in `Prompt>` |
-| | `C-n` / `C-p` | Jump to next / previous user prompt (and `Prompt>`) |
-| | `C-c C-v` | Select model (per agent) |
-| | `C-c C-m` / `C-<tab>` | Select or cycle primary agent |
-| | `C-c C-o` | Open spawned subagent session |
-| | `a` (normal) | Abort active response |
-| | `g` / `g r` (normal) | Resync session snapshot |
-| | `?` (normal) | Open Transient help & command menu |
-| **Permissions & Questions** | `C-c C-p` | Jump to pending permission / question card |
-| | `C-c C-y` / `C-c C-l` / `C-c C-n` | Allow once / Allow always / Reject permission |
-| | `RET` or `a` / `r` | Answer / Reject pending question |
+| `C-c o s` | `opencode-shell-start` | Start a new session in the current project root |
+| `C-c o l` | `opencode-shell` | Open the session browser for the current project |
+| `C-c o b` | `opencode-shell-switch-buffer` | Switch between live transcript buffers |
+| `C-c o f` | `opencode-shell-find-session` | Open a session browser from saved project locations (`C-k` removes a saved entry) |
+| `M-x` | `opencode-shell-find-session-with-server` | Browse saved + live server-discovered project directories (`F` in Transient menu) |
 
-Use `M-x opencode-shell-log` to inspect privacy-safe lifecycle diagnostics when
-troubleshooting. See [Contributing](CONTRIBUTING.md) for development workflow and
-[the conversation pipeline](docs/conversation-pipeline.md),
-[testing guide](docs/testing.md), and
-[async runtime design](docs/async-runtime.md) for detailed contributor contracts.
+> Each configured profile alias also generates `<alias>` convenience commands such as
+> `M-x opencode-shell-local-sessions` and `M-x opencode-shell-local-start`.
 
-## Profiles
+### Session Browser (`opencode-shell-browser-mode`)
 
-`opencode-shell-profiles` is a list of named plists. A profile can select its
-`:base-url`, optional remote client `:directory`,
-authentication source, and local server lifecycle settings. Session inventory
-is scoped to the invocation buffer's `default-directory`, translated to the
-server-native absolute path.
-`M-x opencode-shell` always selects a server first. Browser and new-session
-commands use the detected client project root as the server-native directory, so
-calls from nested directories share one project session history. If remote root
-detection returns only the configured home while invoked below it, the invocation
-directory is used instead. Each alias also generates
-`opencode-shell-<alias>-sessions` and `opencode-shell-<alias>-start`, such as
-`opencode-shell-local-sessions` and `opencode-shell-local-start`. The start
-command creates a title-less session in the current directory and opens it.
+| Key | Action |
+| :--- | :--- |
+| `RET` | Open selected session in its server-reported directory |
+| `c` | Create a new session in the browser's directory |
+| `d` | Delete selected session (with confirmation) |
+| `/` | Filter sessions by text |
+| `T` | Toggle visibility of subagent child sessions |
+| `g` / `g r` | Refresh session list |
+| `?` | Open browser Transient menu |
 
-Profile `:name` values and identity keys must be unique; set an explicit `:id`
-when an identity must survive a name or URL change. A remote profile's
-`:directory` is a TRAMP root, normally the remote user's home. Root matching
-chooses the most specific matching remote identity. A same-host TRAMP `~/` path
-uses the profile's absolute home root, so `~/workspace/` and its absolute
-spelling address the same server directory. OpenCode request paths come
-from the resolved TRAMP path's native localname, preserving relative descendants
-without sending TRAMP syntax to the server. Local profiles omit `:directory`:
-their current native project root is already the server path. When exactly one
-directory-less local profile is configured it is selected automatically; multiple
-such local profiles require explicit selection. Buffers are
-profile-qualified, so identical session IDs on different servers never share a
-browser or transcript buffer.
+### Transcript & Composer (`opencode-shell-mode`)
 
-`:workspace` is no longer supported. Migrate a remote profile by setting its
-single `:directory` to the corresponding TRAMP user-home root; remove both path
-keys from local profiles. `:server-directory` is unrelated to request mapping:
-it is only the working directory of a locally started OpenCode process.
+| Key (Vanilla / Evil) | Command | Description |
+| :--- | :--- | :--- |
+| `C-c C-c` / `s-RET` / normal `RET` | `opencode-shell--submit` | Submit the prompt in the bottom composer (`RET` in insert state inserts a newline) |
+| `C-n` / `C-p` | `opencode-shell--next-turn` / `previous-turn` | Jump between submitted user prompts and the bottom composer |
+| `C-c C-v` | `opencode-shell--select-model` | Select model for the active agent (persisted per agent) |
+| `C-c C-m` / `C-<tab>` | `opencode-shell--select-agent` / `next-agent` | Select or cycle visible primary agents |
+| `C-c C-a` / normal `a` | `opencode-shell--abort` | Abort the active assistant response |
+| `C-c C-g` / normal `g` / `g r` | `opencode-shell--resync` | Resync authoritative session snapshot (and retry SSH recovery if offline) |
+| normal `?` | `opencode-shell-help` | Open transcript Transient menu |
+| Header mouse-1 | `opencode-shell-copy-session-id` | Click `session:<id>` in the header line to copy the session ID |
 
-Profiles may provide an argv-style start command, server working directory,
-health path, and bounded startup timeout. A remote profile's start command runs
-locally and may own a transport such as an SSH tunnel; it never manages the
-remote OpenCode service behind that transport. Lifecycle is shared by
-canonical base URL: profiles using one endpoint reuse one health probe, start
-attempt, owned process, stop/restart state, and exit cleanup while retaining
-their own directory, authentication, sessions, and capabilities. Profiles for
-one endpoint must specify compatible start command, health path, server
-directory, timeout, health authentication header, and `:stop-on-exit` setting;
-configuration conflicts fail before startup. `<alias>-start`,
-`M-x opencode-shell-status`, and `M-x opencode-shell-restart` provide explicit
-control. Internal cleanup only terminates a live process started and owned
-by this Emacs client. Killing a browser or transcript does not stop that
-process. Owned processes are stopped once when Emacs exits unless the shared
-profiles consistently set `:stop-on-exit` to nil. Profiles using a TRAMP
-directory or a non-loopback server URL are remote; `:remote` can also force
-remote classification.
+### Inline Permissions, Questions & Subagents
 
-Canonical lifecycle URLs treat loopback host spellings, a trailing slash, and
-explicit default HTTP/HTTPS ports as the same endpoint. A healthy server not
-started by this client is tracked as non-owned for shared configuration
-validation and is never stopped. A failed probe cannot replace a still-live
-owned process; use the explicit restart command to replace it.
+When a tool requires approval or asks a question, an inline card appears above
+the composer while preserving your draft and cursor position. Action labels on
+the card are also mouse-clickable.
 
-## Commands
+| Key | Command | Description |
+| :--- | :--- | :--- |
+| `C-c C-p` / normal `P` | `opencode-shell--permissions` | Jump to the active permission card |
+| `C-c C-y` (or `y` on card) | `opencode-shell--permission-allow-once` | Allow tool execution once |
+| `C-c C-l` (or `a` on card) | `opencode-shell--permission-allow-always` | Always allow matching tool pattern |
+| `C-c C-n` (or `n` / `r` on card) | `opencode-shell--permission-reject` | Reject tool execution |
+| `C-c C-q` / normal `Q` (or `RET` / `a` on card) | `opencode-shell--questions` | Answer pending agent question |
+| `r` (on question card) | `opencode-shell--question-reject` | Reject pending agent question |
+| `C-c C-o` | `opencode-shell--open-descendant-session` | Open spawned subagent session (at point, sole subagent, or via prompt) |
 
-Each session browser is fixed to one server-native directory and encoded in its
-buffer identity. Use `/` for a text filter, `g` to
-refresh, `c` to create in that fixed directory, `RET` to open, and `d` for
-confirmed delete. Child sessions created by subagents are hidden by default;
-use `T` to show or hide them without deleting their server history. `RET` uses
-the selected row's exact server-reported directory, which is
-then immutable for transcript history, prompts, aborts, permissions, questions,
-and status requests. A transcript buffer has a subtly highlighted multiline
-    composer on the line below the read-only `Prompt>` label; `RET` inserts a
-    newline, while `C-c C-c` or `s-RET` submits it. Evil normal-state movement
-    can land on an empty composer without adding placeholder text. Submitted
-    prompts retain the composer's background and, like polled responses above
-    the composer, are read-only. `C-n` and `C-p` move to the next and previous
-    submitted `USER>` prompt without wrapping; an Evil move enters normal state.
-     Use `C-c C-v` to select the model and `C-c C-m` to select the agent; `C-<tab>`
-     cycles visible primary agents. Each agent retains its selected model; reopening
-     a session restores the latest submitted agent and its model from server history.
-     Both selections appear with the generated session title in the transcript header
-     and affect subsequent prompt payloads. The title updates on session open and an
-explicit `g` resync when the session snapshot reports OpenCode's generated title.
-Each prompt carries a stable message ID. SSE events wake authoritative snapshot
-reconciliation, with periodic polling retained for fallback and recovery. Each
-recurring reconciliation is limited to message history and pending permissions
-and questions; session metadata and model/agent capabilities are full-resync data.
-When a session opens, the Composer stays unavailable until successful message,
-permission, and question snapshots have all arrived, including valid empty
-snapshots. A transient failure keeps input blocked and shows a recovery message;
-read-only snapshots that never return expire so they cannot hold a polling guard
-forever. Use `g r` to retry authoritative hydration; late replies to expired
-snapshots cannot replace newer results. Prompt submissions are not replayed.
-While the Composer is blocked, its retained region remains read-only and Evil
-editing commands are inert outside the writable Composer.  Blocking returns
-Evil to normal state; completion restores Composer editability but does not
-enter insert state automatically.
-The transcript shows sending, waiting, receiving, recovering, aborting, or error
-state and never replaces an already completed response with stale data. Pending
-status uses a bounded right-growing spinner that advances on the UI-only
-`opencode-shell-animation-interval` (0.2 seconds by default), resets when the
-current session receives transcript progress, and cycles independently of polling.
-Spinner frames use overlay presentation, so they do not change transcript bytes,
-markers, point, or undo history and do not issue requests. Reasoning-only updates show `Thinking`;
-text or tool activity shows `Receiving`.
-While a turn is active, received assistant text and payload-free tool names with
-their current statuses appear above the still-running spinner. The Composer stays
-blocked until authoritative turn completion; reasoning text and tool input/output
-are never displayed. Intermediate updates share the normal 0.25-second keyed
-idle queue with completion and permission changes. Spinner animation stays
-independent; hidden buffers retain state without editing their transcript
-until displayed.
-Assistant completion comes from the matching message's `time.completed`
-metadata together with either a genuinely terminal `finish` value or a
-terminal `error`; `step-finish` is retained only as compatible evidence when
-`finish` is absent. A `finish` of `tool-calls` means another step is coming
-and is never treated as completion, and a completed tool or idle session
-status does not complete the whole assistant turn; running tools keep the
-response active — except a `task` tool left running with no completion
-metadata after its subagent detaches, which the server never settles itself;
-once the session is reported idle, that turn completes the way the web UI
-shows it, rather than hanging indefinitely. When a turn ends via a terminal error — auth failure, a
-token/output-length or context limit, a content filter, a provider/API error,
-or an abort — the transcript shows a bounded `[name: message]` reason line
-after the response instead of silently rendering a blank one. Submitting a new
-prompt automatically settles any older nonterminal turn as interrupted; history
-reconciliation applies the same rule to persisted sessions where a later prompt
-already proves an older turn is orphaned. A successful explicit abort likewise
-settles the active turn before resync. These safeguards do not use session idle
-alone as completion evidence.
+### Session & Server Management (`M-x`)
 
-Completed assistant pipe tables fit the selected transcript window by wrapping
-long cells. Resizing recalculates conventional tables outside fenced code; all
-other Markdown stays unchanged, and each turn retains the verbatim source.
+| Command | Description |
+| :--- | :--- |
+| `M-x opencode-shell-fork-session` | Fork the current session immediately before any chosen historical prompt (works even while a later turn is still running) |
+| `M-x opencode-shell-rename-session` | Ask OpenCode's hidden `title` agent to summarize and retitle the session, then clean up the temporary exchange |
+| `M-x opencode-shell-move-session-directory` | Rebind the current buffer's project directory scope client-side without losing history or state |
+| `M-x opencode-shell-status` | Show server health and owned process lifecycle status |
+| `M-x opencode-shell-restart` | Restart the managed local process or SSH transport for a profile |
+| `M-x opencode-shell-log` | Open the privacy-safe diagnostic log buffer (`*OpenCode Shell Log*` or session log) |
 
-Diagnostic logging is disabled by default. Customize
-`opencode-shell-log-requests` to enable it; API requests are then correlated by a
-short ID in `*OpenCode Shell Log*` before a session exists and in a
-session-specific log buffer afterwards. Open the relevant buffer with `M-x
-opencode-shell-log`. Non-routine requests log their start and outcome.
-Successful message, permission, and question snapshots stay out of the log;
-failures and semantic lifecycle transitions remain visible. Bodies, query parameters,
-authentication headers, and error response bodies are never logged.
-Model completion is limited to providers reported as connected by the server;
-agent completion shows only server-advertised visible primary agents.
-`g` resyncs, `a` aborts, and `P`/`Q` retain the explicit permission/question
-flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
-bindings when Evil is available.
+---
 
-`M-x opencode-shell-fork-session` is available without a dedicated keybinding
-and, unlike other session actions, does not require an idle transcript: a fork
-boundary is always a specific past prompt, so a turn still generating after it
-does not block the fork. Its minibuffer lists user prompts in chronological
-order, marking any still in progress; choosing one forks immediately before
-that prompt. The returned session opens in its reported directory.
+## Configuration & Profiles
 
-`M-x opencode-shell-rename-session` is also unbound and requires an idle
-transcript. It sends a throwaway message to OpenCode's built-in hidden `title`
-agent so it judges the full conversation so far and proposes a new title, then
-applies that title with the same server-side `PATCH` the title bar already
-reflects. As soon as the reply arrives, the throwaway exchange is removed
-locally and deleted server-side so it does not linger in the transcript;
-while the title agent is still generating, its reply may still stream
-visibly for that brief window.
+Configure `opencode-shell-profiles` as a list of named plists. When a single
+local profile is configured, it is selected automatically.
 
-`M-x opencode-shell-move-session-directory` is a separate unbound function for
-a transcript. It reads a destination, normalizes it to that project's root, and
-updates the same buffer's server request scope and Emacs `default-directory`.
-The client persists this directory override, so the session moves from the old
-project browser to the destination browser even when the server retains its
-original directory metadata.
-The session ID, visible history, composer, and polling state stay in that buffer.
-This is a client-side scope change; it does not mutate persisted server metadata.
+### Example: Local + Remote (TRAMP / SSH Tunnel)
 
-Use `?` in either the browser or transcript for its context-specific Transient
-menu. Global `C-c o l` opens the browser, `C-c o s` starts a session, `C-c o b`
-selects only live transcript buffers, and `C-c o f` selects a saved profile/path
-from the local location file without requesting server sessions. Use uppercase
-`F` in either OpenCode action menu when live and server-discovered paths should
-also be included. In either selector, `C-k` removes the selected saved path from
-the local location file; it never deletes a server session or directory.
-`C-n` and `C-p` move between submitted `USER>` prompts; after the final completed
-response, `C-n` moves to the visible writable `Prompt>`. Hidden or blocked
-Composers are not navigation targets.
-In transcript Evil normal state, `?` opens this help and `RET` submits the
-composer. Insert state keeps `?` as text input and `RET` as a newline. Native
-Evil edits such as `dd`, `I`, `A`, `o`, and `O` retain their standard behavior
-inside the composer. Entering insert state does not move point; editing from the
-    transcript reports that the transcript is read-only. The Evil end-of-line
-    policy is local to transcript buffers and does not change other buffers.
+```elisp
+(setq opencode-shell-profiles
+      '(;; Local server automatically started by Emacs
+        (:name "local"
+         :base-url "http://127.0.0.1:4199"
+         :start-command ("opencode" "serve" "--port" "4199")
+         :stop-on-exit t)
 
-Pending permissions appear one at a time in a boxed read-only block above `Prompt>`. Use
-`C-c C-p` to jump there. In either Evil insert or normal state, use `C-c C-y`
-to allow once, `C-c C-l` to always allow, or `C-c C-n` to
-reject. The request context remains visible and the composer draft is preserved.
-Permission IDs are authoritative: repeated server snapshots and reply callbacks
-do not duplicate a box or resolved result. Distinct pending IDs remain separately
-queued. A reply replaces the current card with its result and advances to the next
-pending card. Persistent `always` matching is delegated to OpenCode without an
-additional Emacs confirmation. During an active response, `Prompt>` stays hidden and polling continues
-until both the assistant response and every permission request are settled.
-Pending questions use the same single inline interaction area after permissions.
-The card shows `Waiting for answer`; use `RET` or `a` to answer and `r` to reject.
-Questions block prompt readiness until their authoritative snapshot clears, and
-each action immediately resyncs question and tool state. Both cards' action
-words (`once`/`always`/`reject`, `answer`/`reject`) are also mouse-clickable.
-A permission or question raised by a subagent (or a subagent of a subagent)
-surfaces in the same card instead of silently stalling the subagent. A known
-subagent session also renders as its own clickable line right after the turn
-whose tool call spawned it (derived from that turn's retained part data, so it
-stays correct across reopens); subagents whose spawning turn cannot be resolved
-are not bunched at the top. While the subagent is itself running the line shows a spinner: its running
-state comes from the subagent's own `/session/status`, polled only while
-subagents are known, so it reflects the subagent rather than merely its
-spawning turn (before the first status poll it falls back to the turn's
-activity). `C-c C-o` opens the one at point, the sole known subagent directly,
-or prompts when there are several.
+        ;; Remote server accessed via local SSH port-forward + TRAMP
+        (:name "gpu-box"
+         :base-url "http://127.0.0.1:14199"
+         :directory "/ssh:dev@gpu-box:/home/dev"
+         :start-command ("ssh" "-N" "-L" "14199:127.0.0.1:4199" "dev@gpu-box")
+         :auth-source (:host "gpu-box" :user "opencode")
+         :stop-on-exit t)))
+```
 
-The session buffer uses normal text editing rather than `special-mode`. Only the
-visible bottom composer is writable; each submitted user prompt and its response are
-separate read-only regions owned by a buffer-local turn record. Poll updates
-replace turn regions without changing composer text or point. Evil's ordinary
-editing commands are left intact and are never redirected from protected text.
-Transcript, status, and interaction-card updates do not enter undo history.
-Submitting starts a fresh composer undo history, so undo cannot restore a sent
-draft; edits to the current draft remain normally undoable.
-An ambiguous `prompt_async` failure keeps the attempted turn visible and polls
-history for its stable ID instead of automatically submitting it again.
-Observed tool parts add payload-free `TOOL> name` lines (for example `bash`,
-`edit`, or `write`) without exposing tool inputs or outputs.
+### Profile Options
 
-For polling diagnostics, enable `opencode-shell-log-requests` and run
-`M-x opencode-shell-log` from the transcript buffer. Lifecycle lines are emitted
-when state changes and name the local blockers, completion metadata, tool-state
-counts, pending permission count, and submit reconciliation state. Routine
-unchanged snapshots are semantic no-ops. Validated message and part SSE events
-update only their target session and turn; unknown events, reconnects, and
-fallback polling trigger bounded snapshot reconciliation. Logs intentionally exclude message/reasoning text,
-tool input/output, permission descriptions and patterns, request bodies, query
-parameters, directories, authorization values, and server error bodies.
-The network cadence remains controlled independently by
-`opencode-shell-poll-interval` (2 seconds by default); spinner ticks are not logged
-as polls because they perform no network work.
+| Key | Description |
+| :--- | :--- |
+| `:name` | Unique profile name (also used to generate `opencode-shell-<name>-start` / `-sessions`) |
+| `:id` | Optional stable identity key that survives `:name` or `:base-url` changes |
+| `:base-url` | HTTP(S) URL of the OpenCode server |
+| `:directory` | Remote profiles only: TRAMP root directory (typically the remote user's home). Omit for local profiles |
+| `:start-command` | Optional argv list to launch a local `opencode serve` or SSH tunnel |
+| `:server-directory` | Working directory for the locally spawned `:start-command` process |
+| `:health-path` / `:timeout` | Optional health endpoint path and bounded startup timeout |
+| `:stop-on-exit` | Stop Emacs-started process when Emacs exits (`t` by default when consistent across profiles sharing an endpoint) |
+| `:auth-source` / `:auth-header` | On-demand `auth-source` query plist and optional custom header name (defaults to `Authorization`, value sent verbatim) |
+| `:remote` | Explicitly mark a profile as remote (inferred automatically for TRAMP `:directory` or non-loopback URLs) |
 
-Async runtime lines report only bounded control state such as
-`transport=sse`, `transport=fallback`, typed failure reason, circuit state,
-reconnect delay, poll wakeups,
-and deferred hidden rendering. They never include SSE payloads, transcript text,
-request bodies, directories, or authorization values. A healthy local runtime
-normally shows one SSE connection regardless of the number of transcript buffers;
-fallback lines followed by reconnect lines indicate automatic recovery.
-SSH-forwarded remote profiles pause HTTP polling after a transport disconnect and
-show one offline notice instead of repeating connection errors. SSH forwarding
-is retried asynchronously with a finite budget; if it remains unavailable,
-`g r` starts a new client-side SSH-first recovery attempt without restarting the
-remote OpenCode service or replaying a submitted prompt.
-Active remote transcripts keep their original buffers and reconcile full server
-snapshots when forwarding returns; an idle transcript refreshes on next display
-or `g r`. A working SSH connection does not itself complete a server-side turn.
+---
 
-## Asynchronous runtime principles
+## Architecture & Diagnostics
 
-Interactive commands never wait synchronously for network or process I/O.
-Transport callbacks decode validated application events but do not directly
-rewrite transcript or browser buffers. Session-scoped message and part deltas
-update an ID-indexed local state store; UI work is coalesced and applied at idle
-time, and hidden buffers retain dirty state without spending time rendering it.
-OpenCode's `/event` SSE endpoint is the primary update path, shared per server;
-initial, reconnect, integrity, and fallback snapshots remain authoritative recovery.
-`opencode-shell-sse.el` owns byte-level HTTP, chunked-transfer, and SSE parsing
-plus one connection lifecycle. `opencode-shell-event.el` validates application
-event shape and scope. `opencode-shell-async.el` owns session routing, sharing,
-reconnect, fallback polling, and coalescing; none of these layers edits UI buffers.
+- **Editor invariants**: The transcript buffer uses normal text editing rather
+  than `special-mode`. Completed turns are read-only, while the bottom composer
+  is an ordinary writable region. Background SSE deltas, spinner frames, and
+  snapshot polls never clobber your composer draft, point, viewport, or undo
+  history.
+- **SSE + authoritative snapshots**: Each server shares one `/event` SSE
+  connection (`opencode-shell-sse.el`, `opencode-shell-event.el`,
+  `opencode-shell-async.el`). Validated events update an in-memory turn cache and
+  coalesce UI rendering on an idle timer; hidden buffers defer DOM work until
+  displayed. Initial load, reconnects, and fallback polling reconcile against
+  authoritative HTTP snapshots.
+- **Privacy-safe diagnostics**: Set `opencode-shell-log-requests` to non-nil and
+  run `M-x opencode-shell-log` to inspect request correlation IDs, SSE/fallback
+  transport transitions, and turn lifecycle blockers. Logs never record prompt
+  text, response bodies, tool payloads, directories, or credentials.
 
-These rules apply to all new runtime work. See
-[`docs/async-runtime.md`](docs/async-runtime.md) for the architecture, fallback,
-cancellation, cleanup, and review checklist.
-
-A request's `url-retrieve` connection is set not to query on Emacs exit as soon
-as it starts, independent of whether or when its callback ever fires. A
-connection whose remote end disappears mid-request (for example, an SSH
-port-forward whose far side died) can otherwise sit open with its callback
-never invoked, leaking a response buffer and process that would prompt to
-confirm a kill on every later Emacs exit or buffer cleanup.
+For contributor documentation and internal design contracts, see:
+- [Conversation Pipeline](docs/conversation-pipeline.md)
+- [Async Runtime Architecture](docs/async-runtime.md)
+- [Testing Guide](docs/testing.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Security
 
-Use TLS and server/network access controls for remote servers. The legacy
-`opencode-shell-auth-function` remains supported. Profiles can instead name an
-auth-source lookup, resolved on demand through the injectable auth-source
-resolver. Values are used verbatim (no `Bearer` prefix is added); set
-`:auth-header` to use a custom header name instead of `Authorization`. The same
-header is sent on JSON API calls and health probes. Returned values are scoped to the request: the client
-does not retain them in profiles, buffers, lifecycle state, or logs, and never
-prints request headers. Do not place tokens or private server addresses in
-public configuration.
-
-## Limitations
-
-This beta uses SSE only as a wake-up signal and intentionally does not render
-partial assistant tokens directly from event payloads. It defers general rich
-Markdown/tool rendering, folding, retention pruning, pagination, and file/diff
-review. Permission and question handling is deliberately explicit and never
-auto-approves. The API contract targets legacy OpenCode 1.18.30 and may require
-changes for newer releases.
-
-## Acceptance check
-
-Run `make verify` before loading a changed checkout. It deletes stale bytecode,
-runs source ERT, compiles the package and tests, then runs compiled ERT.
-
-For a live check, restart Emacs, close old OpenCode transcript buffers, open or
-create a localhost session, exercise standard Evil edits such as `dd`, `I`, `A`,
-`o`, and `O` inside the highlighted composer, then submit two multiline
-Korean/Markdown prompts. Confirm that editing outside the composer reports the
-read-only warning without moving point, each
-submitted prompt and response is read-only, the bottom composer remains
-writable, and repeated spinner frames or unchanged polling do not move the cursor,
-scroll the window, alter undo behavior, or erase a draft being edited. Then leave
-the transcript hidden for one response update and confirm reopening it renders the
-latest snapshot once.
-
-## Contributing
-
-Bug reports, documentation improvements, tests, and focused fixes are welcome.
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request.
+Use TLS and network access controls for remote servers. Credentials resolved via
+`:auth-source` or `opencode-shell-auth-function` are scoped strictly to the
+in-flight HTTP request and are never stored in buffers, profile state, or logs.
+Do not place tokens or private server addresses in public configuration files.
 
 ## License
 
