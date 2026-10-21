@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
 ;; Keywords: tools, processes
+;; SPDX-License-Identifier: MIT
 
 ;;; Commentary:
 

@@ -2,6 +2,7 @@
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
+;; SPDX-License-Identifier: MIT
 
 ;;; Commentary:
 ;;

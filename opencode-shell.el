@@ -2,10 +2,12 @@
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
+;; Assisted-by: Gemini:gemini-3-pro
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/lazyskulptor/opencode-shell
+;; SPDX-License-Identifier: MIT
 
 ;;; Commentary:
 

@@ -1,5 +1,9 @@
 ;;; opencode-shell-recovery.el --- Bounded SSH retry policy -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026
+;; Author: opencode-shell contributors
+;; SPDX-License-Identifier: MIT
+
 ;;; Commentary:
 ;; Server-keyed retry decisions.  The caller owns SSH processes and HTTP.
 
