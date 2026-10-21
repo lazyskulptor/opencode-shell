@@ -59,6 +59,19 @@
     (and (eq (plist-get model :kind) 'tool)
          (not (member (plist-get model :status) '("completed" "error"))))))
 
+(defun opencode-shell-response-blocked-only-by-task-p (parts)
+  "Return non-nil when the only unsettled tool parts in PARTS are `task' tools.
+The task tool spawns a detached subagent and lingers `running' in the parent
+even after the subagent ends, so when the session is idle such a part should no
+longer block turn completion."
+  (let ((running (seq-filter #'opencode-shell-response-running-tool-p parts)))
+    (and running
+         (seq-every-p
+          (lambda (part)
+            (equal (plist-get (opencode-shell-response-normalize-part part) :name)
+                   "task"))
+          running))))
+
 (defun opencode-shell-response-terminal-part-p (part)
   "Return non-nil when PART is terminal step evidence."
   (eq (plist-get (opencode-shell-response-normalize-part part) :kind)

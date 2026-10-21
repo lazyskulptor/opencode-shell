@@ -220,7 +220,7 @@
     (opencode-shell--begin-initial-hydration)
     (let (callbacks)
       (cl-letf (((symbol-function 'opencode-shell--guarded-request)
-                 (lambda (key _method _path success &optional _body _failure)
+                 (lambda (key _method _path success &rest _)
                    (setf (alist-get key callbacks) success))))
         (opencode-shell--resync t)
         (funcall (alist-get 'permissions callbacks) nil)
@@ -247,7 +247,7 @@
     (opencode-shell--begin-initial-hydration)
     (let (callbacks failures)
       (cl-letf (((symbol-function 'opencode-shell--guarded-request)
-                 (lambda (key _method _path success &optional _body failure)
+                 (lambda (key _method _path success &optional _body failure &rest _)
                    (setf (alist-get key callbacks) success
                          (alist-get key failures) failure))))
         (opencode-shell--resync nil)

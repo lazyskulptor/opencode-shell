@@ -373,6 +373,57 @@
       (should (string-match-p "HTTP 300 request failed" (car messages)))
       (should-not (seq-some (lambda (text) (string-match-p "not success" text)) messages)))))
 
+(ert-deftest opencode-shell-health-callback-defers-buffer-kill-off-stack ()
+  ;; Killing the url response buffer synchronously in this sentinel pumps other
+  ;; pending health sentinels, which re-enter the callback and can recurse until
+  ;; the Lisp stack overflows.  The kill must be deferred, not synchronous.
+  (let ((buffer (generate-new-buffer " *oc-health-test*"))
+        (scheduled 0) killed ready)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat &rest _) (cl-incf scheduled) 'timer))
+                  ((symbol-function 'kill-buffer)
+                   (lambda (&rest _) (setq killed t))))
+          (with-current-buffer buffer
+            (setq-local url-http-response-status 200)
+            (opencode-shell--server-health-callback
+             '(:name "p") (lambda (r _profile) (setq ready r)) nil))
+          ;; Callback ran synchronously with the right readiness...
+          (should (eq ready t))
+          ;; ...but the buffer kill was scheduled, not performed inline.
+          (should (= scheduled 1))
+          (should-not killed))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest opencode-shell-transport-errors-are-reported-once-per-outage ()
+  (with-temp-buffer
+    (let ((fail t) messages)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_ callback &rest _)
+                   (with-temp-buffer
+                     (if fail
+                         (funcall callback '(:error (error connection-failed)))
+                       (insert "HTTP/1.1 204 No Content\r\n\r\n")
+                       (setq-local url-http-response-status 204)
+                       (funcall callback nil)))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        ;; A burst of failures during one outage reports exactly once.
+        (dotimes (_ 5)
+          (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
+          (opencode-shell-async-drain (current-buffer)))
+        (should (= (length messages) 1))
+        ;; A success clears the notice so the next outage reports again.
+        (setq fail nil)
+        (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
+        (opencode-shell-async-drain (current-buffer))
+        (setq fail t)
+        (dotimes (_ 3)
+          (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
+          (opencode-shell-async-drain (current-buffer)))
+        (should (= (length messages) 2))))))
+
 (ert-deftest opencode-shell-async-queue-coalesces-and-drops-stale-work ()
   (with-temp-buffer
     (setq-local opencode-shell--generation 3)
@@ -860,6 +911,260 @@
         (should-not opencode-shell--known-descendant-session-ids)
         (should-not opencode-shell--permissions)))))
 
+(ert-deftest opencode-shell-quiet-subagent-is-discovered-without-permission ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let (rendered)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (if (equal path "/session")
+                       (funcall callback '(((id . "parent"))
+                                           ((id . "child") (parentID . "parent"))))
+                     (funcall callback nil))))
+                ((symbol-function 'opencode-shell--schedule-render)
+                 (lambda (&rest _) (setq rendered t))))
+        ;; No permission or question ever references "child" — only the
+        ;; session-metadata snapshot (fetched on full resync) classifies it.
+        (opencode-shell--refresh-session-metadata)
+        (should (equal opencode-shell--known-descendant-session-ids '("child")))
+        (should rendered)))))
+
+(ert-deftest opencode-shell-finished-subagent-is-pruned-on-reconcile ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (setq opencode-shell--known-descendant-session-ids '("child" "gone"))
+    (cl-letf (((symbol-function 'opencode-shell--refresh-permissions) #'ignore)
+              ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+              ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+      ;; "gone" has disappeared from the authoritative snapshot; only "child"
+      ;; remains a descendant, so the stale id must be dropped.
+      (opencode-shell--sync-descendant-sessions
+       '(((id . "parent")) ((id . "child") (parentID . "parent"))))
+      (should (equal opencode-shell--known-descendant-session-ids '("child"))))))
+
+(ert-deftest opencode-shell-reconcile-does-not-duplicate-known-descendant ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (setq opencode-shell--known-descendant-session-ids '("child"))
+    (let (refreshed)
+      (cl-letf (((symbol-function 'opencode-shell--refresh-permissions)
+                 (lambda (&rest _) (setq refreshed t)))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+        ;; Same descendant set as already known: no duplicate, no needless work.
+        (opencode-shell--sync-descendant-sessions
+         '(((id . "parent")) ((id . "child") (parentID . "parent"))))
+        (should (equal opencode-shell--known-descendant-session-ids '("child")))
+        (should-not refreshed)))))
+
+(ert-deftest opencode-shell-descendant-session-renders-clickable-open-line ()
+  ;; The subagent line renders under its spawning turn and is mouse-clickable.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "delegate"
+                                           :assistant "working" :status 'complete)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("child")
+            opencode-shell--descendant-session-anchors '(("child" . "turn-1")))
+      (opencode-shell--render-turns t)
+      (goto-char (point-min))
+      (should (search-forward "subagent" nil t))
+      (should (search-forward "child" nil t))
+      (goto-char (match-beginning 0))
+      (should (equal (get-text-property (point) 'opencode-shell-descendant-session)
+                     "child"))
+      (let ((command (opencode-shell-test--clicked-command (point))))
+        (should (eq command #'opencode-shell--open-descendant-session))))))
+
+(ert-deftest opencode-shell-unplaceable-descendant-session-not-shown-at-top ()
+  ;; A subagent whose spawning turn cannot be resolved is NOT bunched at the top;
+  ;; it simply does not render a line (it stays reachable via C-c C-o).
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "hi"
+                                           :assistant "there" :status 'complete)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("orphan")
+            ;; No tool-call link and no discovery anchor -> unplaceable.
+            opencode-shell--descendant-session-anchors nil)
+      (opencode-shell--render-turns t)
+      (should-not (string-match-p "subagent" (buffer-string))))))
+
+(defun opencode-shell-test--descendant-spinner-p ()
+  "Return non-nil when a subagent session line carries a spinner cell.
+Scoped to the subagent line (which also bears `opencode-shell-descendant-session')
+so it is not confused with the main transient status spinner."
+  (let ((pos (point-min)) found)
+    (while (and (not found)
+                (setq pos (text-property-any pos (point-max)
+                                             'opencode-shell-spinner t)))
+      (when (get-text-property pos 'opencode-shell-descendant-session)
+        (setq found t))
+      (setq pos (1+ pos)))
+    found))
+
+(ert-deftest opencode-shell-descendant-session-spinner-tracks-turn-activity ()
+  ;; A subagent anchored to an in-progress turn renders with a spinner cell;
+  ;; once the turn completes a re-render clears it.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "delegate"
+                                           :assistant "working" :status 'receiving)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("child")
+            opencode-shell--descendant-session-anchors '(("child" . "turn-1")))
+      (opencode-shell--render-turns t)
+      ;; Active turn, no status yet -> the subagent line carries a spinner.
+      (should (opencode-shell-test--descendant-spinner-p))
+      ;; Finish the turn and rebuild: the line remains but the spinner is gone.
+      (setf (opencode-shell--turn-status turn) 'complete)
+      (opencode-shell--render-turns t)
+      (should (string-match-p "subagent" (buffer-string)))
+      (should-not (opencode-shell-test--descendant-spinner-p)))))
+
+(ert-deftest opencode-shell-descendant-spinner-follows-own-session-status ()
+  ;; Per-subagent accuracy: the parent turn is still active, but the subagent's
+  ;; own /session/status is idle -> no spinner.  Flip it to busy -> spinner.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "delegate"
+                                           :assistant "working" :status 'receiving)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("child")
+            opencode-shell--descendant-session-anchors '(("child" . "turn-1"))
+            ;; Subagent finished even though the parent turn is still active.
+            opencode-shell--descendant-session-status '(("child" . nil)))
+      (opencode-shell--render-turns t)
+      (should-not (opencode-shell-test--descendant-spinner-p))
+      ;; Subagent is running again -> spinner, regardless of the turn.
+      (setq opencode-shell--descendant-session-status '(("child" . t)))
+      (opencode-shell--render-turns t)
+      (should (opencode-shell-test--descendant-spinner-p)))))
+
+(ert-deftest opencode-shell-descendant-status-poll-gated-and-maps-running ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((status-requests 0))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method path success &rest _)
+                   (when (equal path "/session/status")
+                     (cl-incf status-requests)
+                     (funcall success '(("a" . ((type . "working")))
+                                        ("b" . ((type . "idle"))))))))
+                ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+        ;; No descendants: no /session/status request at all.
+        (opencode-shell--refresh-descendant-status)
+        (should (= status-requests 0))
+        ;; With descendants: one request, mapped to per-id running flags.
+        (setq opencode-shell--known-descendant-session-ids '("a" "b"))
+        (opencode-shell--refresh-descendant-status)
+        (should (= status-requests 1))
+        (should (equal opencode-shell--descendant-session-status
+                       '(("a" . t) ("b" . nil))))))))
+
+(ert-deftest opencode-shell-descendant-session-anchors-next-to-spawning-turn ()
+  ;; Fallback path: with no tool-call data linking the subagent, the discovery
+  ;; anchor ("turn-1") places the line right after turn-1, not in a trailing area.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn-1 (opencode-shell--make-turn :id "turn-1" :user "spawn a helper"
+                                             :assistant "working" :status 'complete))
+          (turn-2 (opencode-shell--make-turn :id "turn-2" :user "unrelated"
+                                             :assistant "done" :status 'complete)))
+      (setq opencode-shell--turns (list turn-1 turn-2)
+            opencode-shell--known-descendant-session-ids '("child")
+            opencode-shell--descendant-session-anchors '(("child" . "turn-1")))
+      (opencode-shell--render-turns t)
+      (goto-char (point-min))
+      (should (search-forward "spawn a helper" nil t))
+      (let ((after-turn-1 (point)))
+        (should (search-forward "subagent" nil t))
+        (should (> (point) after-turn-1))
+        (let ((subagent-position (point)))
+          (should (search-forward "unrelated" nil t))
+          (should (> (point) subagent-position)))))))
+
+(ert-deftest opencode-shell-descendant-session-anchors-via-spawning-tool-call ()
+  ;; Accurate path: the anchor is derived from the turn whose tool-call part
+  ;; references the child session id, even with NO discovery anchor recorded and
+  ;; even though a later turn is the current last turn (the reopen case).
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn-1 (opencode-shell--make-turn
+                   :id "turn-1" :user "delegate"
+                   :assistant "" :status 'complete
+                   :parts '(((type . "tool") (tool . "task")
+                             (state . ((status . "completed")
+                                       (output . "started session ses_child_42")))))))
+          (turn-2 (opencode-shell--make-turn :id "turn-2" :user "later work"
+                                             :assistant "done" :status 'complete)))
+      (setq opencode-shell--turns (list turn-1 turn-2)
+            opencode-shell--known-descendant-session-ids '("ses_child_42")
+            ;; No discovery anchor at all: placement must come from the scan.
+            opencode-shell--descendant-session-anchors nil)
+      (opencode-shell--render-turns t)
+      (goto-char (point-min))
+      (should (search-forward "delegate" nil t))
+      (let ((after-turn-1 (point)))
+        (should (search-forward "subagent" nil t))
+        (should (> (point) after-turn-1))
+        (let ((subagent-position (point)))
+          ;; Anchored to turn-1 (the spawner), strictly before turn-2.
+          (should (search-forward "later work" nil t))
+          (should (> (point) subagent-position)))))))
+
+(ert-deftest opencode-shell-descendant-session-reconcile-drops-stale-anchor ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (setq opencode-shell--known-descendant-session-ids '("child" "gone")
+          opencode-shell--descendant-session-anchors
+          '(("child" . "turn-1") ("gone" . "turn-1")))
+    (cl-letf (((symbol-function 'opencode-shell--refresh-permissions) #'ignore)
+              ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+              ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+      (opencode-shell--sync-descendant-sessions
+       '(((id . "parent")) ((id . "child") (parentID . "parent"))))
+      (should (equal opencode-shell--known-descendant-session-ids '("child")))
+      (should (equal opencode-shell--descendant-session-anchors
+                     '(("child" . "turn-1")))))))
+
+(ert-deftest opencode-shell-open-descendant-session-uses-point-or-sole-known ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (setq opencode-shell--directory "/tmp/proj/")
+    (setq opencode-shell--profile 'test-profile)
+    (setq opencode-shell--known-descendant-session-ids '("child"))
+    (let (opened-id)
+      (cl-letf (((symbol-function 'opencode-shell-open-session)
+                 (lambda (id &rest _) (setq opened-id id))))
+        ;; No point property, but exactly one known descendant: use it directly.
+        (opencode-shell--open-descendant-session)
+        (should (equal opened-id "child"))))))
+
+(defun opencode-shell-test--clicked-command (pos)
+  "Return the command a real mouse-1 click at POS would run.
+Mirrors `mouse-on-link-p': `follow-link' set to `mouse-face' means a plain
+mouse-1 click is translated into a mouse-2 event, so this looks up [mouse-2]
+rather than [mouse-1] whenever that translation applies — matching what Emacs
+actually dispatches on a real click, not just what the keymap happens to hold
+under [mouse-1]."
+  (if (and (eq (get-text-property pos 'follow-link) 'mouse-face)
+           (get-text-property pos 'mouse-face))
+      (lookup-key (get-text-property pos 'keymap) [mouse-2])
+    (lookup-key (get-text-property pos 'keymap) [mouse-1])))
+
 (ert-deftest opencode-shell-permission-button-click-dispatches-command ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -873,8 +1178,7 @@
         (goto-char (point-min))
         (should (search-forward "once" nil t))
         (goto-char (match-beginning 0))
-        (let ((command (lookup-key (get-text-property (point) 'keymap)
-                                   [mouse-1])))
+        (let ((command (opencode-shell-test--clicked-command (point))))
           (should (eq command #'opencode-shell--permission-allow-once))
           (call-interactively command))
         (should (equal replied "once"))))))
@@ -894,8 +1198,7 @@
         (goto-char (point-min))
         (should (search-forward "reject" nil t))
         (goto-char (match-beginning 0))
-        (let ((command (lookup-key (get-text-property (point) 'keymap)
-                                   [mouse-1])))
+        (let ((command (opencode-shell-test--clicked-command (point))))
           (should (eq command #'opencode-shell--question-reject))
           (call-interactively command))
         (should (equal rejected-id "q1"))))))
@@ -2606,11 +2909,32 @@
 (ert-deftest opencode-shell-table-resize-hook-has-buffer-lifecycle ()
   (with-temp-buffer
     (opencode-shell-mode)
-    (should (memq #'opencode-shell--refresh-table-layout
+    ;; The hook runs the deferring scheduler, not the synchronous worker, so a
+    ;; render triggered by the re-layout cannot re-enter the hook and recurse.
+    (should (memq #'opencode-shell--schedule-table-layout
                   window-configuration-change-hook))
-    (opencode-shell--cleanup)
     (should-not (memq #'opencode-shell--refresh-table-layout
+                      window-configuration-change-hook))
+    (opencode-shell--cleanup)
+    (should-not (memq #'opencode-shell--schedule-table-layout
                       window-configuration-change-hook))))
+
+(ert-deftest opencode-shell-table-layout-schedule-defers-off-the-window-hook ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (scheduled ran)
+      (cl-letf (((symbol-function 'run-with-idle-timer)
+                 (lambda (_delay _repeat fn &rest _) (setq scheduled fn) 'timer))
+                ((symbol-function 'opencode-shell--refresh-table-layout)
+                 (lambda (&rest _) (setq ran t))))
+        ;; Scheduling must NOT run the worker synchronously (that is what used to
+        ;; recurse through window-configuration-change-hook).
+        (opencode-shell--schedule-table-layout)
+        (should scheduled)
+        (should-not ran)
+        ;; Firing the idle timer runs the worker once, off the hook.
+        (funcall scheduled)
+        (should ran)))))
 
 (ert-deftest opencode-shell-keymaps-and-cleanup ()
   (should (eq (lookup-key opencode-shell-mode-map (kbd "C-c C-y"))
@@ -2662,6 +2986,42 @@
   `((info . ((id . ,id) (role . "assistant") (parentID . ,parent)))
     (parts . (((id . ,(concat id "-tool")) (type . "tool") (tool . "read")
                (state . ((status . ,(or status "completed")))))))))
+
+(ert-deftest opencode-shell-idle-session-settles-dangling-task-turn ()
+  ;; opencode leaves the parent's `task' tool `running' with no completion
+  ;; metadata after a subagent detaches; `/session/status' idle must settle it.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((messages
+           (list (opencode-shell-test--message "u1" "user" "delegate")
+                 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                   (parts . (((id . "a1-task") (type . "tool") (tool . "task")
+                              (state . ((status . "running"))))))))))
+      (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+      ;; Unknown session status (nil): the running task keeps the turn active.
+      (should (eq (opencode-shell--turn-status (car (last opencode-shell--turns)))
+                  'receiving))
+      ;; Session reported idle: the dangling task no longer blocks completion.
+      (setq opencode-shell--session-idle-p t)
+      (dolist (turn opencode-shell--turns) (opencode-shell--aggregate-turn turn))
+      (should (eq (opencode-shell--turn-status (car (last opencode-shell--turns)))
+                  'complete)))))
+
+(ert-deftest opencode-shell-idle-session-does-not-settle-real-running-tool ()
+  ;; Idle only excuses a detached `task'; a normal running tool still blocks.
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent"
+          opencode-shell--session-idle-p t)
+    (let ((messages
+           (list (opencode-shell-test--message "u1" "user" "run")
+                 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                   (parts . (((id . "a1-bash") (type . "tool") (tool . "bash")
+                              (state . ((status . "running"))))))))))
+      (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+      (should (eq (opencode-shell--turn-status (car (last opencode-shell--turns)))
+                  'receiving)))))
 
 (defun opencode-shell-test--gutter-overlay-at (position)
   "Return the role gutter overlay covering POSITION, or nil."

@@ -60,7 +60,18 @@ Session list requests include an absolute server-native `directory` and a high
 `limit`; the observed OpenAPI also exposes `workspace`, `scope`, `path`, `roots`,
 `start`, and `search`. Other requests may include `directory` as appropriate.
 The normalized session collection also supplies generated titles for transcript
-headers and the canonical newest-first session selector.
+headers and the canonical newest-first session selector. The transcript
+buffer's own `GET /session` title lookup (on a full resync only, so the lean
+periodic poll cycle never calls `/session`) also classifies every session in
+that same snapshot for subagent descendants; one that never raised a
+permission or question still surfaces, as a clickable line anchored to the turn
+whose tool call spawned it (derived at render time from that turn's retained
+part data, so it survives reopens and never bunches at the top) and openable
+with `C-c C-o`, without an extra request.  While subagents are known, the poll
+cycle additionally fetches `/session/status` so each subagent line spins by its
+own running state (type other than `idle`) rather than its spawning turn's; this
+is the only case where the transcript polls `/session/status`, and it is skipped
+entirely when a session has no subagents.
 
 Fork requests inherit the current directory query unless an explicit destination
 is supplied. A `messageID` boundary is exclusive: the named message and every
@@ -109,7 +120,12 @@ primary message-level completion evidence. `step-finish` is compatible
 fallback evidence only when `info.finish` is entirely absent. Neither a
 completed/error tool part nor `/session/status` idle completes the turn by
 itself, and any running or pending tool part blocks readiness regardless of
-`info.error`. `Prompt>` is restored and polling stops only after that message
+`info.error` — with one exception: the server leaves a `task` tool part
+`running` indefinitely once its spawned subagent detaches, without ever
+emitting completion metadata for it, so a turn blocked only by `task` parts
+settles once `/session/status` reports the session idle, matching the web UI.
+A running non-`task` tool still blocks regardless of session status.
+`Prompt>` is restored and polling stops only after that message
 evidence is present and pending permission work is settled.
 
 A newly submitted prompt is also a deterministic generation boundary: the client

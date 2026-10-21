@@ -171,7 +171,10 @@ terminal `error`; `step-finish` is retained only as compatible evidence when
 `finish` is absent. A `finish` of `tool-calls` means another step is coming
 and is never treated as completion, and a completed tool or idle session
 status does not complete the whole assistant turn; running tools keep the
-response active. When a turn ends via a terminal error — auth failure, a
+response active — except a `task` tool left running with no completion
+metadata after its subagent detaches, which the server never settles itself;
+once the session is reported idle, that turn completes the way the web UI
+shows it, rather than hanging indefinitely. When a turn ends via a terminal error — auth failure, a
 token/output-length or context limit, a content filter, a provider/API error,
 or an abort — the transcript shows a bounded `[name: message]` reason line
 after the response instead of silently rendering a blank one. Submitting a new
@@ -243,7 +246,19 @@ until both the assistant response and every permission request are settled.
 Pending questions use the same single inline interaction area after permissions.
 The card shows `Waiting for answer`; use `RET` or `a` to answer and `r` to reject.
 Questions block prompt readiness until their authoritative snapshot clears, and
-each action immediately resyncs question and tool state.
+each action immediately resyncs question and tool state. Both cards' action
+words (`once`/`always`/`reject`, `answer`/`reject`) are also mouse-clickable.
+A permission or question raised by a subagent (or a subagent of a subagent)
+surfaces in the same card instead of silently stalling the subagent. A known
+subagent session also renders as its own clickable line right after the turn
+whose tool call spawned it (derived from that turn's retained part data, so it
+stays correct across reopens); subagents whose spawning turn cannot be resolved
+are not bunched at the top. While the subagent is itself running the line shows a spinner: its running
+state comes from the subagent's own `/session/status`, polled only while
+subagents are known, so it reflects the subagent rather than merely its
+spawning turn (before the first status poll it falls back to the turn's
+activity). `C-c C-o` opens the one at point, the sole known subagent directly,
+or prompts when there are several.
 
 The session buffer uses normal text editing rather than `special-mode`. Only the
 visible bottom composer is writable; each submitted user prompt and its response are
