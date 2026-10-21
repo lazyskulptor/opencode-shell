@@ -202,10 +202,21 @@ agent completion shows only server-advertised visible primary agents.
 flows. These maps work in vanilla Emacs and receive mode-local Evil normal-state
 bindings when Evil is available.
 
-`M-x opencode-shell-fork-session` is available in an idle transcript without a
-dedicated keybinding. Its minibuffer lists user prompts in chronological order;
-choosing one forks immediately before that prompt. The returned session opens in
-its reported directory.
+`M-x opencode-shell-fork-session` is available without a dedicated keybinding
+and, unlike other session actions, does not require an idle transcript: a fork
+boundary is always a specific past prompt, so a turn still generating after it
+does not block the fork. Its minibuffer lists user prompts in chronological
+order, marking any still in progress; choosing one forks immediately before
+that prompt. The returned session opens in its reported directory.
+
+`M-x opencode-shell-rename-session` is also unbound and requires an idle
+transcript. It sends a throwaway message to OpenCode's built-in hidden `title`
+agent so it judges the full conversation so far and proposes a new title, then
+applies that title with the same server-side `PATCH` the title bar already
+reflects. As soon as the reply arrives, the throwaway exchange is removed
+locally and deleted server-side so it does not linger in the transcript;
+while the title agent is still generating, its reply may still stream
+visibly for that brief window.
 
 `M-x opencode-shell-move-session-directory` is a separate unbound function for
 a transcript. It reads a destination, normalizes it to that project's root, and
@@ -319,6 +330,13 @@ reconnect, fallback polling, and coalescing; none of these layers edits UI buffe
 These rules apply to all new runtime work. See
 [`docs/async-runtime.md`](docs/async-runtime.md) for the architecture, fallback,
 cancellation, cleanup, and review checklist.
+
+A request's `url-retrieve` connection is set not to query on Emacs exit as soon
+as it starts, independent of whether or when its callback ever fires. A
+connection whose remote end disappears mid-request (for example, an SSH
+port-forward whose far side died) can otherwise sit open with its callback
+never invoked, leaking a response buffer and process that would prompt to
+confirm a kill on every later Emacs exit or buffer cleanup.
 
 ## Security
 

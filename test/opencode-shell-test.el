@@ -43,6 +43,24 @@
         (opencode-shell--request "GET" "/question" #'ignore)))
     (should-not seen)))
 
+(ert-deftest opencode-shell-request-disables-process-query-on-exit ()
+  "A connection that never calls back must not nag to confirm a kill on exit."
+  (let* ((response-buffer (generate-new-buffer " *fake-http*"))
+         (process (make-network-process
+                   :name "opencode-test-fake-http" :buffer response-buffer
+                   :family 'ipv4 :server t :host 'local :service t)))
+    (unwind-protect
+        (progn
+          (set-process-query-on-exit-flag process t)
+          (with-temp-buffer
+            (setq-local opencode-shell--profile opencode-shell-test--local-profile)
+            (cl-letf (((symbol-function 'url-retrieve)
+                       (lambda (&rest _) response-buffer)))
+              (opencode-shell--request "GET" "/question" #'ignore)))
+          (should-not (process-query-on-exit-flag process)))
+      (delete-process process)
+      (kill-buffer response-buffer))))
+
 (ert-deftest opencode-shell-session-normalization-and-filter ()
   (let* ((old '((id . "old") (title . "Alpha") (time (updated . 1000))))
          (new '((id . "new") (title . "Beta") (directory . "/work")
@@ -168,13 +186,88 @@
                      (list "ses-fork" "/server/project/"
                            opencode-shell-test--local-profile))))))
 
-(ert-deftest opencode-shell-fork-session-rejects-active-interaction ()
+(ert-deftest opencode-shell-fork-session-allowed-during-active-interaction ()
+  "A fork boundary is always historical, so a later active turn must not block it."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--submit-in-flight t
+                opencode-shell--turns
+                (list (opencode-shell-test--complete-user-turn "msg-1" "first")))
+    (let (request)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _) (caar candidates)))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (method path callback &optional body &rest _)
+                   (setq request (list method path body))
+                   (funcall callback '((id . "ses-fork")))))
+                ((symbol-function 'opencode-shell-open-session) #'ignore))
+        (opencode-shell-fork-session))
+      (should (equal request
+                     '("POST" "/session/ses-source/fork" ((messageID . "msg-1")))))))
+  (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-f"))))
+
+(ert-deftest opencode-shell-fork-session-requires-session-id ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (should-error (opencode-shell-fork-session) :type 'user-error)))
+
+(ert-deftest opencode-shell-rename-session-applies-title-agent-reply ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source"
+                opencode-shell--directory "/server/project/")
+    (let (requests)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (method path callback &optional body &rest _)
+                   (push (list method path body) requests)
+                   (pcase method
+                     ("POST"
+                      (funcall callback
+                               '((info . ((id . "msg-assistant")
+                                         (parentID . "msg-user")))
+                                 (parts . [((type . "text") (text . "  New Title  "))]))))
+                     ("PATCH" (funcall callback '((id . "ses-source"))))
+                     ("DELETE" nil)))))
+        (opencode-shell-rename-session))
+      (setq requests (nreverse requests))
+      (should (equal (nth 0 requests)
+                     (list "POST" "/session/ses-source/message"
+                           '((parts . [((type . "text")
+                                       (text . "Based on this entire conversation so far, generate an updated title."))])
+                             (agent . "title")))))
+      (should (member (list "DELETE" "/session/ses-source/message/msg-assistant" nil)
+                       requests))
+      (should (member (list "DELETE" "/session/ses-source/message/msg-user" nil)
+                       requests))
+      (should (equal (car (last requests))
+                     (list "PATCH" "/session/ses-source" '((title . "New Title")))))
+      (should (equal opencode-shell--session-title "New Title"))
+      (should (equal (buffer-name) "*oc-sh➜ New Title — project*")))))
+
+(ert-deftest opencode-shell-rename-session-rejects-active-interaction ()
   (with-temp-buffer
     (opencode-shell-mode)
     (setq-local opencode-shell--session-id "ses-source"
                 opencode-shell--submit-in-flight t)
-    (should-error (opencode-shell-fork-session) :type 'user-error))
-  (should-not (lookup-key opencode-shell-mode-map (kbd "C-c C-f"))))
+    (should-error (opencode-shell-rename-session) :type 'user-error)))
+
+(ert-deftest opencode-shell-rename-session-skips-patch-on-empty-title ()
+  "An empty title still cleans up the throwaway exchange but issues no PATCH."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "ses-source")
+    (let (methods)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (method _path callback &optional _body &rest _)
+                   (push method methods)
+                   (when (equal method "POST")
+                     (funcall callback '((info . ((id . "msg-assistant")
+                                                 (parentID . "msg-user")))
+                                         (parts . [((type . "text") (text . "   "))])))))))
+        (opencode-shell-rename-session))
+      (should (member "DELETE" methods))
+      (should-not (member "PATCH" methods)))))
 
 (ert-deftest opencode-shell-fork-session-requires-server-prompt-id ()
   (with-temp-buffer

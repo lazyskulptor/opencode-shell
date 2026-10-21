@@ -11,7 +11,10 @@
 | `POST` | `/session/:id/fork` | Fork before optional `messageID`; omit it to copy all history |
 | `GET` | `/session/status` | Read session status |
 | `DELETE` | `/session/:id` | Delete a session |
+| `PATCH` | `/session/:id` | Update session metadata, including `title` |
 | `GET` | `/session/:id/message` | Read transcript messages |
+| `POST` | `/session/:id/message` | Send a message and synchronously receive its reply |
+| `DELETE` | `/session/:id/message/:messageID` | Permanently delete one message and its parts |
 | `POST` | `/session/:id/prompt_async` | Submit a prompt |
 | `POST` | `/session/:id/abort` | Abort generation |
 | `GET` | `/provider` | List providers and models |
@@ -76,6 +79,23 @@ entirely when a session has no subagents.
 Fork requests inherit the current directory query unless an explicit destination
 is supplied. A `messageID` boundary is exclusive: the named message and every
 later message are omitted. An empty request body copies the complete history.
+Forking only ever depends on history strictly before that boundary, so the
+client allows it even while a later turn in the same session is still active;
+every other session-mutating command still requires the transcript to be idle.
+
+`opencode-shell-rename-session` retitles a session from its own accumulated
+context by sending a message to OpenCode's native hidden `title` agent
+(`GET /agent` lists it as `native`, `hidden`, `mode: "primary"`) through
+`POST /session/:id/message`, whose HTTP response resolves only once the
+generated reply is complete, carrying it directly rather than requiring the
+client to poll or wait on `/event`. Generation in progress is still visible
+over `/event` like any other turn, so the throwaway exchange can stream
+briefly before the reply arrives. As soon as the client reads the reply's
+first text part as the new title, it synthesizes a local `message-removed`
+event for the throwaway user message so it and its assistant reply drop out
+of the transcript immediately, `PATCH`es the title onto the session, and
+deletes both messages server-side (`DELETE /session/:id/message/:messageID`)
+so neither persists.
 The client's directory-change function issues no API request; it only changes the
 current transcript buffer's directory query scope for subsequent requests and its
 Emacs `default-directory`. OpenCode 1.18.30 exposes no persisted session-directory

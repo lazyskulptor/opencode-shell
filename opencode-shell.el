@@ -1029,9 +1029,14 @@ called after a transport, status, or decoding failure."
          (quiet-success (opencode-shell--routine-snapshot-path-p path)))
     (when (and opencode-shell-log-requests (not quiet-success))
       (opencode-shell--log "OpenCode API #%d → %s %s" request-id method path))
-    (url-retrieve
-     (opencode-shell--url path params)
-     (lambda (status)
+    ;; A connection that never completes (e.g. a local SSH port-forward whose
+    ;; remote end died mid-request) otherwise leaves its response buffer and
+    ;; process behind indefinitely, nagging to confirm a kill on every later
+    ;; Emacs exit or buffer cleanup.
+    (when-let ((response-buffer
+                (url-retrieve
+                 (opencode-shell--url path params)
+                 (lambda (status)
        (let ((response (current-buffer)))
           (unwind-protect
               (unless (and ssh (not (= transport-epoch
@@ -1106,7 +1111,10 @@ called after a transport, status, or decoding failure."
                           origin (list 'request-error request-id)
                            request-generation error-callback))))))))
             (kill-buffer response))))
-     nil t t)))
+                 nil t t)))
+      (when-let ((process (and (bufferp response-buffer)
+                                (get-buffer-process response-buffer))))
+        (set-process-query-on-exit-flag process nil)))))
 
 (defun opencode-shell--time (session)
   "Return SESSION update time as a sortable number."
@@ -1549,10 +1557,18 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (kill-new opencode-shell--session-id)
   (message "Copied OpenCode session ID"))
 
-(defun opencode-shell--assert-session-operation-ready ()
-  "Signal a user error unless the current session has stable history."
+(defun opencode-shell--assert-session-identified ()
+  "Signal a user error unless the current buffer owns an OpenCode session.
+Unlike `opencode-shell--assert-session-idle', this does not require settled
+history: forking is bounded by an explicit `messageID' boundary and only
+copies history strictly before it, so a later turn still in progress does not
+affect the fork's correctness."
   (unless (and (derived-mode-p 'opencode-shell-mode) opencode-shell--session-id)
-    (user-error "No OpenCode session in this buffer"))
+    (user-error "No OpenCode session in this buffer")))
+
+(defun opencode-shell--assert-session-idle ()
+  "Signal a user error unless the current session has settled, stable history."
+  (opencode-shell--assert-session-identified)
   (when (or opencode-shell--submit-in-flight
             (opencode-shell-interaction-active-p opencode-shell--interaction-state)
             opencode-shell--permissions
@@ -1571,16 +1587,20 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
         (let ((text (truncate-string-to-width
                      (replace-regexp-in-string
                       "[\n\r\t ]+" " " (or (opencode-shell--turn-user turn) ""))
-                     70 nil nil t)))
-          (push (cons (format "Before prompt %d: %s" index text) id)
+                     70 nil nil t))
+              (suffix (if (eq (opencode-shell--turn-status turn) 'complete)
+                          "" " (in progress)")))
+          (push (cons (format "Before prompt %d: %s%s" index text suffix) id)
                 candidates))))
     (nreverse candidates)))
 
 ;;;###autoload
 (defun opencode-shell-fork-session ()
-  "Fork this session before a minibuffer-selected prompt."
+  "Fork this session before a minibuffer-selected prompt.
+Available even while a later turn is still in progress; the fork only copies
+history strictly before the chosen prompt."
   (interactive)
-  (opencode-shell--assert-session-operation-ready)
+  (opencode-shell--assert-session-identified)
   (let ((candidates (opencode-shell--fork-candidates)))
     (unless candidates (user-error "No forkable prompts in this session"))
     (let* ((choice (completing-read "Fork session: " candidates nil t))
@@ -1598,6 +1618,60 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
            (opencode-shell-open-session id fork-directory profile)))
        `((messageID . ,message-id)) nil
        (lambda () (message "OpenCode session fork failed"))))))
+
+(defun opencode-shell--title-text-from-reply (parts)
+  "Return the first non-empty text part's trimmed string from PARTS, or nil."
+  (seq-some (lambda (part)
+              (let ((model (opencode-shell-response-normalize-part part)))
+                (when (eq (plist-get model :kind) 'text)
+                  (let ((text (string-trim (or (plist-get model :text) ""))))
+                    (and (not (string-empty-p text)) text)))))
+            parts))
+
+;;;###autoload
+(defun opencode-shell-rename-session ()
+  "Ask OpenCode's native title agent to retitle this session from its context.
+Sends a throwaway message to the hidden `title' agent, drops that exchange
+from the transcript, applies the reply as the session title via a `PATCH',
+and deletes the throwaway messages server-side."
+  (interactive)
+  (opencode-shell--assert-session-idle)
+  (message "Generating OpenCode session title...")
+  (opencode-shell--request
+   "POST" (format "/session/%s/message" opencode-shell--session-id)
+   (lambda (reply)
+     (let* ((info (opencode-shell--get reply 'info))
+            (assistant-id (opencode-shell--get info 'id))
+            (user-id (opencode-shell--get info 'parentID))
+            (title (opencode-shell--title-text-from-reply
+                    (opencode-shell--get reply 'parts))))
+       ;; Remove the throwaway exchange from the transcript at once and
+       ;; tombstone it so any in-flight SSE updates cannot re-add it; removing
+       ;; the user message also drops its assistant child locally.
+       (when user-id
+         (opencode-shell--apply-message-event
+          (list :kind 'message-removed :message-id user-id)))
+       (dolist (id (delq nil (list assistant-id user-id)))
+         (opencode-shell--request
+          "DELETE" (format "/session/%s/message/%s"
+                            opencode-shell--session-id id)
+          #'ignore nil nil #'ignore))
+       (if (not title)
+           (message "OpenCode title agent returned no title")
+         (opencode-shell--request
+          "PATCH" (format "/session/%s" opencode-shell--session-id)
+          (lambda (_session)
+            (setq opencode-shell--session-title title)
+            (opencode-shell--rename-transcript-for-title title)
+            (force-mode-line-update)
+            (message "Renamed OpenCode session to %S" title))
+          `((title . ,title)) nil
+          (lambda () (message "OpenCode session rename failed"))))))
+   `((parts . [((type . "text")
+                (text . "Based on this entire conversation so far, generate an updated title."))])
+     (agent . "title"))
+   nil
+   (lambda () (message "OpenCode title generation failed"))))
 
 (defun opencode-shell--destination-server-directory (directory profile)
   "Return DIRECTORY's project root in PROFILE server-native form."
