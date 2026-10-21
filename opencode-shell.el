@@ -1114,7 +1114,8 @@ called after a transport, status, or decoding failure."
                  nil t t)))
       (when-let ((process (and (bufferp response-buffer)
                                 (get-buffer-process response-buffer))))
-        (set-process-query-on-exit-flag process nil)))))
+        (set-process-query-on-exit-flag process nil))
+      response-buffer)))
 
 (defun opencode-shell--time (session)
   "Return SESSION update time as a sortable number."
@@ -2316,9 +2317,15 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (opencode-shell--get part 'callID)
       (opencode-shell--get part 'callId)))
 
+(defun opencode-shell--copy-alist-spine (alist)
+  "Return a shallow copy of ALIST and its top-level cons cells."
+  (mapcar (lambda (entry)
+            (if (consp entry) (cons (car entry) (cdr entry)) entry))
+          alist))
+
 (defun opencode-shell--merge-alist (known incoming)
   "Return KNOWN alist with fields present in INCOMING replaced."
-  (let ((result (copy-tree known)))
+  (let ((result (opencode-shell--copy-alist-spine known)))
     (dolist (field incoming result)
       (setf (alist-get (car field) result) (cdr field)))))
 
@@ -2337,11 +2344,14 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--merge-envelope (known incoming)
   "Merge partial assistant envelope INCOMING into KNOWN."
-  (let* ((merged (copy-tree incoming))
+  (let* ((merged (opencode-shell--copy-alist-spine incoming))
          (known-info (opencode-shell--get known 'info))
          (incoming-info (opencode-shell--get incoming 'info))
-         (info (opencode-shell--merge-alist known-info incoming-info)))
-    (when (or (assq 'time known-info) (assq 'time incoming-info))
+         (info (if (eq known-info incoming-info)
+                   known-info
+                 (opencode-shell--merge-alist known-info incoming-info))))
+    (when (and (not (eq known-info incoming-info))
+               (or (assq 'time known-info) (assq 'time incoming-info)))
       (setf (alist-get 'time info)
             (opencode-shell--merge-alist (opencode-shell--get known-info 'time)
                                          (opencode-shell--get incoming-info 'time))))
@@ -2601,13 +2611,11 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
           (push turn new-turns)
           (cl-pushnew turn changed :test #'eq)))
       (let ((result (append (copy-sequence old) (nreverse new-turns))))
-      (let ((before (mapcar #'opencode-shell--turn-state-signature result)))
+        (dolist (turn (butlast result))
+          (unless (eq (opencode-shell--turn-status turn) 'complete)
+            (cl-pushnew turn changed :test #'eq)))
         (opencode-shell--settle-superseded-turns result)
-        (cl-mapc (lambda (turn signature)
-                   (unless (equal signature (opencode-shell--turn-state-signature turn))
-                     (cl-pushnew turn changed :test #'eq)))
-                 result before))
-      (setq opencode-shell--normalized-changed-turns (nreverse changed))
+        (setq opencode-shell--normalized-changed-turns (nreverse changed))
         result))))
 
 (defun opencode-shell--message-envelope-id (envelope)
@@ -2626,7 +2634,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Merge ENVELOPE into the buffer-local message index and return the result."
   (opencode-shell--ensure-message-cache)
   (let* ((id (opencode-shell--message-envelope-id envelope))
-         (known (and id (gethash id opencode-shell--message-envelopes)))
+        (known (and id (gethash id opencode-shell--message-envelopes)))
          (merged (if known (opencode-shell--merge-envelope known envelope) envelope)))
     (when id
       (unless known
@@ -2694,12 +2702,18 @@ Return a plist containing affected turns and whether a full render is required."
 (defun opencode-shell--rebuild-turn-from-message-cache (parent-id)
   "Rebuild and return PARENT-ID's turn from cached assistant envelopes."
   (when-let ((turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)))
-    (setf (opencode-shell--turn-assistant-messages turn) nil
-          (opencode-shell--turn-parts turn) nil
-          (opencode-shell--turn-assistant turn) "")
-    (opencode-shell--normalize-turns
-     (opencode-shell--cached-assistants-for-parent parent-id))
-    turn))
+    (let ((assistants (opencode-shell--cached-assistants-for-parent parent-id)))
+      (setf (opencode-shell--turn-assistant-messages turn)
+            (mapcar (lambda (envelope)
+                      (cons (opencode-shell--message-envelope-id envelope)
+                            envelope))
+                    assistants)
+            (opencode-shell--turn-parts turn) nil
+            (opencode-shell--turn-assistant turn) "")
+      (when assistants
+        (opencode-shell--aggregate-turn turn))
+      (opencode-shell--settle-superseded-turns opencode-shell--turns)
+      turn)))
 
 (defun opencode-shell--turn-state-signature (turn)
   "Return TURN state that can affect transcript presentation."
@@ -2708,7 +2722,8 @@ Return a plist containing affected turns and whether a full render is required."
              (opencode-shell--turn-server-user-id turn)
              (opencode-shell--turn-user turn)
              (opencode-shell--turn-assistant turn)
-             (copy-tree (opencode-shell--turn-parts turn))
+             (mapcar #'opencode-shell-response-normalize-part
+                     (opencode-shell--turn-parts turn))
              (opencode-shell--turn-status turn)
              (opencode-shell--turn-acknowledged turn)
              (opencode-shell--turn-locally-settled turn)
@@ -2954,6 +2969,23 @@ Sessions already anchored keep their first-seen turn."
       (unless (assoc id opencode-shell--descendant-session-anchors)
         (push (cons id anchor) opencode-shell--descendant-session-anchors)))))
 
+(defun opencode-shell--value-mentions-string-p (value needle)
+  "Return non-nil when any string leaf in VALUE matches regexp NEEDLE."
+  (cond
+   ((stringp value)
+    (numberp (string-match-p needle value)))
+   ((consp value)
+    (let (found)
+      (while (and (consp value) (not found))
+        (setq found (opencode-shell--value-mentions-string-p (car value) needle)
+              value (cdr value)))
+      (or found
+          (and value (opencode-shell--value-mentions-string-p value needle)))))
+   ((vectorp value)
+    (seq-some (lambda (item)
+                (opencode-shell--value-mentions-string-p item needle))
+              value))))
+
 (defun opencode-shell--turn-spawned-session-p (turn session-id)
   "Return non-nil when TURN holds a tool call referencing SESSION-ID.
 The spawning tool call carries the child id in its retained part state;
@@ -2963,8 +2995,9 @@ substring-matching the opaque id is robust to the exact payload shape."
      (lambda (part)
        (let ((model (opencode-shell-response-normalize-part part)))
          (and (eq (plist-get model :kind) 'tool)
+              (member (plist-get model :name) '("task" nil))
               (when-let ((state (opencode-shell-response--get part 'state)))
-                (string-match-p needle (format "%S" state))))))
+                (opencode-shell--value-mentions-string-p state needle)))))
      (opencode-shell--turn-parts turn))))
 
 (defun opencode-shell--compute-descendant-anchor-map ()
@@ -3811,17 +3844,19 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
            (rendered-valid
             (seq-every-p #'opencode-shell--turn-rendered-p
                          opencode-shell--rendered-turns))
-           ;; Bound so the descendant inserters place each subagent line under
-           ;; its spawning turn without re-scanning per turn.
-           (opencode-shell--descendant-anchor-map
-            (and opencode-shell--known-descendant-session-ids
-                 (opencode-shell--compute-descendant-anchor-map)))
            (append-only
             (and (not force)
                  rendered-valid
                  (<= known-count (length opencode-shell--turns))
                  (cl-every #'eq opencode-shell--rendered-turns
-                           (seq-take opencode-shell--turns known-count)))))
+                           (seq-take opencode-shell--turns known-count))))
+           ;; Bound so the descendant inserters place each subagent line under
+           ;; its spawning turn without re-scanning per turn.
+           (opencode-shell--descendant-anchor-map
+            (and opencode-shell--known-descendant-session-ids
+                 (or (not append-only)
+                     (< known-count (length opencode-shell--turns)))
+                 (opencode-shell--compute-descendant-anchor-map))))
       (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
       (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
       (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
@@ -3925,18 +3960,7 @@ CHANGED-TURNS into the response blocks pending incremental update."
 (defun opencode-shell--transcript-state-signature ()
   "Return the normalized transcript state that can affect presentation."
   (list
-   (mapcar
-    (lambda (turn)
-      (list (opencode-shell--turn-id turn)
-            (opencode-shell--turn-server-user-id turn)
-            (opencode-shell--turn-user turn)
-            (opencode-shell--turn-assistant turn)
-            (copy-tree (opencode-shell--turn-parts turn))
-            (opencode-shell--turn-status turn)
-            (opencode-shell--turn-acknowledged turn)
-            (opencode-shell--turn-locally-settled turn)
-            (opencode-shell--turn-terminal-error turn)))
-    opencode-shell--turns)
+   (mapcar #'opencode-shell--turn-state-signature opencode-shell--turns)
    opencode-shell--request-status
    opencode-shell--submit-in-flight
    (opencode-shell--composer-visible-p)))

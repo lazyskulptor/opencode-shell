@@ -203,13 +203,12 @@ Return nil on success or a protocol error plist."
 
 (defun opencode-shell-sse--valid-utf8-p (bytes)
   "Return non-nil when unibyte string BYTES is canonical UTF-8."
-  (let ((index 0) (length (length bytes)) valid)
-    (setq valid t)
-    (while (and valid (< index length))
+  (let ((index 0) (length (length bytes)) (valid t))
+    (while (and valid
+                (< index length)
+                (setq index (string-match-p "[^\000-\177]" bytes index)))
       (let ((first (aref bytes index)))
         (cond
-         ((<= first #x7f)
-          (setq index (1+ index)))
          ((and (>= first #xc2) (<= first #xdf)
                (< (1+ index) length)
                (opencode-shell-sse--continuation-byte-p

@@ -6281,5 +6281,81 @@ under [mouse-1]."
       (should (eq first second))
       (should (equal (car first) '("p/m1" (providerID . "p") (modelID . "m1")))))))
 
+(ert-deftest opencode-shell-request-direct-returns-response-buffer ()
+  (let ((response (generate-new-buffer " *oc-http-test*"))
+        (profile '(:name "test" :base-url "http://127.0.0.1:4199")))
+    (unwind-protect
+        (with-temp-buffer
+          (opencode-shell-mode)
+          (setq-local opencode-shell--profile profile)
+          (cl-letf (((symbol-function 'url-retrieve)
+                     (lambda (&rest _) response)))
+            (should (eq (opencode-shell--request-direct "GET" "/session" #'ignore)
+                        response))))
+      (when (buffer-live-p response)
+        (kill-buffer response)))))
+
+(ert-deftest opencode-shell-descendant-anchor-skips-append-only-and-non-task-payloads ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let* ((bash-part '((type . "tool") (tool . "bash")
+                        (state . ((status . "completed")
+                                  (output . "heavy payload ses_child_99")))))
+           (task-part '((type . "tool") (tool . "task")
+                        (state . ((status . "completed")
+                                  (metadata . [((child . "ses_child_42"))])))))
+           (turn (opencode-shell--make-turn
+                  :id "turn-1" :user "delegate"
+                  :assistant "working" :status 'receiving
+                  :parts (list bash-part task-part)))
+           (anchor-scans 0))
+      ;; Non-task tool payloads should not be misattributed or serialized via %S.
+      (should-not (opencode-shell--turn-spawned-session-p turn "ses_child_99"))
+      (should (opencode-shell--turn-spawned-session-p turn "ses_child_42"))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("ses_child_42"))
+      (opencode-shell--render-turns t)
+      ;; Incremental streaming update of an already-rendered turn must not
+      ;; recompute descendant anchors across all turns.
+      (setf (opencode-shell--turn-assistant turn) "working more")
+      (cl-letf (((symbol-function 'opencode-shell--compute-descendant-anchor-map)
+                 (lambda () (cl-incf anchor-scans) nil)))
+        (opencode-shell--render-turns nil (list turn)))
+      (should (= anchor-scans 0)))))
+
+(ert-deftest opencode-shell-part-event-rebuilds-turn-without-full-normalize-or-copy-tree ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "user-1") (sessionID . "session-a") (role . "user")))
+        (parts . (((id . "u-part") (type . "text") (text . "hello")))))
+       ((info . ((id . "assistant-1") (sessionID . "session-a")
+                 (role . "assistant") (parentID . "user-1")))
+        (parts . (((id . "part-1") (sessionID . "session-a")
+                   (messageID . "assistant-1") (type . "tool")
+                   (tool . "bash") (state . ((status . "running"))))))))
+     1)
+    (let ((normalize-calls 0)
+          (copy-tree-calls 0))
+      (cl-letf (((symbol-function 'opencode-shell--normalize-turns)
+                 (lambda (&rest _) (cl-incf normalize-calls) opencode-shell--turns))
+                ((symbol-function 'copy-tree)
+                 (lambda (tree &optional _vecp)
+                   (cl-incf copy-tree-calls)
+                   (copy-sequence tree))))
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated"
+           :session-id "session-a" :message-id "assistant-1" :part-id "part-1"
+           :part ((id . "part-1") (sessionID . "session-a")
+                  (messageID . "assistant-1") (type . "tool") (tool . "bash")
+                  (state . ((status . "completed")))))))
+      (should (= normalize-calls 0))
+      (should (= copy-tree-calls 0))
+      (should (equal (opencode-shell-response-tool-progress
+                      (opencode-shell--turn-parts (car opencode-shell--turns)))
+                     '(("bash" . "completed")))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here
