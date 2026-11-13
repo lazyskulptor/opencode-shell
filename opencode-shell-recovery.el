@@ -12,8 +12,14 @@
 (require 'cl-lib)
 
 (defvar opencode-shell-recovery--states (make-hash-table :test #'equal))
-(defconst opencode-shell-recovery--max-failures 5)
+(defconst opencode-shell-recovery--max-failures 10)
 (defconst opencode-shell-recovery--attempt-timeout 10)
+(defconst opencode-shell-recovery--blips-tolerated-before-kill 1
+  "Consecutive failures a live-but-unhealthy owned process is given before
+the caller should force-kill it so the next retry spawns a fresh one, rather
+than re-probing the same process that will never pass a health check again.
+0 kills on the very first failure; the default of 1 tolerates one transient
+blip first.")
 
 (defun opencode-shell-recovery--state (key)
   "Return the retry state for server KEY."
@@ -40,6 +46,10 @@
 (defun opencode-shell-recovery-exhausted-p (key)
   "Return whether KEY exhausted automatic retry attempts."
   (plist-get (gethash key opencode-shell-recovery--states) :exhausted))
+
+(defun opencode-shell-recovery-failure-count (key)
+  "Return KEY's number of consecutive recorded failures so far."
+  (or (plist-get (gethash key opencode-shell-recovery--states) :failures) 0))
 
 (defun opencode-shell-recovery-mark-offline (key)
   "Mark KEY offline, returning non-nil only for a new outage."

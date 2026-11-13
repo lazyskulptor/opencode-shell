@@ -10,6 +10,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 
@@ -18,6 +19,68 @@
   (when (listp object)
     (or (alist-get key object)
         (alist-get (symbol-name key) object nil nil #'equal))))
+
+(defun opencode-shell-response--replace-field (alist key value)
+  "Return a shallow copy of ALIST with KEY set to VALUE."
+  (let ((copy (mapcar (lambda (entry)
+                        (if (consp entry) (cons (car entry) (cdr entry)) entry))
+                      alist)))
+    (setf (alist-get key copy) value)
+    copy))
+
+(defun opencode-shell-response-compact-part (part)
+  "Return PART with unrendered bulk tool and reasoning payloads compacted."
+  (if (not (listp part))
+      part
+    (let ((type (format "%s" (or (opencode-shell-response--get part 'type) "")))
+          (state (opencode-shell-response--get part 'state)))
+      (cond
+       ((equal type "reasoning")
+        (let ((text (opencode-shell-response--get part 'text)))
+          (if (and (stringp text) (> (length text) 256))
+              (opencode-shell-response--replace-field
+               part 'text (format "%d:%s" (length text)
+                                  (substring text (- (length text) 64))))
+            part)))
+       ((and (listp state)
+             (or (member type '("tool" "tool_use" "tool-result" "tool-invocation"))
+                 (opencode-shell-response--get part 'tool)))
+        (let* ((output (opencode-shell-response--get state 'output))
+               (trimmed-output (if (and (stringp output) (> (length output) 500))
+                                   (substring output 0 500)
+                                 output))
+               (has-bloat (or (seq-some (lambda (entry)
+                                          (and (consp entry)
+                                               (member (format "%s" (car entry))
+                                                       '("input" "raw" "diff" "patch" "attachments"))))
+                                        state)
+                              (not (eq output trimmed-output)))))
+          (if (not has-bloat)
+              part
+            (let ((compact-state
+                   (delq nil
+                         (mapcar (lambda (entry)
+                                   (when (consp entry)
+                                     (let ((k (format "%s" (car entry))))
+                                       (cond
+                                        ((member k '("input" "raw" "diff" "patch" "attachments"))
+                                         nil)
+                                        ((equal k "output")
+                                         (cons (car entry) trimmed-output))
+                                        (t entry)))))
+                                 state))))
+              (opencode-shell-response--replace-field part 'state compact-state)))))
+       (t part)))))
+
+(defun opencode-shell-response-compact-envelope (envelope)
+  "Return ENVELOPE with unrendered bulk payloads compacted in its parts."
+  (if (not (listp envelope))
+      envelope
+    (let* ((parts (opencode-shell-response--get envelope 'parts))
+           (compacted (mapcar #'opencode-shell-response-compact-part parts)))
+      (if (cl-every #'eq parts compacted)
+          envelope
+        (opencode-shell-response--replace-field envelope 'parts compacted)))))
 
 (defun opencode-shell-response-normalize-part (part)
   "Return a canonical, payload-free model for assistant PART."

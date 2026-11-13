@@ -21,6 +21,56 @@
                                         (type . "text")
                                         (text . ,(format "응답 %d" n))))))))))
 
+(ert-deftest opencode-shell-acceptance-caps-rendered-turns-to-recent-window ()
+  "Only the most recent `opencode-shell-max-rendered-turns' are drawn; state keeps
+all turns.  Capping keeps render/reconcile O(cap) so large sessions stay smooth."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((opencode-shell-max-rendered-turns 3))
+      (opencode-shell--render-messages (opencode-shell-acceptance--messages 10))
+      (should (= (length opencode-shell--turns) 10))
+      (should (= (length opencode-shell--rendered-turns) 3))
+      (let ((text (buffer-string)))
+        (should (string-match-p "질문 10" text))
+        (should (string-match-p "질문 8" text))
+        (should (string-match-p "응답 9" text))
+        (should-not (string-match-p "질문 7" text))
+        (should-not (string-match-p "질문 5" text))))))
+
+(ert-deftest opencode-shell-acceptance-response-cache-skips-unchanged-turns ()
+  "A full rebuild reuses cached response projections for unchanged turns.
+This keeps every resync/rebuild O(changed turns) instead of re-projecting the
+whole transcript, which froze Emacs on each prompt in large sessions."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages (opencode-shell-acceptance--messages 3))
+    (let ((calls 0)
+          (orig (symbol-function 'opencode-shell--response-display)))
+      (cl-letf (((symbol-function 'opencode-shell--response-display)
+                 (lambda (&rest a) (cl-incf calls) (apply orig a))))
+        (opencode-shell--render-turns t)
+        (should (= calls 0))
+        ;; Changing a turn invalidates only that turn's cache entry.
+        (setf (opencode-shell--turn-status (car opencode-shell--turns)) 'receiving)
+        (opencode-shell--render-turns t)
+        (should (= calls 1))))))
+
+(ert-deftest opencode-shell-acceptance-appended-prompt-keeps-blank-line ()
+  "A prompt appended on submit is separated from the prior response by a blank line.
+Regression: the append path inserted at the shared composer-label newline, leaving
+only one newline so the new prompt glued to the previous response."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "sep")
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (_m _p _cb &optional _b _pa _e) nil)))
+      (opencode-shell--render-messages (opencode-shell-acceptance--messages 1))
+      (goto-char opencode-shell--composer-start)
+      (insert "질문 2")
+      (opencode-shell--submit)
+      (should (string-match-p "응답 1\n\n질문 2" (buffer-string)))
+      (should-not (string-match-p "응답 1\n질문 2" (buffer-string))))))
+
 (ert-deftest opencode-shell-acceptance-ten-turn-conversation ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -318,14 +368,14 @@
                 (parts . (((type . "text") (text . "question")))))
                ((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
                 (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-            (should (string-match-p "partial\nReceiving" (buffer-string)))
+            (should (string-match-p "partial\n\nReceiving" (buffer-string)))
             (should opencode-shell--spinner-overlays)
             (should-not (opencode-shell--composer-visible-p))
             (should (equal (opencode-shell--composer-text) "draft"))
             (should (= 2 (- (point) opencode-shell--composer-start)))
             (opencode-shell--receive-permissions
              '(((id . "p") (sessionID . "s") (permission . "read"))))
-            (should (string-match-p "partial\nReceiving" (buffer-string)))
+            (should (string-match-p "partial\n\nReceiving" (buffer-string)))
             (should (= 1 (how-many "Receiving" (point-min) (point-max))))
             (should (equal (opencode-shell--composer-text) "draft"))))
       (set-window-buffer window previous)
@@ -369,7 +419,7 @@
               (opencode-shell--animation-tick)
               (should opencode-shell--spinner-overlays)
               (apply (nth 2 (car timers)) (nth 3 (car timers)))
-              (should (string-match-p "latest\nReceiving" (buffer-string)))
+              (should (string-match-p "latest\n\nReceiving" (buffer-string)))
               (should-not (opencode-shell--composer-visible-p))
               (opencode-shell--render-messages
                (list user '((info . ((id . "a") (role . "assistant")

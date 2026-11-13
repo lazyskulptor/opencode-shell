@@ -35,10 +35,16 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
    circuit for that runtime while polling remains active.
 8. Buffer text and markers are changed only on Emacs's main thread. The runtime
    minimizes that work instead of attempting unsafe worker-thread rendering.
-9. SSH-forwarded remote profiles suspend the existing HTTP polling timer while
-   offline. Their bounded SSH retry timer is independent of polling; ordinary
-   poll wakes cannot reopen an exhausted retry budget. The health probe runs
-   outside the session HTTP readiness gate to avoid a dependency cycle.
+9. Transport loss pauses the existing HTTP polling timer and any SSE reconnect
+   cadence immediately instead of retrying in the background. For SSH-forwarded
+   profiles (including profiles whose remote scope is inferred from a TRAMP
+   `:directory`), going offline also terminates any owned tunnel process so a
+   half-dead tunnel cannot hold the local port open. All `url-retrieve'
+   buffers disable `url-http' keep-alive retries (`url-http-no-retry') and
+   neutralize process sentinels and exit-query flags before buffer teardown so
+   dropped or timed-out connections never trigger interactive kill prompts.
+   Reconnection happens only on explicit user action (`opencode-shell--resync'
+   via `g r' / `C-c C-r', or `opencode-shell-restart' via `g R' / `C-c C-k').
 10. Once SSH forwarding and endpoint health return, subscribed remote transcripts
     reuse the existing full authoritative resync in their original buffers.
     Idle unsubscribed buffers resync when displayed or explicitly requested;

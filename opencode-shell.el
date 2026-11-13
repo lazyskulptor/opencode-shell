@@ -32,6 +32,7 @@
 (require 'opencode-shell-interaction)
 (require 'opencode-shell-response)
 (require 'opencode-shell-recovery)
+(require 'opencode-shell-transport)
 
 (defgroup opencode-shell nil "Unofficial Emacs client for OpenCode." :group 'tools)
 
@@ -67,7 +68,6 @@ Supported keys include `:name', `:base-url', optional remote `:directory',
 and lifecycle keys."
   :type '(repeat plist) :group 'opencode-shell)
 
-(defvar opencode-shell--servers (make-hash-table :test #'equal))
 (defvar opencode-shell--generated-profile-commands nil)
 (defconst opencode-shell--mode-commands
   '(opencode-shell--refresh opencode-shell--filter
@@ -83,7 +83,6 @@ and lifecycle keys."
 (defvar-local opencode-shell--profile nil)
 (defvar-local opencode-shell--base-url nil)
 
-(defconst opencode-shell--process-tail-limit 4096)
 (defconst opencode-shell--snapshot-request-timeout 20
   "Maximum seconds a read-only snapshot may hold an in-flight guard.")
 
@@ -106,25 +105,6 @@ and lifecycle keys."
                              "/" (or (plist-get profile :base-url)
                                       opencode-shell-base-url))))))
 
-(defun opencode-shell--server-base-url (profile)
-  "Return PROFILE's canonical server base URL."
-  (let* ((url (url-generic-parse-url
-               (or (plist-get profile :base-url) opencode-shell-base-url)))
-         (scheme (downcase (or (url-type url) "http")))
-         (host (downcase (or (url-host url) "")))
-         (host (if (member host '("localhost" "127.0.0.1" "::1" "[::1]"))
-                   "localhost" host))
-         (port (url-port url))
-         (port (unless (or (and (equal scheme "http") (equal port 80))
-                           (and (equal scheme "https") (equal port 443)))
-                 port))
-         (path (or (url-filename url) "")))
-    (format "%s://%s%s%s" scheme host (if port (format ":%s" port) "")
-            (if (equal path "/") "" (string-remove-suffix "/" path)))))
-
-(defun opencode-shell--server-key (profile)
-  "Return the lifecycle identity for PROFILE's server."
-  (opencode-shell--server-base-url profile))
 
 (defun opencode-shell--server-lifecycle-config (profile)
   "Return normalized, non-secret lifecycle configuration for PROFILE."
@@ -185,6 +165,17 @@ and lifecycle keys."
                    (or (plist-get profile :base-url) opencode-shell-base-url)))
              (host (downcase (or (url-host url) ""))))
         (not (member host '("" "localhost" "127.0.0.1" "::1"))))))
+
+(defun opencode-shell--profile-sse-eligible-p (profile)
+  "Return non-nil when PROFILE's /event SSE stream uses a local socket.
+True when the base URL host is loopback, which holds for a directly local
+server and for an SSH port-forwarded profile (base URL 127.0.0.1/localhost).
+Such profiles take incremental SSE updates instead of re-parsing the whole
+transcript on every poll, the dominant cost on a large session."
+  (let* ((url (url-generic-parse-url
+               (or (plist-get profile :base-url) opencode-shell-base-url)))
+         (host (downcase (or (url-host url) ""))))
+    (and (member host '("" "localhost" "127.0.0.1" "::1")) t)))
 
 (defun opencode-shell--canonical-directory (directory)
   "Return DIRECTORY in canonical directory form without remote I/O."
@@ -515,7 +506,6 @@ Move the associated API log buffer so its name stays in sync."
   "Base name for API request log buffers."
   :type 'string :group 'opencode-shell)
 
-(defvar opencode-shell--request-log-counter 0)
 (defvar opencode-shell--session-id)
 (defvar opencode-shell--profile)
 
@@ -550,11 +540,19 @@ Move the associated API log buffer so its name stays in sync."
 
 (defvar-local opencode-shell--sessions nil)
 (defvar-local opencode-shell--browser-dirty nil)
+(defvar-local opencode-shell--last-refresh-escalation 0
+  "`float-time' of the last failed-refresh connection reload.")
 (defvar-local opencode-shell--show-child-sessions nil)
 (defvar-local opencode-shell--session-status nil)
 (defvar-local opencode-shell--directory nil)
 (defvar-local opencode-shell--session-id nil)
 (defvar-local opencode-shell--session-title nil)
+(defvar-local opencode-shell--subagent-session-p nil
+  "Non-nil when the current session itself belongs to a parent session.
+A subagent session is driven by its parent's `task' tool call rather than
+direct user input, so its composer stays hidden and `opencode-shell--submit'
+refuses to send a prompt into it.  Set from `opencode-shell--refresh-session-metadata'
+once the owning `/session' snapshot is known; nil (permit editing) until then.")
 (defvar-local opencode-shell--models nil)
 (defvar-local opencode-shell--agents nil)
 (defvar-local opencode-shell--configured-model nil)
@@ -605,6 +603,11 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--message-applied-sequence 0)
 (defvar-local opencode-shell--message-envelopes nil)
 (defvar-local opencode-shell--message-order nil)
+(defvar-local opencode-shell--message-order-tail nil)
+(defvar-local opencode-shell--parent-assistant-ids nil)
+(defvar-local opencode-shell--orphan-message-parts nil)
+(defvar-local opencode-shell--recent-turn-cache nil)
+(defvar-local opencode-shell--transient-reconcile-pending nil)
 (defvar-local opencode-shell--removed-message-ids nil)
 (defvar-local opencode-shell--normalized-changed-turns nil)
 (defvar-local opencode-shell--message-state-revision 0)
@@ -623,6 +626,12 @@ Move the associated API log buffer so its name stays in sync."
 (defvar-local opencode-shell--question-refresh-pending nil)
 (defvar-local opencode-shell--known-descendant-session-ids nil)
 (defvar-local opencode-shell--probed-session-ids nil)
+(defvar-local opencode-shell--task-parts-seen nil
+  "Hash set of `task' tool part ids that already triggered a session lookup.
+A quiet subagent (one that never raises a permission or question) would
+otherwise only ever surface on a manual or reconnect-triggered full resync;
+seeing its spawning `task' tool part for the first time triggers one instead,
+without adding a `/session' call to the lean periodic poll cycle.")
 (defvar-local opencode-shell--descendant-session-anchors nil
   "Alist of subagent session id to its discovery-time turn id.
 Fallback anchor used when the spawning turn cannot be derived from tool-call
@@ -635,11 +644,9 @@ part data.")
   "Non-nil when `/session/status' last reported this session as not busy.
 Lets a turn left incomplete only by a detached `task' tool settle, matching the
 web UI.  Nil (unknown) is conservative and keeps the original behavior.")
-(defvar-local opencode-shell--request-error-notified nil
-  "Non-nil once a request failure was reported, until the next success.
-Collapses the burst of identical transport failures a dropped network or a
-machine returning from sleep produces into a single message.")
 (defvar-local opencode-shell--last-lifecycle-signature nil)
+(defvar-local opencode-shell--relocated-turn nil
+  "Turn whose response block was suppressed for permission-box relocation.")
 (defvar-local opencode-shell--table-render-width nil)
 (defvar-local opencode-shell--table-rerendering nil)
 (defvar-local opencode-shell--table-layout-timer nil)
@@ -742,61 +749,19 @@ machine returning from sleep produces into a single message.")
       (and (symbolp key) (map-elt object (symbol-name key)))
       (and (stringp key) (map-elt object (intern key)))))
 
-(defun opencode-shell--query (params)
-  "Encode non-nil PARAMS as a query string."
-  (mapconcat (lambda (pair)
-               (concat (url-hexify-string (format "%s" (car pair))) "="
-                       (url-hexify-string (format "%s" (cdr pair)))))
-             (seq-filter #'cdr params) "&"))
-
-(defun opencode-shell--url (path &optional params)
-  "Build an API URL for PATH and PARAMS, adding directory scope."
-  (let* ((query (opencode-shell--query
-                 (append params
-                         (and opencode-shell--directory
-                              (not (assoc 'directory params))
-                              `((directory . ,opencode-shell--directory))))))
-         (base (string-remove-suffix "/" (or opencode-shell--base-url
-                                               (plist-get opencode-shell--profile :base-url)
-                                               opencode-shell-base-url))))
-    (concat base path (unless (string-empty-p query) (concat "?" query)))))
-
-(defun opencode-shell--bounded-error (value)
-  "Return VALUE as a bounded single-line error string."
-  (truncate-string-to-width
-   (replace-regexp-in-string "[\n\r\t ]+" " " (format "%s" value)) 300 nil nil t))
-
-(defun opencode-shell--json-read-buffer ()
-  "Read the HTTP response body at point as JSON."
-  (goto-char (point-min))
-  (unless (re-search-forward "\r?\n\r?\n" nil t)
-    (error "Malformed HTTP response"))
-  (if (= (point) (point-max)) nil
-    (json-parse-buffer :object-type 'alist :array-type 'list
-                       :null-object nil :false-object nil)))
-
-(defun opencode-shell--routine-snapshot-path-p (path)
-  "Return non-nil when successful PATH polling should stay out of logs."
-  (or (member path '("/permission" "/question"))
-      (string-match-p "/session/[^/]+/message\\'" path)))
-
-(defun opencode-shell--ssh-forwarded-profile-p (profile)
-  "Return non-nil when PROFILE reaches its loopback HTTP endpoint over SSH."
-  (let* ((command (plist-get profile :start-command))
-         (url (url-generic-parse-url (or (plist-get profile :base-url)
-                                         opencode-shell-base-url))))
-    (and (plist-get profile :remote)
-         (consp command)
-         (stringp (car command))
-         (equal (file-name-nondirectory (car command)) "ssh")
-         (member (url-host url) '("localhost" "127.0.0.1" "::1")))))
-
 (defun opencode-shell--ssh-disconnected (profile)
   "Pause SSH-backed PROFILE's HTTP polling after transport loss."
-  (let ((key (opencode-shell--server-key profile))
-        (origin (current-buffer)))
+  (let ((key (opencode-shell--server-key profile)))
     (when (opencode-shell-recovery-mark-offline key)
+      (opencode-shell-recovery-suspend key)
       (opencode-shell-async-pause-runtime key)
+      (when-let ((state (gethash key opencode-shell--servers)))
+        (let ((process (plist-get state :process)))
+          (setf (plist-get state :process) nil
+                (plist-get state :owned) nil)
+          (puthash key state opencode-shell--servers)
+          (when (and (processp process) (process-live-p process))
+            (delete-process process))))
       (dolist (buffer (buffer-list))
         (with-current-buffer buffer
           (when (and (derived-mode-p 'opencode-shell-mode)
@@ -807,46 +772,7 @@ machine returning from sleep produces into a single message.")
                         opencode-shell--capabilities-loading nil)
             (dolist (resource '(messages permissions questions))
               (opencode-shell--settle-hydration resource nil)))))
-      (message "OpenCode: SSH transport offline; retry with g r")
-      (let ((needed
-             (lambda ()
-               (or (and (buffer-live-p origin)
-                        (with-current-buffer origin
-                          (or (derived-mode-p 'opencode-shell-mode)
-                              (derived-mode-p 'opencode-shell-sessions-mode))))
-                    (when-let ((runtime (opencode-shell-async-runtime-get key)))
-                      (> (hash-table-count (plist-get runtime :subscribers)) 0))
-                    (opencode-shell--ssh-prune-waiters key)))))
-        (opencode-shell-recovery-failed
-         key (lambda () (opencode-shell--ssh-retry profile nil needed)) needed)))))
-
-(defun opencode-shell--ssh-retry (profile &optional on-ready needed)
-  "Retry PROFILE's SSH transport once through the existing start flow."
-  (let ((key (opencode-shell--server-key profile)))
-    (unless (opencode-shell-recovery-exhausted-p key)
-      (opencode-shell-recovery-watch-attempt
-       key
-       (lambda ()
-         (when-let ((state (gethash key opencode-shell--servers)))
-            (when (or (plist-get state :checking)
-                      (plist-get state :starting))
-             (opencode-shell--fail-start key (plist-get state :attempt)
-                                         "SSH readiness timed out")))))
-      (opencode-shell--start-server
-       profile
-       (lambda (_ready)
-         (opencode-shell-recovery-success key)
-         (opencode-shell-async-resume-runtime key)
-         (opencode-shell--ssh-reconcile key)
-         (when on-ready (funcall on-ready)))
-       (lambda ()
-         (opencode-shell-recovery-failed
-          key (lambda () (opencode-shell--ssh-retry profile on-ready needed))
-          (or needed
-               (lambda ()
-                 (or (when-let ((runtime (opencode-shell-async-runtime-get key)))
-                       (> (hash-table-count (plist-get runtime :subscribers)) 0))
-                      (opencode-shell--ssh-prune-waiters key)))))) t))))
+      (message "OpenCode: SSH transport offline; retry with g r"))))
 
 (defun opencode-shell--ssh-reconcile (key)
   "Full-resync KEY's subscribed transcripts after SSH recovery."
@@ -861,265 +787,6 @@ machine returning from sleep produces into a single message.")
              (opencode-shell--resync t)))))
      (plist-get runtime :subscribers))))
 
-(defun opencode-shell--ssh-suspend-if-unused (key)
-  "Suspend KEY's offline recovery when no transcript or command awaits it."
-  (when (and key (opencode-shell-recovery-offline-p key)
-             (not (opencode-shell-async-runtime-get key))
-             (not (opencode-shell--ssh-prune-waiters key))
-             (not (plist-get (gethash key opencode-shell--servers)
-                              :failure-callbacks)))
-    (opencode-shell-recovery-suspend key)))
-
-(defun opencode-shell--ssh-prune-waiters (key)
-  "Drop KEY's pending GET callbacks whose original buffer is no longer current."
-  (when-let ((state (gethash key opencode-shell--servers)))
-    (setf (plist-get state :callbacks)
-          (seq-filter
-           (lambda (entry)
-             (if (and (consp entry) (keywordp (car entry)))
-                 (let ((origin (plist-get entry :origin)))
-                   (and (buffer-live-p origin)
-                        (with-current-buffer origin
-                          (= (plist-get entry :generation)
-                             opencode-shell--generation))))
-               t))
-           (plist-get state :callbacks))
-          (plist-get state :failure-callbacks)
-          (seq-filter
-           (lambda (entry)
-             (if (and (consp entry) (eq (car entry) 'deferred))
-                 (let ((origin (nth 2 entry)))
-                   (and (buffer-live-p origin)
-                        (with-current-buffer origin
-                          (= (nth 3 entry) opencode-shell--generation))))
-               t))
-           (plist-get state :failure-callbacks)))
-    (plist-get state :callbacks)))
-
-(defun opencode-shell--ssh-invoke-start-callback (entry)
-  "Call an ordinary start callback or a live pending GET ENTRY."
-  (if (and (consp entry) (keywordp (car entry)))
-      (funcall (plist-get entry :callback) (plist-get entry :profile))
-    (funcall (car entry) (cdr entry))))
-
-(defun opencode-shell--ssh-wait-request
-    (profile key origin generation method path callback body params error-callback)
-  "Defer a read-only request until KEY's existing SSH start succeeds."
-  (if (not (equal method "GET"))
-      (when error-callback (funcall error-callback))
-    (let ((state (or (gethash key opencode-shell--servers)
-                     (list :profile profile
-                           :config (opencode-shell--server-lifecycle-config profile)))))
-      (setf (plist-get state :callbacks)
-            (cons
-             (list :callback
-                   (lambda (_ready)
-                     (when (buffer-live-p origin)
-                       (with-current-buffer origin
-                         (when (and (= generation opencode-shell--generation)
-                                    (opencode-shell-recovery-ready-p key))
-                           (opencode-shell--request-direct
-                             method path callback body params error-callback)))))
-                   :profile profile :origin origin :generation generation)
-             (plist-get state :callbacks)))
-      (when error-callback
-        (setf (plist-get state :failure-callbacks)
-              (cons (list 'deferred
-                          (lambda ()
-                            (when (buffer-live-p origin)
-                              (with-current-buffer origin
-                                (when (= generation opencode-shell--generation)
-                                  (funcall error-callback)))))
-                          origin generation)
-                    (plist-get state :failure-callbacks))))
-       (puthash key state opencode-shell--servers)
-       (opencode-shell-recovery-resume
-        key (lambda () (opencode-shell--ssh-retry profile))
-        (lambda () (opencode-shell--ssh-prune-waiters key))))))
-
-(defun opencode-shell--ssh-watch-start (key)
-  "Bound KEY's pending SSH health/start attempt."
-  (unless (let ((state (gethash key opencode-shell--servers)))
-            (or (plist-get state :checking) (plist-get state :starting)))
-    (opencode-shell-recovery-watch-attempt
-     key
-     (lambda ()
-       (when-let ((state (gethash key opencode-shell--servers)))
-         (when (or (plist-get state :checking) (plist-get state :starting))
-           (opencode-shell--fail-start key (plist-get state :attempt)
-                                        "SSH readiness timed out")))))))
-
-(defun opencode-shell--request (method path callback &optional body params error-callback)
-  "Send request after an SSH-backed PROFILE has verified its forwarding."
-  (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
-         (key (opencode-shell--server-key profile))
-         (origin (current-buffer))
-         (generation opencode-shell--generation))
-    (if (not (and (opencode-shell--ssh-forwarded-profile-p profile)
-                  (not (opencode-shell-recovery-ready-p key))))
-        (opencode-shell--request-direct method path callback body params error-callback)
-      (cond
-       ((opencode-shell-recovery-exhausted-p key)
-        (when error-callback (funcall error-callback)))
-       ((opencode-shell-recovery-offline-p key)
-        (opencode-shell--ssh-wait-request
-         profile key origin generation method path callback body params error-callback))
-       ((equal method "GET")
-        (let ((starting (let ((state (gethash key opencode-shell--servers)))
-                          (or (plist-get state :checking)
-                              (plist-get state :starting)))))
-          (opencode-shell--ssh-wait-request
-           profile key origin generation method path callback body params error-callback)
-          (unless starting
-            (opencode-shell--ssh-watch-start key)
-            (opencode-shell--start-server
-             profile nil (lambda () (opencode-shell--ssh-disconnected profile))))))
-       (t
-        (opencode-shell--ssh-watch-start key)
-        (opencode-shell--start-server
-         profile
-         (lambda (_ready)
-           (when (buffer-live-p origin)
-             (with-current-buffer origin
-               (when (= generation opencode-shell--generation)
-                 (opencode-shell--request-direct method path callback body params
-                                                 error-callback)))))
-         (lambda ()
-           (when (buffer-live-p origin)
-             (with-current-buffer origin
-               (when (= generation opencode-shell--generation)
-                 (opencode-shell--ssh-disconnected profile)
-                 (when error-callback (funcall error-callback))))))
-         t))))))
-
-(defun opencode-shell--note-request-error (format-string &rest args)
-  "Report a request failure once per outage in the current buffer.
-Shows FORMAT-STRING with ARGS via `message' only when no failure has been
-reported since the last successful request, so a dropped network or a machine
-waking from sleep — which fails every in-flight and polling request at once —
-produces a single notice instead of a flood.  A successful request resets
-`opencode-shell--request-error-notified' so a later outage notifies again."
-  (unless opencode-shell--request-error-notified
-    (setq opencode-shell--request-error-notified t)
-    (apply #'message format-string args)))
-
-(defun opencode-shell--request-direct (method path callback &optional body params error-callback)
-  "Send METHOD request to PATH and call CALLBACK with decoded JSON.
-BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
-called after a transport, status, or decoding failure."
-  (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
-         (ssh (opencode-shell--ssh-forwarded-profile-p profile))
-         (key (opencode-shell--server-key profile))
-         (transport-epoch (and ssh (opencode-shell-recovery-epoch key)))
-         (url-proxy-services
-          (if (opencode-shell--profile-remote-p
-               (or opencode-shell--profile (opencode-shell--default-profile)))
-              url-proxy-services
-            nil))
-         (url-request-method method)
-         (url-request-extra-headers
-          (append '(("Accept" . "application/json"))
-                  (and body '(("Content-Type" . "application/json")))
-                  (when-let ((header
-                              (opencode-shell--auth-header
-                               (or opencode-shell--profile
-                                   (opencode-shell--default-profile)))))
-                    (list header))))
-         (url-request-data (and body (encode-coding-string (json-serialize body) 'utf-8)))
-         (origin (current-buffer))
-         (request-generation opencode-shell--generation)
-         (request-id (cl-incf opencode-shell--request-log-counter))
-         (started (float-time))
-         (quiet-success (opencode-shell--routine-snapshot-path-p path)))
-    (when (and opencode-shell-log-requests (not quiet-success))
-      (opencode-shell--log "OpenCode API #%d → %s %s" request-id method path))
-    ;; A connection that never completes (e.g. a local SSH port-forward whose
-    ;; remote end died mid-request) otherwise leaves its response buffer and
-    ;; process behind indefinitely, nagging to confirm a kill on every later
-    ;; Emacs exit or buffer cleanup.
-    (when-let ((response-buffer
-                (url-retrieve
-                 (opencode-shell--url path params)
-                 (lambda (status)
-       (let ((response (current-buffer)))
-          (unwind-protect
-              (unless (and ssh (not (= transport-epoch
-                                       (opencode-shell-recovery-epoch key))))
-               (if-let ((err (plist-get status :error)))
-                   (when (and (buffer-live-p origin)
-                              (with-current-buffer origin
-                                (= request-generation opencode-shell--generation)))
-                    (with-current-buffer origin
-                       (when (opencode-shell--ssh-forwarded-profile-p
-                              (or opencode-shell--profile
-                                  (opencode-shell--default-profile)))
-                         (opencode-shell--ssh-disconnected
-                          (or opencode-shell--profile
-                              (opencode-shell--default-profile))))
-                       (when opencode-shell-log-requests
-                          (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
-                                              request-id (- (float-time) started) method path))
-                        (unless (opencode-shell--ssh-forwarded-profile-p
-                                 (or opencode-shell--profile
-                                     (opencode-shell--default-profile)))
-                          (opencode-shell--note-request-error
-                           "OpenCode: %s" (opencode-shell--bounded-error err)))
-                       (when error-callback
-                         (opencode-shell-async-enqueue
-                          origin (list 'request-error request-id)
-                           request-generation error-callback))))
-               (condition-case err
-                    (let ((code (or (bound-and-true-p url-http-response-status) 0)))
-                       (if (not (<= 200 code 299))
-                           (when (and (buffer-live-p origin)
-                                      (with-current-buffer origin
-                                        (= request-generation opencode-shell--generation)))
-                            (with-current-buffer origin
-                              (when opencode-shell-log-requests
-                                 (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
-                                                     request-id code (- (float-time) started) method path))
-                               (opencode-shell--note-request-error
-                                "OpenCode: HTTP %s request failed" code)
-                               (when error-callback
-                                 (opencode-shell-async-enqueue
-                                  origin (list 'request-error request-id)
-                                   request-generation error-callback))))
-                        (let ((value (unless (= code 204)
-                                       (opencode-shell--json-read-buffer))))
-                           (when (and (buffer-live-p origin)
-                                      (with-current-buffer origin
-                                        (= request-generation opencode-shell--generation)))
-                            (with-current-buffer origin
-                              (when (and opencode-shell-log-requests
-                                         (not quiet-success))
-                                 (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
-                                                     request-id code (- (float-time) started) method path))
-                               ;; Success clears the once-per-outage notice.
-                               (setq opencode-shell--request-error-notified nil)
-                               (opencode-shell-async-enqueue
-                                origin (list 'request request-id)
-                                 request-generation callback value))))))
-                 (error
-                   (when (and (buffer-live-p origin)
-                              (with-current-buffer origin
-                                (= request-generation opencode-shell--generation)))
-                    (with-current-buffer origin
-                      (when opencode-shell-log-requests
-                         (opencode-shell--log "OpenCode API #%d ← decode-error %.2fs [%s %s]"
-                                             request-id (- (float-time) started) method path))
-                       (opencode-shell--note-request-error
-                        "OpenCode: %s" (opencode-shell--bounded-error
-                                         (error-message-string err)))
-                       (when error-callback
-                         (opencode-shell-async-enqueue
-                          origin (list 'request-error request-id)
-                           request-generation error-callback))))))))
-            (kill-buffer response))))
-                 nil t t)))
-      (when-let ((process (and (bufferp response-buffer)
-                                (get-buffer-process response-buffer))))
-        (set-process-query-on-exit-flag process nil))
-      response-buffer)))
 
 (defun opencode-shell--time (session)
   "Return SESSION update time as a sortable number."
@@ -1379,8 +1046,14 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
       (opencode-shell--refresh))
     (if current-window (switch-to-buffer buffer) (pop-to-buffer buffer))))
 
+(defconst opencode-shell--refresh-escalation-cooldown 15
+  "Minimum seconds between failed-refresh connection reloads.")
+
 (defun opencode-shell--refresh ()
-  "Refresh sessions and statuses, preserving point where possible."
+  "Refresh sessions and statuses, preserving point where possible.
+On transport failure, escalate to re-establish the server or SSH tunnel and
+retry, so a dropped port forward self-heals instead of silently leaving a
+stale list."
   (interactive)
   (let ((id (tabulated-list-get-id))
         (generation (cl-incf opencode-shell--generation)))
@@ -1402,7 +1075,34 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                       #'opencode-shell--apply-session-browser-snapshot
                       all-sessions id generation))))))
           nil
-          '((limit . 1000))))))))
+          '((limit . 1000))
+          (lambda () (opencode-shell--refresh-failed generation)))))
+     nil nil
+     (lambda () (opencode-shell--refresh-failed generation)))))
+
+(defun opencode-shell--refresh-failed (generation)
+  "Re-establish the server or SSH tunnel after a failed GENERATION refresh.
+Guarded by a cooldown so a persistent outage reloads the connection at most once
+per cooldown window; `opencode-shell--start-server' coalesces concurrent starts
+and the transport's own recovery backoff bounds the underlying retries.  The
+cooldown is the sole guard, so a reload whose server start never completes does
+not permanently block later re-escalation."
+  (when (and (= generation opencode-shell--generation)
+             (> (- (float-time) opencode-shell--last-refresh-escalation)
+                opencode-shell--refresh-escalation-cooldown))
+    (setq opencode-shell--last-refresh-escalation (float-time))
+    (opencode-shell--note-request-error
+     "OpenCode: session refresh failed; re-establishing connection...")
+    (let ((origin (current-buffer))
+          (profile opencode-shell--profile))
+      (cl-flet ((retry ()
+                  (when (buffer-live-p origin)
+                    (with-current-buffer origin
+                      (opencode-shell--refresh)))))
+        (if (plist-get profile :start-command)
+            (opencode-shell--start-server-for-command
+             profile (lambda (_ready) (retry)))
+          (retry))))))
 
 (defun opencode-shell--apply-session-browser-snapshot (sessions id generation)
   "Apply SESSIONS for GENERATION, preserving row ID when visible."
@@ -1536,13 +1236,30 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
     map)
   "Mouse map for the session ID in transcript headers.")
 
+(defvar-local opencode-shell--header-model-cache nil
+  "Cached `(SELECTED-MODEL MODELS . LABEL)' tuple for header-line rendering.")
+
+(defun opencode-shell--header-model-label ()
+  "Return the display label for `opencode-shell--selected-model'."
+  (if (and (consp opencode-shell--header-model-cache)
+           (eq (car opencode-shell--header-model-cache)
+               opencode-shell--selected-model)
+           (eq (cadr opencode-shell--header-model-cache)
+               opencode-shell--models))
+      (cddr opencode-shell--header-model-cache)
+    (let ((label (or (car (rassoc opencode-shell--selected-model
+                                  opencode-shell--models))
+                     "server default")))
+      (setq opencode-shell--header-model-cache
+            (cons opencode-shell--selected-model
+                  (cons opencode-shell--models label)))
+      label)))
+
 (defun opencode-shell--header ()
   "Return live transcript agent, model, and session metadata."
   (let* ((left (format " agent:%s  model:%s"
                        (or opencode-shell--selected-agent "server default")
-                       (or (car (rassoc opencode-shell--selected-model
-                                       opencode-shell--models))
-                           "server default")))
+                       (opencode-shell--header-model-label)))
          (right-text (format "session:%s" (or opencode-shell--session-id "pending")))
          (right (if opencode-shell--session-id
                     (concat (propertize right-text
@@ -1634,6 +1351,11 @@ history strictly before the chosen prompt."
             parts))
 
 ;;;###autoload
+(defconst opencode-shell--rename-session-timeout 120
+  "Seconds to wait for the title agent's reply in `opencode-shell-rename-session'.
+Longer than `opencode-shell--url-retrieve-timeout' because this request
+blocks on an LLM completion rather than an ordinary API round trip.")
+
 (defun opencode-shell-rename-session ()
   "Ask OpenCode's native title agent to retitle this session from its context.
 Sends a throwaway message to the hidden `title' agent, drops that exchange
@@ -1642,8 +1364,9 @@ and deletes the throwaway messages server-side."
   (interactive)
   (opencode-shell--assert-session-idle)
   (message "Generating OpenCode session title...")
-  (opencode-shell--request
-   "POST" (format "/session/%s/message" opencode-shell--session-id)
+  (let ((opencode-shell--url-retrieve-timeout opencode-shell--rename-session-timeout))
+   (opencode-shell--request
+    "POST" (format "/session/%s/message" opencode-shell--session-id)
    (lambda (reply)
      (let* ((info (opencode-shell--get reply 'info))
             (assistant-id (opencode-shell--get info 'id))
@@ -1675,8 +1398,8 @@ and deletes the throwaway messages server-side."
    `((parts . [((type . "text")
                 (text . "Based on this entire conversation so far, generate an updated title."))])
      (agent . "title"))
-   nil
-   (lambda () (message "OpenCode title generation failed"))))
+    nil
+    (lambda () (message "OpenCode title generation failed")))))
 
 (defun opencode-shell--destination-server-directory (directory profile)
   "Return DIRECTORY's project root in PROFILE server-native form."
@@ -1809,6 +1532,7 @@ Return non-nil when cached capabilities were applied."
   [["Session"
     ("RET" "Submit" opencode-shell--submit)
     ("g" "Resync" opencode-shell--resync)
+    ("R" "Reconnect (force)" opencode-shell-restart)
     ("a" "Abort" opencode-shell--abort)]
    ["Options"
     ("m" "Model" opencode-shell--select-model)
@@ -1833,6 +1557,7 @@ Return non-nil when cached capabilities were applied."
     (define-key map (kbd "C-c C-m") #'opencode-shell--select-agent)
     (define-key map (kbd "C-<tab>") #'opencode-shell--next-agent)
     (define-key map (kbd "C-c C-r") #'opencode-shell--resync)
+    (define-key map (kbd "C-c C-k") #'opencode-shell-restart)
     (define-key map (kbd "C-c C-a") #'opencode-shell--abort)
     (define-key map (kbd "C-c C-p") #'opencode-shell--permissions)
     (define-key map (kbd "C-c C-y") #'opencode-shell--permission-allow-once)
@@ -2035,14 +1760,22 @@ exactly one label afterwards."
 
 (defun opencode-shell--remove-composer-labels (&optional limit)
   "Remove all characters with the composer label property up to LIMIT."
-  (let ((pos (point-min))
-        (limit (or limit (point-max))))
-    (while (setq pos (text-property-any pos limit 'opencode-shell-composer-label t))
-      (let ((end pos))
-        (while (and (< end limit)
-                    (get-text-property end 'opencode-shell-composer-label))
-          (setq end (1+ end)))
-        (delete-region pos end)))))
+  (let* ((prev-turn (car (last (butlast opencode-shell--turns))))
+         (scan-start (if (and prev-turn
+                              (markerp (opencode-shell--turn-response-end prev-turn))
+                              (marker-position (opencode-shell--turn-response-end prev-turn)))
+                         (max (point-min)
+                              (marker-position (opencode-shell--turn-response-end prev-turn)))
+                       (point-min)))
+         (pos scan-start)
+         (limit-marker (copy-marker (or limit (point-max)))))
+    (unwind-protect
+        (while (setq pos (text-property-any pos limit-marker
+                                            'opencode-shell-composer-label t))
+          (let ((end (next-single-property-change
+                      pos 'opencode-shell-composer-label nil limit-marker)))
+            (delete-region pos end)))
+      (set-marker limit-marker nil))))
 
 (defun opencode-shell--ensure-composer-label ()
   "Restore the structural composer label when an edit removed it.
@@ -2143,6 +1876,7 @@ polluting the user's undo history."
   "OpenCode transcript mode with a writable bottom composer."
   (setq-local buffer-read-only nil)
   (setq-local font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
+  (setq-local font-lock-multiline t)
   (setq-local header-line-format '(:eval (opencode-shell--header)))
   (setq-local mode-line-process '(:eval (opencode-shell--mode-line-status)))
   (setq-local opencode-shell--turn-gutters (make-hash-table :test #'eq))
@@ -2150,13 +1884,20 @@ polluting the user's undo history."
               opencode-shell--rendered-turns nil
                opencode-shell--message-envelopes (make-hash-table :test #'equal)
                opencode-shell--message-order nil
+               opencode-shell--message-order-tail nil
+               opencode-shell--parent-assistant-ids (make-hash-table :test #'equal)
+               opencode-shell--orphan-message-parts (make-hash-table :test #'equal)
+               opencode-shell--recent-turn-cache nil
+               opencode-shell--transient-reconcile-pending nil
                opencode-shell--removed-message-ids (make-hash-table :test #'equal)
               opencode-shell--normalized-changed-turns nil
               opencode-shell--message-state-revision 0
               opencode-shell--render-dirty-turns nil
+              opencode-shell--relocated-turn nil
               opencode-shell--permissions nil
               opencode-shell--known-descendant-session-ids nil
               opencode-shell--probed-session-ids nil
+              opencode-shell--task-parts-seen (make-hash-table :test #'equal)
               opencode-shell--descendant-session-anchors nil
               opencode-shell--descendant-session-status nil
               opencode-shell--session-idle-p nil
@@ -2241,7 +1982,12 @@ polluting the user's undo history."
               (runtime
                 (opencode-shell-async-subscribe-runtime
                 key buffer (concat base "/event") (and auth (list auth))
-                (not (opencode-shell--profile-remote-p profile))
+                ;; SSE delivers incremental deltas, avoiding a full-transcript
+                ;; re-fetch/re-parse on every poll (the dominant cost on large
+                ;; sessions).  Enabled whenever the /event socket is local
+                ;; (direct or SSH port-forwarded); the poll remains the
+                ;; authoritative fallback when SSE drops.
+                (opencode-shell--profile-sse-eligible-p profile)
                 opencode-shell-poll-interval
                 (lambda () (opencode-shell--resync nil))
                 (lambda (event)
@@ -2252,12 +1998,7 @@ polluting the user's undo history."
         (ignore runtime)
          (when (opencode-shell-recovery-offline-p key)
            (setq-local opencode-shell--connection-stale t)
-           (opencode-shell-async-pause-runtime key)
-           (opencode-shell-recovery-resume
-            key (lambda () (opencode-shell--ssh-retry profile))
-            (lambda ()
-              (when-let ((current (opencode-shell-async-runtime-get key)))
-                (> (hash-table-count (plist-get current :subscribers)) 0)))))
+           (opencode-shell-async-pause-runtime key))
         (setq opencode-shell--runtime-key key)
         (opencode-shell-async-subscribe-animation
          buffer opencode-shell-animation-interval
@@ -2334,16 +2075,30 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 
 (defun opencode-shell--merge-parts (known incoming)
   "Merge INCOMING message parts into KNOWN without dropping omitted parts."
-  (let ((result (copy-sequence known)))
-    (dolist (part incoming)
-      (let* ((id (opencode-shell--part-id part))
-             (cell (and id (seq-find (lambda (known-part)
-                                       (equal id (opencode-shell--part-id known-part)))
-                                     result))))
-        (if cell
-            (setcar (memq cell result) (opencode-shell--merge-alist cell part))
-          (setq result (append result (list part))))))
-    result))
+  (if (null incoming)
+      (copy-sequence known)
+    (let* ((result (copy-sequence known))
+           (tail (last result))
+           (cells-by-id (make-hash-table :test #'equal)))
+      (let ((cursor result))
+        (while cursor
+          (when-let ((id (opencode-shell--part-id (car cursor))))
+            (puthash id cursor cells-by-id))
+          (setq cursor (cdr cursor))))
+      (dolist (part incoming result)
+        (let* ((id (opencode-shell--part-id part))
+               (cell (and id (gethash id cells-by-id))))
+          (if cell
+              (setcar cell (opencode-shell--merge-alist (car cell) part))
+            (let ((new-cell (list part)))
+              (if tail
+                  (progn
+                    (setcdr tail new-cell)
+                    (setq tail new-cell))
+                (setq result new-cell
+                      tail new-cell))
+              (when id
+                (puthash id new-cell cells-by-id)))))))))
 
 (defun opencode-shell--merge-envelope (known incoming)
   "Merge partial assistant envelope INCOMING into KNOWN."
@@ -2464,10 +2219,20 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
 
 (defun opencode-shell--turn-by-id (id turns)
   "Find the turn whose stable client or server ID equals ID."
-  (seq-find (lambda (turn)
-              (or (equal id (opencode-shell--turn-id turn))
-                  (equal id (opencode-shell--turn-server-user-id turn))))
-            turns))
+  (let ((cached (and (consp opencode-shell--recent-turn-cache)
+                     (eq (car opencode-shell--recent-turn-cache) turns)
+                     (cdr opencode-shell--recent-turn-cache))))
+    (if (and cached
+             (or (equal id (opencode-shell--turn-id cached))
+                 (equal id (opencode-shell--turn-server-user-id cached))))
+        cached
+      (let ((found (seq-find (lambda (turn)
+                               (or (equal id (opencode-shell--turn-id turn))
+                                   (equal id (opencode-shell--turn-server-user-id turn))))
+                             turns)))
+        (when found
+          (setq opencode-shell--recent-turn-cache (cons turns found)))
+        found))))
 
 (defun opencode-shell--settle-superseded-turns (turns &optional all)
   "Settle nonterminal TURNS superseded by a later prompt.
@@ -2480,6 +2245,24 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
             "Interrupted: Superseded by a later prompt"
             (opencode-shell--turn-locally-settled turn) t)))
   turns)
+
+(defun opencode-shell--note-task-parts (parts)
+  "Trigger one session-list lookup per newly observed `task' tool part in PARTS.
+A quiet subagent only ever surfaces on a full resync; this makes seeing its
+spawning tool call for the first time trigger one, without adding a
+`/session' call to the lean periodic poll cycle."
+  (dolist (part parts)
+    (when-let ((id (opencode-shell--part-id part)))
+      (unless (gethash id opencode-shell--task-parts-seen)
+        (let ((type (opencode-shell--get part 'type)))
+          (when (or (equal type "tool")
+                    (equal type "tool-invocation")
+                    (opencode-shell--get part 'tool))
+            (let ((model (opencode-shell-response-normalize-part part)))
+              (when (and (eq (plist-get model :kind) 'tool)
+                         (equal (plist-get model :name) "task"))
+                (puthash id t opencode-shell--task-parts-seen)
+                (opencode-shell--refresh-session-metadata)))))))))
 
 (defun opencode-shell--aggregate-turn (turn)
   "Recompute TURN presentation state once from its merged assistant messages."
@@ -2502,6 +2285,7 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                    ;; does, when nothing but task tools remain unsettled.
                    (and opencode-shell--session-idle-p
                         (opencode-shell-response-blocked-only-by-task-p parts))))))
+    (opencode-shell--note-task-parts parts)
     (setf (opencode-shell--turn-parts turn) parts
           (opencode-shell--turn-assistant turn)
           (mapconcat (lambda (item) (opencode-shell--message-text (cdr item)))
@@ -2547,23 +2331,32 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                          (opencode-shell--get info 'parentId))))
         (cond
           ((equal role "user")
-           (let* ((text (opencode-shell--message-text envelope))
-                   (local-candidates (gethash text local-turns-by-text))
-                   (turn (or (and id (gethash id turn-index))
+           (let* ((raw-text (opencode-shell--message-text envelope))
+                  (has-parts (not (null (opencode-shell--get envelope 'parts))))
+                  (local-candidates (gethash raw-text local-turns-by-text))
+                  (turn (or (and id (gethash id turn-index))
                             (car local-candidates)
-                             (opencode-shell--make-turn
-                              :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter)))))))
+                            (opencode-shell--make-turn
+                             :id (or id (format "turn-%d" (cl-incf opencode-shell--turn-counter))))))
+                  (text (if (and (not has-parts)
+                                 (string-empty-p raw-text)
+                                 (not (string-empty-p (or (opencode-shell--turn-user turn) ""))))
+                            (opencode-shell--turn-user turn)
+                          raw-text)))
             (when (and local-candidates (eq turn (car local-candidates)))
               (puthash text (cdr local-candidates) local-turns-by-text))
-            (let ((before (opencode-shell--turn-state-signature turn)))
-            (setf (opencode-shell--turn-server-user-id turn) id
-                  (opencode-shell--turn-acknowledged turn) t
-                  (opencode-shell--turn-user turn) text)
-              (unless (opencode-shell--turn-assistant-messages turn)
-                (setf (opencode-shell--turn-status turn)
-                      (if (opencode-shell--turn-locally-settled turn)
-                          'complete 'waiting)))
-              (unless (equal before (opencode-shell--turn-state-signature turn))
+            (let ((next-status (if (opencode-shell--turn-assistant-messages turn)
+                                   (opencode-shell--turn-status turn)
+                                 (if (opencode-shell--turn-locally-settled turn)
+                                     'complete 'waiting))))
+              (unless (and (equal (opencode-shell--turn-server-user-id turn) id)
+                           (eq (opencode-shell--turn-acknowledged turn) t)
+                           (equal (opencode-shell--turn-user turn) text)
+                           (eq (opencode-shell--turn-status turn) next-status))
+                (setf (opencode-shell--turn-server-user-id turn) id
+                      (opencode-shell--turn-acknowledged turn) t
+                      (opencode-shell--turn-user turn) text
+                      (opencode-shell--turn-status turn) next-status)
                 (cl-pushnew turn changed :test #'eq)))
             (when id (puthash id turn turn-index))
             (setq current turn)
@@ -2582,24 +2375,25 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
                                (puthash turn value assistant-indexes)
                                value))))
                       (index (plist-get state :index))
-                      (entry (and id (gethash id index)))
-                     (merged (if entry
-                                 (opencode-shell--merge-envelope (cdr entry) envelope)
-                               envelope)))
-                (unless (and entry (equal (cdr entry) merged))
-                  (if entry
-                      (setcdr entry merged)
-                    (let ((new-entry (cons id merged))
-                          (tail (plist-get state :tail)))
-                      (if tail
-                          (progn
-                            (setcdr tail (list new-entry))
-                            (setf (plist-get state :tail) (cdr tail)))
-                        (setq messages (list new-entry))
-                        (setf (plist-get state :tail) messages))
-                      (when id (puthash id new-entry index))))
-                  (setf (opencode-shell--turn-assistant-messages turn) messages)
-                   (puthash turn t touched)))))))))
+                      (entry (and id (gethash id index))))
+                (unless (and entry (eq (cdr entry) envelope))
+                  (let ((merged (if entry
+                                    (opencode-shell--merge-envelope (cdr entry) envelope)
+                                  envelope)))
+                    (unless (and entry (equal (cdr entry) merged))
+                      (if entry
+                          (setcdr entry merged)
+                        (let ((new-entry (cons id merged))
+                              (tail (plist-get state :tail)))
+                          (if tail
+                              (progn
+                                (setcdr tail (list new-entry))
+                                (setf (plist-get state :tail) (cdr tail)))
+                            (setq messages (list new-entry))
+                            (setf (plist-get state :tail) messages))
+                          (when id (puthash id new-entry index))))
+                      (setf (opencode-shell--turn-assistant-messages turn) messages)
+                      (puthash turn t touched)))))))))))
     (maphash
      (lambda (turn _)
        (let ((before (opencode-shell--turn-state-signature turn)))
@@ -2625,25 +2419,61 @@ prompt is about to be appended.  Otherwise leave the newest turn active."
   "Return ENVELOPE's stable message ID."
   (opencode-shell--get (opencode-shell--get envelope 'info) 'id))
 
+(defun opencode-shell--compact-part (part)
+  "Drop unrendered bulk payloads from PART while preserving metadata."
+  (opencode-shell-response-compact-part part))
+
+(defun opencode-shell--compact-envelope (envelope)
+  "Return ENVELOPE with unrendered bulk payloads compacted in its parts."
+  (opencode-shell-response-compact-envelope envelope))
+
 (defun opencode-shell--ensure-message-cache ()
   "Ensure the current transcript owns an initialized message cache."
   (unless (hash-table-p opencode-shell--message-envelopes)
     (setq opencode-shell--message-envelopes (make-hash-table :test #'equal)
-          opencode-shell--message-order nil))
+          opencode-shell--message-order nil
+          opencode-shell--message-order-tail nil
+          opencode-shell--parent-assistant-ids (make-hash-table :test #'equal)))
+  (unless (hash-table-p opencode-shell--parent-assistant-ids)
+    (setq opencode-shell--parent-assistant-ids (make-hash-table :test #'equal)))
+  (unless (hash-table-p opencode-shell--orphan-message-parts)
+    (setq opencode-shell--orphan-message-parts (make-hash-table :test #'equal)))
   (unless (hash-table-p opencode-shell--removed-message-ids)
     (setq opencode-shell--removed-message-ids (make-hash-table :test #'equal))))
 
 (defun opencode-shell--cache-message-envelope (envelope)
   "Merge ENVELOPE into the buffer-local message index and return the result."
   (opencode-shell--ensure-message-cache)
+  (setq envelope (opencode-shell--compact-envelope envelope))
   (let* ((id (opencode-shell--message-envelope-id envelope))
-        (known (and id (gethash id opencode-shell--message-envelopes)))
-         (merged (if known (opencode-shell--merge-envelope known envelope) envelope)))
+         (known (and id (gethash id opencode-shell--message-envelopes)))
+         (merged (if known
+                     (if (eq known envelope)
+                         known
+                       (let ((candidate (opencode-shell--merge-envelope known envelope)))
+                         (if (equal known candidate) known candidate)))
+                   envelope)))
     (when id
       (unless known
-        (setq opencode-shell--message-order
-              (append opencode-shell--message-order (list id))))
-      (puthash id merged opencode-shell--message-envelopes))
+        (let ((cell (list id)))
+          (if (and opencode-shell--message-order
+                   (consp opencode-shell--message-order-tail)
+                   (null (cdr opencode-shell--message-order-tail)))
+              (setcdr opencode-shell--message-order-tail cell)
+            (setq opencode-shell--message-order
+                  (nconc opencode-shell--message-order cell)))
+          (setq opencode-shell--message-order-tail cell)))
+      (unless (eq known merged)
+        (puthash id merged opencode-shell--message-envelopes))
+      (let* ((info (opencode-shell--get merged 'info))
+             (role (format "%s" (or (opencode-shell--get info 'role) "")))
+             (parent (or (opencode-shell--get info 'parentID)
+                         (opencode-shell--get info 'parentId))))
+        (when (and (equal role "assistant") parent)
+          (let ((existing-ids (gethash parent opencode-shell--parent-assistant-ids)))
+            (unless (member id existing-ids)
+              (puthash parent (append existing-ids (list id))
+                       opencode-shell--parent-assistant-ids))))))
     merged))
 
 (defun opencode-shell--cache-message-snapshot (messages &optional authoritative)
@@ -2654,8 +2484,9 @@ Return a plist containing affected turns and whether a full render is required."
   (let ((ids (delq nil (mapcar #'opencode-shell--message-envelope-id messages)))
         changed force)
     (when authoritative
-      (dolist (id ids) (remhash id opencode-shell--removed-message-ids)))
-    (when authoritative
+      (dolist (id ids) (remhash id opencode-shell--removed-message-ids))
+      (clrhash opencode-shell--parent-assistant-ids)
+      (clrhash opencode-shell--orphan-message-parts)
       (let ((present (make-hash-table :test #'equal)))
         (dolist (id ids) (puthash id t present))
         (let (removed)
@@ -2664,7 +2495,8 @@ Return a plist containing affected turns and whether a full render is required."
                    opencode-shell--message-envelopes)
           (dolist (id removed)
             (remhash id opencode-shell--message-envelopes)))
-        (setq opencode-shell--message-order ids)
+        (setq opencode-shell--message-order (copy-sequence ids)
+              opencode-shell--message-order-tail (last opencode-shell--message-order))
         (let ((kept
                (seq-filter
                 (lambda (turn)
@@ -2682,25 +2514,30 @@ Return a plist containing affected turns and whether a full render is required."
               (setf (opencode-shell--turn-assistant-messages turn) kept)
               (opencode-shell--aggregate-turn turn)
               (push turn changed))))))
-    (dolist (envelope messages)
-      (opencode-shell--cache-message-envelope envelope))
-    (list :changed-turns changed :force force)))
+    (let ((cached (mapcar #'opencode-shell--cache-message-envelope messages)))
+      (list :changed-turns changed :force force :messages cached))))
 
 (defun opencode-shell--cached-assistants-for-parent (parent-id)
   "Return cached assistant envelopes belonging to PARENT-ID in order."
-  (delq nil
-        (mapcar
-         (lambda (id)
-           (let* ((envelope (gethash id opencode-shell--message-envelopes))
-                  (info (opencode-shell--get envelope 'info)))
-             (when (and envelope
-                        (equal (format "%s" (opencode-shell--get info 'role))
-                               "assistant")
-                        (equal (or (opencode-shell--get info 'parentID)
-                                   (opencode-shell--get info 'parentId))
-                               parent-id))
-               envelope)))
-         opencode-shell--message-order)))
+  (if (and (hash-table-p opencode-shell--parent-assistant-ids)
+           (gethash parent-id opencode-shell--parent-assistant-ids))
+      (delq nil
+            (mapcar (lambda (id)
+                      (gethash id opencode-shell--message-envelopes))
+                    (gethash parent-id opencode-shell--parent-assistant-ids)))
+    (delq nil
+          (mapcar
+           (lambda (id)
+             (let* ((envelope (gethash id opencode-shell--message-envelopes))
+                    (info (opencode-shell--get envelope 'info)))
+               (when (and envelope
+                          (equal (format "%s" (opencode-shell--get info 'role))
+                                 "assistant")
+                          (equal (or (opencode-shell--get info 'parentID)
+                                     (opencode-shell--get info 'parentId))
+                                 parent-id))
+                 envelope)))
+           opencode-shell--message-order))))
 
 (defun opencode-shell--rebuild-turn-from-message-cache (parent-id)
   "Rebuild and return PARENT-ID's turn from cached assistant envelopes."
@@ -2746,64 +2583,123 @@ Return a plist containing affected turns and whether a full render is required."
          (known (and message-id
                      (gethash message-id opencode-shell--message-envelopes)))
          parent-id turn before force)
-    (pcase kind
-      ('message-updated
-       (let* ((info (plist-get event :info))
-               (role (format "%s" (opencode-shell--get info 'role)))
-               (parent (or (opencode-shell--get info 'parentID)
-                           (opencode-shell--get info 'parentId))))
-          (unless (and parent (gethash parent opencode-shell--removed-message-ids))
-            (remhash message-id opencode-shell--removed-message-ids)
-            (let ((envelope (opencode-shell--cache-message-envelope
-                             `((info . ,info)
-                               (parts . ,(opencode-shell--get known 'parts))))))
-              (if (equal role "user")
-                  (progn
-                    (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)
-                          before (opencode-shell--turn-state-signature turn))
-                    (setq opencode-shell--turns
-                          (opencode-shell--normalize-turns (list envelope)))
-                    (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)))
-                (setq parent-id parent)
-                (when parent-id
-                  (setq turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
-                        before (opencode-shell--turn-state-signature turn))
-                  (opencode-shell--rebuild-turn-from-message-cache parent-id)))))))
-      ('part-updated
-       (when known
-         (let* ((info (opencode-shell--get known 'info))
-                (part (plist-get event :part)))
-           (setq parent-id (or (opencode-shell--get info 'parentID)
-                               (opencode-shell--get info 'parentId))
-                 turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
-                 before (opencode-shell--turn-state-signature turn))
-           (opencode-shell--cache-message-envelope
-            `((info . ,info) (parts . (,part))))
-           (opencode-shell--rebuild-turn-from-message-cache parent-id))))
-      ('part-removed
-       (when known
-         (let ((info (opencode-shell--get known 'info)))
-           (setq parent-id (or (opencode-shell--get info 'parentID)
-                               (opencode-shell--get info 'parentId))
-                 turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
-                 before (opencode-shell--turn-state-signature turn))
-           (setf (alist-get 'parts known)
-                 (seq-remove
-                  (lambda (part)
-                    (equal (opencode-shell--get part 'id)
-                           (plist-get event :part-id)))
-                  (opencode-shell--get known 'parts)))
-           (puthash message-id known opencode-shell--message-envelopes)
-           (opencode-shell--rebuild-turn-from-message-cache parent-id))))
+    (cl-labels
+        ((sync-envelope (candidate &optional skip-unchanged)
+           (let* ((info (opencode-shell--get candidate 'info))
+                  (role (format "%s" (opencode-shell--get info 'role)))
+                  (parent (or (opencode-shell--get info 'parentID)
+                              (opencode-shell--get info 'parentId))))
+             (if (equal role "user")
+                 (let ((envelope (opencode-shell--cache-message-envelope candidate)))
+                   (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)
+                         before (opencode-shell--turn-state-signature turn)
+                         opencode-shell--turns
+                         (opencode-shell--normalize-turns (list envelope))
+                         turn (opencode-shell--turn-by-id message-id opencode-shell--turns))
+                   (when (and turn (opencode-shell--cached-assistants-for-parent message-id))
+                     (opencode-shell--rebuild-turn-from-message-cache message-id)))
+               (setq parent-id parent)
+               (when parent-id
+                 (setq turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
+                       before (opencode-shell--turn-state-signature turn))
+                 (let ((merged (opencode-shell--cache-message-envelope candidate)))
+                   (unless (and skip-unchanged (eq known merged))
+                     (opencode-shell--rebuild-turn-from-message-cache parent-id)))))))
+         (delta-part (parts part-id field delta)
+           (let* ((existing (seq-find (lambda (p) (equal (opencode-shell--part-id p) part-id))
+                                      parts))
+                  (field-sym (intern field))
+                  (old-val (and existing (opencode-shell--get existing field-sym))))
+             (if existing
+                 (if (equal (format "%s" (or (opencode-shell--get existing 'type) ""))
+                            "reasoning")
+                     existing
+                   (opencode-shell--merge-alist
+                    existing `((,field-sym . ,(concat (if (stringp old-val) old-val "") delta)))))
+               (and (equal field "text")
+                    `((id . ,part-id) (messageID . ,message-id)
+                      (type . "text") (text . ,delta)))))))
+      (pcase kind
+        ('message-updated
+         (let* ((info (plist-get event :info))
+                (parent (or (opencode-shell--get info 'parentID)
+                            (opencode-shell--get info 'parentId)))
+                (orphan-parts (and message-id
+                                   (gethash message-id opencode-shell--orphan-message-parts))))
+           (when message-id
+             (remhash message-id opencode-shell--orphan-message-parts))
+           (unless (and parent (gethash parent opencode-shell--removed-message-ids))
+             (remhash message-id opencode-shell--removed-message-ids)
+             (sync-envelope `((info . ,info)
+                              (parts . ,(opencode-shell--merge-parts
+                                         (opencode-shell--get known 'parts)
+                                         orphan-parts)))))))
+        ('part-updated
+         (if known
+             (sync-envelope `((info . ,(opencode-shell--get known 'info))
+                              (parts . (,(plist-get event :part))))
+                            t)
+           (when (and message-id
+                      (plist-get event :part)
+                      (not (gethash message-id opencode-shell--removed-message-ids)))
+             (puthash message-id
+                      (opencode-shell--merge-parts
+                       (gethash message-id opencode-shell--orphan-message-parts)
+                       (list (opencode-shell--compact-part (plist-get event :part))))
+                      opencode-shell--orphan-message-parts)
+             (setq opencode-shell--transient-reconcile-pending t))))
+        ('part-delta
+         (let ((part-id (plist-get event :part-id))
+               (field (plist-get event :field))
+               (delta (plist-get event :delta)))
+           (if (and known part-id (stringp field) (not (string-empty-p field))
+                    (stringp delta))
+               (when-let ((updated (delta-part (opencode-shell--get known 'parts)
+                                               part-id field delta)))
+                 (sync-envelope `((info . ,(opencode-shell--get known 'info))
+                                  (parts . (,updated)))
+                                t))
+             (when (and message-id part-id (equal field "text") (stringp delta)
+                        (not (gethash message-id opencode-shell--removed-message-ids)))
+               (let* ((orphans (gethash message-id opencode-shell--orphan-message-parts))
+                      (updated (delta-part orphans part-id field delta)))
+                 (puthash message-id
+                          (opencode-shell--merge-parts orphans (list updated))
+                          opencode-shell--orphan-message-parts)
+                 (setq opencode-shell--transient-reconcile-pending t))))))
+        ('part-removed
+         (when known
+           (let* ((info (opencode-shell--get known 'info))
+                  (role (format "%s" (opencode-shell--get info 'role))))
+             (setf (alist-get 'parts known)
+                   (seq-remove
+                    (lambda (part)
+                      (equal (opencode-shell--get part 'id)
+                             (plist-get event :part-id)))
+                    (opencode-shell--get known 'parts)))
+             (puthash message-id known opencode-shell--message-envelopes)
+             (if (equal role "user")
+                 (setq turn (opencode-shell--turn-by-id message-id opencode-shell--turns)
+                       before (opencode-shell--turn-state-signature turn)
+                       opencode-shell--turns (opencode-shell--normalize-turns (list known))
+                       turn (opencode-shell--turn-by-id message-id opencode-shell--turns))
+               (setq parent-id (or (opencode-shell--get info 'parentID)
+                                   (opencode-shell--get info 'parentId))
+                     turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
+                     before (opencode-shell--turn-state-signature turn))
+               (opencode-shell--rebuild-turn-from-message-cache parent-id)))))
       ('message-removed
        (let* ((info (opencode-shell--get known 'info))
               (role (and known (format "%s" (opencode-shell--get info 'role))))
               (user-turn (opencode-shell--turn-by-id message-id opencode-shell--turns))
               (children (make-hash-table :test #'equal)))
          (puthash message-id t opencode-shell--removed-message-ids)
+         (remhash message-id opencode-shell--orphan-message-parts)
          (remhash message-id opencode-shell--message-envelopes)
          (setq opencode-shell--message-order
-               (delete message-id opencode-shell--message-order))
+               (delete message-id opencode-shell--message-order)
+               opencode-shell--message-order-tail
+               (last opencode-shell--message-order))
          (maphash
           (lambda (id envelope)
             (let ((child-info (opencode-shell--get envelope 'info)))
@@ -2814,6 +2710,7 @@ Return a plist containing affected turns and whether a full render is required."
           opencode-shell--message-envelopes)
          (if (or (equal role "user") user-turn (> (hash-table-count children) 0))
              (progn
+               (remhash message-id opencode-shell--parent-assistant-ids)
                (maphash
                 (lambda (id _)
                   (remhash id opencode-shell--message-envelopes))
@@ -2821,6 +2718,8 @@ Return a plist containing affected turns and whether a full render is required."
                (setq opencode-shell--message-order
                      (seq-remove (lambda (id) (gethash id children))
                                  opencode-shell--message-order)
+                     opencode-shell--message-order-tail
+                     (last opencode-shell--message-order)
                      opencode-shell--turns
                      (seq-remove
                       (lambda (entry)
@@ -2835,7 +2734,12 @@ Return a plist containing affected turns and whether a full render is required."
                                  (opencode-shell--get info 'parentId))
                    turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)
                    before (opencode-shell--turn-state-signature turn))
-             (opencode-shell--rebuild-turn-from-message-cache parent-id))))))
+             (when parent-id
+               (puthash parent-id
+                        (delete message-id
+                                (gethash parent-id opencode-shell--parent-assistant-ids))
+                        opencode-shell--parent-assistant-ids))
+             (opencode-shell--rebuild-turn-from-message-cache parent-id)))))))
     (when turn
       (opencode-shell--update-message-lifecycle-state)
       (unless (equal before (and (not (eq turn t))
@@ -2847,17 +2751,57 @@ Return a plist containing affected turns and whether a full render is required."
 
 (defun opencode-shell--receive-application-event (event)
   "Apply decoded application EVENT or reconcile when it is not safe locally."
-  (when (derived-mode-p 'opencode-shell-mode)
+  (when (and (derived-mode-p 'opencode-shell-mode)
+             (not (eq (plist-get event :resource) 'none)))
     (opencode-shell--ensure-message-cache)
-    (when (memq (plist-get event :kind)
-                '(message-updated message-removed part-updated part-removed))
-      (opencode-shell--reset-spinner-frame))
-    (if (and (memq (plist-get event :kind)
-                   '(message-updated message-removed part-updated part-removed))
+    (let ((kind (plist-get event :kind))
+          (type (plist-get event :type)))
+      (when (memq kind
+                  '(message-updated message-removed part-updated part-delta part-removed))
+        (setq opencode-shell--session-idle-p nil)
+        (opencode-shell--reset-spinner-frame))
+      (cond
+       ((and (memq kind
+                   '(message-updated message-removed part-updated part-delta part-removed))
              (opencode-shell--apply-message-event event))
         (cl-incf opencode-shell--message-state-revision)
-      (opencode-shell--schedule-event-reconciliation
-       (plist-get event :resource)))))
+        (when (and opencode-shell--transient-reconcile-pending
+                   (zerop (hash-table-count opencode-shell--orphan-message-parts)))
+          (setq opencode-shell--transient-reconcile-pending nil
+                opencode-shell-async--queue
+                (assoc-delete-all '(event-reconcile messages)
+                                  opencode-shell-async--queue))))
+       ((equal type "session.updated")
+        (when-let ((title (opencode-shell--get (plist-get event :info) 'title)))
+          (when (and (stringp title) (not (string-empty-p title))
+                     (not (equal title opencode-shell--session-title)))
+            (setq opencode-shell--session-title title)
+            (opencode-shell--rename-transcript-for-title title)
+            (force-mode-line-update))))
+       ((member type '("session.idle" "session.status"))
+        (setq opencode-shell--session-idle-p t)
+        (let (changed)
+          (dolist (turn opencode-shell--turns)
+            (unless (eq (opencode-shell--turn-status turn) 'complete)
+              (let ((before (opencode-shell--turn-state-signature turn)))
+                (opencode-shell--aggregate-turn turn)
+                (unless (equal before (opencode-shell--turn-state-signature turn))
+                  (push turn changed)))))
+          (opencode-shell--update-message-lifecycle-state)
+          (when changed
+            (opencode-shell--schedule-render
+             (format "event:%s" type) nil (nreverse changed)))
+          (when opencode-shell--known-descendant-session-ids
+            (opencode-shell--refresh-descendant-status))
+          (when (or (null opencode-shell--turns)
+                    opencode-shell--submit-in-flight
+                    (seq-some (lambda (turn)
+                                (not (eq (opencode-shell--turn-status turn) 'complete)))
+                              opencode-shell--turns))
+            (opencode-shell--schedule-event-reconciliation 'messages))))
+       (t
+        (opencode-shell--schedule-event-reconciliation
+         (or (plist-get event :resource) 'messages)))))))
 
 (defun opencode-shell--composer-text ()
   "Return composer contents without properties or its sentinel."
@@ -2869,11 +2813,12 @@ Return a plist containing affected turns and whether a full render is required."
 
 (defun opencode-shell--composer-visible-p ()
   "Return non-nil when authoritative lifecycle state permits editing."
-  (opencode-shell-state-composer-ready-p
-   (mapcar #'opencode-shell--turn-status opencode-shell--turns)
-   opencode-shell--submit-in-flight
-   (opencode-shell--human-interaction-blocked-p)
-   (opencode-shell--initial-hydration-complete-p)))
+  (and (not opencode-shell--subagent-session-p)
+       (opencode-shell-state-composer-ready-p
+        (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+        opencode-shell--submit-in-flight
+        (opencode-shell--human-interaction-blocked-p)
+        (opencode-shell--initial-hydration-complete-p))))
 
 (defun opencode-shell--initial-hydration-complete-p ()
   "Return non-nil when initial authoritative snapshots have settled."
@@ -2886,7 +2831,7 @@ Return a plist containing affected turns and whether a full render is required."
   (setq opencode-shell--hydration-state
         (opencode-shell-state-hydration-start
          '(messages permissions questions)))
-  (opencode-shell--render-turns)
+  (opencode-shell--render-turns nil 'none)
   (opencode-shell--render-permissions))
 
 (defun opencode-shell--settle-hydration (resource success)
@@ -3000,7 +2945,18 @@ substring-matching the opaque id is robust to the exact payload shape."
          (and (eq (plist-get model :kind) 'tool)
               (member (plist-get model :name) '("task" nil))
               (when-let ((state (opencode-shell-response--get part 'state)))
-                (opencode-shell--value-mentions-string-p state needle)))))
+                ;; The spawned child id lives in the small `metadata' sub-object
+                ;; (e.g. `sessionId') or the `<task id=...>' header at the very
+                ;; start of `output'.  Scanning the whole state would also walk
+                ;; the task's multi-KB `output'/`input' body for every
+                ;; (id, turn) pair -- O(ids*turns*payload) -- which hangs Emacs
+                ;; on large sessions with many subagents.  Bound both.
+                (let* ((metadata (opencode-shell-response--get state 'metadata))
+                       (output (opencode-shell-response--get state 'output))
+                       (head (and (stringp output)
+                                  (substring output 0 (min 500 (length output))))))
+                  (or (opencode-shell--value-mentions-string-p metadata needle)
+                      (and head (numberp (string-match-p needle head)))))))))
      (opencode-shell--turn-parts turn))))
 
 (defun opencode-shell--compute-descendant-anchor-map ()
@@ -3148,7 +3104,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (opencode-shell--start-polling))
       (if defer-render
           (opencode-shell--schedule-render "questions")
-        (opencode-shell--render-turns)
+        (opencode-shell--render-turns nil 'none)
         (opencode-shell--render-permissions)
         (opencode-shell--log-lifecycle "questions")))))
 
@@ -3314,19 +3270,35 @@ Only runs while subagents are known; a status change schedules a rebuild."
                           (type (and s (format "%s" (or (opencode-shell--get s 'type)
                                                         s)))))
                      (and type (not (equal type "idle"))))))
-         (let ((new-map (mapcar (lambda (id) (cons id (busy-p id)))
-                                opencode-shell--known-descendant-session-ids))
-               (self-idle (not (busy-p opencode-shell--session-id))))
-           (unless (and (equal new-map opencode-shell--descendant-session-status)
-                        (eq self-idle opencode-shell--session-idle-p))
-             (setq opencode-shell--descendant-session-status new-map
-                   opencode-shell--session-idle-p self-idle)
-             ;; Re-derive turn completion (self-idle may settle a task-only turn)
-             ;; before re-rendering.
-             (dolist (turn opencode-shell--turns)
-               (opencode-shell--aggregate-turn turn))
-             (opencode-shell--update-message-lifecycle-state)
-             (opencode-shell--schedule-render "descendant-status" t)))))
+         (let* ((new-map (mapcar (lambda (id) (cons id (busy-p id)))
+                                 opencode-shell--known-descendant-session-ids))
+                (self-idle (not (busy-p opencode-shell--session-id)))
+                (descendant-changed
+                 (not (equal new-map opencode-shell--descendant-session-status)))
+                (self-idle-changed
+                 (not (eq self-idle opencode-shell--session-idle-p))))
+           (when (or descendant-changed self-idle-changed)
+             (let ((before-lifecycle (opencode-shell--message-lifecycle-signature))
+                   changed-turns)
+               (setq opencode-shell--descendant-session-status new-map
+                     opencode-shell--session-idle-p self-idle)
+               ;; Re-derive turn completion (self-idle may settle a task-only turn)
+               ;; before re-rendering.
+               (when self-idle-changed
+                 (dolist (turn opencode-shell--turns)
+                   (unless (eq (opencode-shell--turn-status turn) 'complete)
+                     (let ((before (opencode-shell--turn-state-signature turn)))
+                       (opencode-shell--aggregate-turn turn)
+                       (unless (equal before (opencode-shell--turn-state-signature turn))
+                         (push turn changed-turns)))))
+                 (setq changed-turns (nreverse changed-turns)))
+               (opencode-shell--update-message-lifecycle-state)
+               (when (or descendant-changed
+                         changed-turns
+                         (not (equal before-lifecycle
+                                     (opencode-shell--message-lifecycle-signature))))
+                 (opencode-shell--schedule-render
+                  "descendant-status" descendant-changed changed-turns)))))))
      nil nil)))
 
 (defun opencode-shell--insert-descendant-sessions-for-turn (anchor)
@@ -3424,7 +3396,10 @@ the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
         (opencode-shell--insert-composer-label))
       (setq opencode-shell--composer-label-visible
             (opencode-shell--composer-visible-p))
-      (set-marker opencode-shell--composer-start (point)))
+      (set-marker opencode-shell--composer-start (point))
+      (put-text-property opencode-shell--permission-begin
+                         opencode-shell--composer-start
+                         'fontified t))
     (when offset
       (goto-char (min (point-max) (+ opencode-shell--composer-start offset))))
     (unless (equal draft (opencode-shell--composer-text))
@@ -3471,7 +3446,7 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
         (opencode-shell--start-polling))
       (if defer-render
           (opencode-shell--schedule-render "permissions")
-        (opencode-shell--render-turns)
+        (opencode-shell--render-turns nil 'none)
         (opencode-shell--render-permissions)
         (opencode-shell--log-lifecycle "permissions")))))
 
@@ -3535,28 +3510,25 @@ text properties) keep gutter glyphs out of copied text."
         (blank (concat (propertize (make-string (length glyph) ?\s)
                                    'face gutter-face)
                        opencode-shell--gutter-margin))
-        (first t)
         overlays)
     (dolist (overlay (plist-get entry role))
       (when (overlayp overlay) (delete-overlay overlay)))
-    (save-excursion
-      (goto-char begin)
-      (while (and (< (point) end) (not (eobp)))
-        (let ((overlay (make-overlay (point)
-                                     (opencode-shell--gutter-line-end (point))
-                                     nil t nil)))
-          (overlay-put overlay 'line-prefix
-                       (if first
-                           (concat (propertize glyph
-                                               'face (list label-face gutter-face))
-                                   opencode-shell--gutter-margin)
-                         blank))
-          ;; Word-wrapped continuations of any line (including the first)
-          ;; keep the color strip aligned without repeating the glyph.
-          (overlay-put overlay 'wrap-prefix blank)
-          (push overlay overlays)
-          (setq first nil))
-        (forward-line 1)))
+    (when (and (< begin end) (< begin (point-max)))
+      (let* ((first-end (min end (opencode-shell--gutter-line-end begin)))
+             (first-overlay (make-overlay begin first-end nil t nil)))
+        (overlay-put first-overlay 'line-prefix
+                     (concat (propertize glyph
+                                         'face (list label-face gutter-face))
+                             opencode-shell--gutter-margin))
+        ;; Word-wrapped continuations of any line (including the first)
+        ;; keep the color strip aligned without repeating the glyph.
+        (overlay-put first-overlay 'wrap-prefix blank)
+        (push first-overlay overlays)
+        (when (< first-end end)
+          (let ((rest-overlay (make-overlay first-end end nil t nil)))
+            (overlay-put rest-overlay 'line-prefix blank)
+            (overlay-put rest-overlay 'wrap-prefix blank)
+            (push rest-overlay overlays)))))
     (setq entry (plist-put entry role overlays))
     (puthash turn entry opencode-shell--turn-gutters)))
 
@@ -3570,10 +3542,10 @@ text properties) keep gutter glyphs out of copied text."
 Only a completed turn renders its assistant body; status and tool-name
 text stay unmarked so transient spinners keep no role label."
   (when (eq (opencode-shell--turn-status turn) 'complete)
-    (let* ((text (opencode-shell--assistant-text turn))
-           (tool-length (length (opencode-shell--tool-name-display turn)))
-           (start (min response-end (+ response-begin tool-length)))
-           (end (min response-end (+ start (length text)))))
+    (when-let* ((start (text-property-any response-begin response-end
+                                          'opencode-shell-assistant-body t))
+                (end (next-single-property-change
+                      start 'opencode-shell-assistant-body nil response-end)))
       (when (< start end)
         (opencode-shell--apply-turn-gutter
          turn :response start end
@@ -3601,17 +3573,21 @@ text stay unmarked so transient spinners keep no role label."
 
 (defun opencode-shell--insert-turn-blocks (turn)
   "Insert immutable user and canonical response blocks for TURN.
-Also inserts any subagent session line anchored to TURN, so it renders next
-to the turn that spawned the subagent instead of in a trailing block."
+Also inserts any subagent session line anchored to TURN, placed before the
+response block so a `Receiving'/`Thinking' spinner for an active turn always
+renders last, below every subagent line rather than above it."
   (pcase-let ((`(,user-begin . ,user-end)
                (opencode-shell--insert-user-prompt turn)))
     (opencode-shell--insert-permission-results (opencode-shell--turn-id turn))
+    (opencode-shell--insert-descendant-sessions-for-turn
+     (opencode-shell--turn-id turn))
     (let ((response-begin (point)))
-      (insert (opencode-shell--response-display turn))
+      (insert (opencode-shell--cached-response-display turn))
       (let ((response-end (point)))
         (opencode-shell--apply-response-gutter turn response-begin response-end)
         (add-text-properties user-begin user-end
                              '(read-only t rear-nonsticky (read-only face)))
+        (put-text-property user-begin response-begin 'fontified t)
         (add-text-properties response-begin response-end
                              '(read-only t rear-nonsticky (read-only face)))
         (setf (opencode-shell--turn-user-begin turn) (copy-marker user-begin)
@@ -3619,9 +3595,7 @@ to the turn that spawned the subagent instead of in a trailing block."
               (opencode-shell--turn-response-begin turn)
               (copy-marker response-begin)
               (opencode-shell--turn-response-end turn)
-              (copy-marker response-end))))
-    (opencode-shell--insert-descendant-sessions-for-turn
-     (opencode-shell--turn-id turn))))
+              (copy-marker response-end))))))
 
 (defun opencode-shell--turn-rendered-p (turn)
   "Return non-nil when TURN owns valid rendered markers in this buffer."
@@ -3642,26 +3616,53 @@ to the turn that spawned the subagent instead of in a trailing block."
   (if (and (not relocated)
            (eq turn (opencode-shell--permission-status-turn)))
       ""
-    (concat
-    (opencode-shell--tool-name-display turn)
-    (if (eq (opencode-shell--turn-status turn) 'complete)
-        (concat (or (opencode-shell--assistant-display-text turn) "")
-                (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
-      (let ((text (opencode-shell--assistant-display-text turn)))
-        (concat (if (string-empty-p text) ""
-                  (concat text (unless (string-suffix-p "\n" text) "\n")))
-                (propertize
-                 (pcase (opencode-shell--turn-status turn)
-                   ('sending (opencode-shell--status-display "Sending"))
-                   ('thinking (opencode-shell--status-display "Thinking"))
-                   ('receiving (opencode-shell--status-display "Receiving"))
-                   ('recovering (opencode-shell--status-display "Recovering"))
-                   ('aborting (opencode-shell--status-display "Aborting"))
-                   ('error "Request state is uncertain; resync with g r\n\n")
-                   (_ (opencode-shell--status-display "Waiting for response")))
-                 'face (if (eq (opencode-shell--turn-status turn) 'error)
-                           'opencode-shell-error-face
-                         'opencode-shell-waiting-face))))))))
+    (let* ((raw-body (or (opencode-shell--assistant-display-text turn) ""))
+           (body (if (string-empty-p raw-body)
+                     ""
+                   (propertize raw-body 'opencode-shell-assistant-body t))))
+      (concat
+       (opencode-shell--tool-name-display turn)
+       (if (eq (opencode-shell--turn-status turn) 'complete)
+           (concat body
+                   (opencode-shell--turn-terminal-error-suffix turn) "\n\n")
+         (concat (if (string-empty-p body) ""
+                   (concat body (if (string-suffix-p "\n" body) "\n" "\n\n")))
+                 (propertize
+                  (pcase (opencode-shell--turn-status turn)
+                    ('sending (opencode-shell--status-display "Sending"))
+                    ('thinking (opencode-shell--status-display "Thinking"))
+                    ('receiving (opencode-shell--status-display "Receiving"))
+                    ('recovering (opencode-shell--status-display "Recovering"))
+                    ('aborting (opencode-shell--status-display "Aborting"))
+                    ('error "Request state is uncertain; resync with g r\n\n")
+                    (_ (opencode-shell--status-display "Waiting for response")))
+                  'face (if (eq (opencode-shell--turn-status turn) 'error)
+                            'opencode-shell-error-face
+                          'opencode-shell-waiting-face))))))))
+
+(defvar-local opencode-shell--response-display-cache nil
+  "Per-turn cache of rendered response strings, keyed by turn identity.
+A weak-key `eq' table so dropped turns are collected automatically.")
+
+(defun opencode-shell--cached-response-display (turn)
+  "Return TURN's response display, reusing a cached projection when possible.
+The cache is keyed by TURN identity and validated by its presentation signature
+plus the render width, so an unchanged turn is not re-projected (the costly
+markdown/table work) on a full rebuild or reconcile.  The permission status turn
+is never cached: its display depends on interaction state outside the signature."
+  (if (eq turn (opencode-shell--permission-status-turn))
+      (opencode-shell--response-display turn)
+    (unless opencode-shell--response-display-cache
+      (setq opencode-shell--response-display-cache
+            (make-hash-table :test 'eq :weakness 'key)))
+    (let ((sig (cons opencode-shell--table-render-width
+                     (opencode-shell--turn-state-signature turn)))
+          (cached (gethash turn opencode-shell--response-display-cache)))
+      (if (and cached (equal (car cached) sig))
+          (cdr cached)
+        (let ((display (opencode-shell--response-display turn)))
+          (puthash turn (cons sig display) opencode-shell--response-display-cache)
+          display)))))
 
 (defun opencode-shell--tool-name-display (turn)
   "Return payload-free tool names observed in TURN."
@@ -3700,9 +3701,24 @@ to the turn that spawned the subagent instead of in a trailing block."
    ((when-let ((turn (opencode-shell--permission-status-turn)))
       (opencode-shell--response-display turn t)))))
 
+(defconst opencode-shell--spinner-neon-colors
+  '("#ff2d55" "#ff8a00" "#ffe600" "#39ff6a" "#22d3ee" "#b14dff")
+  "Retro neon chaser palette cycled by the transient-status spinner.
+Colors travel across the growing dot row and the status label one step per
+animation tick, like a carnival marquee chase light.")
+
+(defun opencode-shell--spinner-neon-color (index)
+  "Return the neon chaser color for position INDEX, wrapping as needed."
+  (let ((n (length opencode-shell--spinner-neon-colors)))
+    (nth (mod index n) opencode-shell--spinner-neon-colors)))
+
 (defun opencode-shell--status-display (label)
-  "Return LABEL with the current UI-only spinner frame."
-  (concat label " "
+  "Return LABEL with the current UI-only spinner frame.
+Both LABEL and the spinner dots are neon-chase colored in lockstep (see
+`opencode-shell--spinner-neon-colors'); LABEL is colored as a single unit --
+one large dot sitting just before the first real dot in the chase -- not
+letter by letter, so it shifts color without looking like it is flickering."
+  (concat (propertize label 'opencode-shell-spinner-label t) " "
           (propertize (string opencode-shell--spinner-character)
                       'opencode-shell-spinner t)
           "\n\n"))
@@ -3713,19 +3729,67 @@ to the turn that spawned the subagent instead of in a trailing block."
   (setq opencode-shell--spinner-overlays nil))
 
 (defun opencode-shell--spinner-frame ()
-  "Return the current right-growing spinner display frame."
-  (make-string (1+ opencode-shell--animation-frame)
-               opencode-shell--spinner-character))
+  "Return the current right-growing, neon-chasing spinner display frame."
+  (let ((base opencode-shell--animation-frame))
+    (mapconcat
+     (lambda (offset)
+       (propertize (string opencode-shell--spinner-character)
+                   'face (list :foreground
+                               (opencode-shell--spinner-neon-color
+                                (+ base offset)))))
+     (number-sequence 0 base) "")))
+
+(defun opencode-shell--spinner-label-face ()
+  "Return the current neon chaser face for a spinner's status label.
+The label is one step behind the first dot, same as a single large dot
+leading the chase."
+  (list :foreground
+        (opencode-shell--spinner-neon-color
+         (1- opencode-shell--animation-frame))))
 
 (defun opencode-shell--reset-spinner-frame ()
   "Reset transient progress presentation to its first frame."
-  (setq opencode-shell--animation-frame 0)
-  (opencode-shell--render-status-animation))
+  (unless (zerop opencode-shell--animation-frame)
+    (setq opencode-shell--animation-frame 0)
+    (opencode-shell--render-status-animation)))
+
+(defun opencode-shell--spinner-scan-start ()
+  "Return the earliest buffer position that may hold a live spinner."
+  (if (and opencode-shell--known-descendant-session-ids
+           (or (null opencode-shell--descendant-session-status)
+               (seq-some #'cdr opencode-shell--descendant-session-status)))
+      (point-min)
+    (let ((start (and (markerp opencode-shell--permission-begin)
+                      (marker-position opencode-shell--permission-begin))))
+      (dolist (turn opencode-shell--turns)
+        (unless (eq (opencode-shell--turn-status turn) 'complete)
+          (when-let ((pos (and (markerp (opencode-shell--turn-response-begin turn))
+                               (marker-position (opencode-shell--turn-response-begin turn)))))
+            (setq start (if start (min start pos) pos)))))
+      (if start
+          (max (point-min) start)
+        (point-min)))))
 
 (defun opencode-shell--refresh-spinner-overlays ()
   "Recreate spinner overlays for status slots in the current buffer."
   (opencode-shell--clear-spinner-overlays)
-  (let ((position (point-min)))
+  ;; Label overlays go first so the dots overlay this status slot ends up at
+  ;; the head of `opencode-shell--spinner-overlays' (tests key off `car' to
+  ;; find the dots overlay specifically).
+  (let* ((scan-start (opencode-shell--spinner-scan-start))
+         (position scan-start))
+    (while (setq position
+                 (text-property-any position (point-max)
+                                    'opencode-shell-spinner-label t))
+      (let ((end (next-single-property-change
+                  position 'opencode-shell-spinner-label nil (point-max))))
+        (let ((overlay (make-overlay position end nil t nil)))
+          (overlay-put overlay 'evaporate t)
+          (overlay-put overlay 'opencode-shell-spinner-label t)
+          (overlay-put overlay 'face (opencode-shell--spinner-label-face))
+          (push overlay opencode-shell--spinner-overlays))
+        (setq position end)))
+    (setq position scan-start)
     (while (setq position
                  (text-property-any position (point-max)
                                     'opencode-shell-spinner t))
@@ -3761,7 +3825,10 @@ Running the width-driven re-render synchronously inside
 change re-enter the hook, which can recurse until the Lisp stack is exhausted.
 Scheduling the work on an idle timer makes the hook return immediately and
 coalesces repeated changes into a single off-hook render."
-  (unless opencode-shell--table-rerendering
+  (unless (or opencode-shell--table-rerendering
+              (when-let ((window (opencode-shell--transcript-window)))
+                (equal (window-body-width window)
+                       opencode-shell--table-render-width)))
     (let ((buffer (current-buffer)))
       (when (timerp opencode-shell--table-layout-timer)
         (cancel-timer opencode-shell--table-layout-timer))
@@ -3780,20 +3847,44 @@ coalesces repeated changes into a single off-hook render."
     (when-let* ((window (opencode-shell--transcript-window))
                 (width (window-body-width window)))
       (unless (equal width opencode-shell--table-render-width)
-        (let* ((opencode-shell--table-rerendering t)
-               (windows (get-buffer-window-list (current-buffer) nil t))
-               (starts (mapcar (lambda (item)
-                                 (cons item (copy-marker (window-start item))))
-                               windows)))
-          (unwind-protect
-              (progn
-                (setq opencode-shell--table-render-width width)
-                (when opencode-shell--turns
-                  (opencode-shell--render-turns)))
-            (dolist (entry starts)
-              (when (window-live-p (car entry))
-                (set-window-start (car entry) (cdr entry) t))
-              (set-marker (cdr entry) nil))))))))
+        (let ((table-turns
+               (seq-filter
+                (lambda (turn)
+                  (when-let ((raw (opencode-shell--turn-assistant turn)))
+                    (string-match-p "|" raw)))
+                opencode-shell--turns)))
+          (setq opencode-shell--table-render-width width)
+          (cond
+           (opencode-shell--render-dirty
+            (setq opencode-shell--render-dirty-turns
+                  (seq-uniq (append opencode-shell--render-dirty-turns
+                                    table-turns)
+                            #'eq))
+            (let* ((opencode-shell--table-rerendering t)
+                   (windows (get-buffer-window-list (current-buffer) nil t))
+                   (starts (mapcar (lambda (item)
+                                     (cons item (copy-marker (window-start item))))
+                                   windows)))
+              (unwind-protect
+                  (opencode-shell--flush-render)
+                (dolist (entry starts)
+                  (when (window-live-p (car entry))
+                    (set-window-start (car entry) (cdr entry) t))
+                  (set-marker (cdr entry) nil)))))
+           ((or table-turns
+                (< (length opencode-shell--rendered-turns)
+                   (length opencode-shell--turns)))
+            (let* ((opencode-shell--table-rerendering t)
+                   (windows (get-buffer-window-list (current-buffer) nil t))
+                   (starts (mapcar (lambda (item)
+                                     (cons item (copy-marker (window-start item))))
+                                   windows)))
+              (unwind-protect
+                  (opencode-shell--render-turns nil (or table-turns 'none))
+                (dolist (entry starts)
+                  (when (window-live-p (car entry))
+                    (set-window-start (car entry) (cdr entry) t))
+                  (set-marker (cdr entry) nil)))))))))))
 
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
@@ -3801,7 +3892,7 @@ coalesces repeated changes into a single off-hook render."
         (end (opencode-shell--turn-response-end turn))
         (user-end-position
          (marker-position (opencode-shell--turn-user-end turn)))
-        (display (opencode-shell--response-display turn))
+        (display (opencode-shell--cached-response-display turn))
         (inhibit-read-only t))
     (unless (string= display (buffer-substring begin end))
       (let ((position (marker-position begin)))
@@ -3822,7 +3913,9 @@ coalesces repeated changes into a single off-hook render."
   (setq opencode-shell--spinner-overlays
         (seq-filter #'overlay-buffer opencode-shell--spinner-overlays))
   (dolist (overlay opencode-shell--spinner-overlays)
-    (overlay-put overlay 'display (opencode-shell--spinner-frame)))
+    (if (overlay-get overlay 'opencode-shell-spinner-label)
+        (overlay-put overlay 'face (opencode-shell--spinner-label-face))
+      (overlay-put overlay 'display (opencode-shell--spinner-frame))))
   (when opencode-shell--spinner-overlays
     (force-window-update (current-buffer))))
 
@@ -3833,6 +3926,47 @@ coalesces repeated changes into a single off-hook render."
              opencode-shell--spinner-max-width))
   (opencode-shell--render-status-animation))
 
+(defun opencode-shell--turns-to-update (changed-turns)
+  "Return rendered turns needing incremental response-block updates.
+When CHANGED-TURNS is nil, return all rendered turns for direct callers.
+When CHANGED-TURNS is `none' or a list, return explicit turns plus any
+rendered nonterminal or relocated turn."
+  (if (null changed-turns)
+      opencode-shell--rendered-turns
+    (let ((explicit (if (eq changed-turns 'none) nil changed-turns))
+          (current-relocated (opencode-shell--permission-status-turn))
+          result)
+      (dolist (turn explicit)
+        (when (memq turn opencode-shell--rendered-turns)
+          (push turn result)))
+      (dolist (turn (list opencode-shell--relocated-turn current-relocated))
+        (when (and turn
+                   (memq turn opencode-shell--rendered-turns)
+                   (not (memq turn result)))
+          (push turn result)))
+      (dolist (turn opencode-shell--rendered-turns)
+        (when (and (not (eq (opencode-shell--turn-status turn) 'complete))
+                   (not (memq turn result)))
+          (push turn result)))
+      (nreverse result))))
+
+(defcustom opencode-shell-max-rendered-turns 30
+  "Maximum number of most-recent turns drawn in a transcript buffer.
+Older turns stay tracked in `opencode-shell--turns' for state and reconciliation
+but are not drawn, keeping each render/reconcile O(this) regardless of how large
+the session grows -- the dominant cost that makes big sessions stutter on
+single-threaded Emacs.  nil draws every turn."
+  :type '(choice (const :tag "All" nil) integer) :group 'opencode-shell)
+
+(defun opencode-shell--rendered-turn-window ()
+  "Return the turns to draw: all of them, or the most recent capped window.
+See `opencode-shell-max-rendered-turns'."
+  (let ((cap opencode-shell-max-rendered-turns)
+        (turns opencode-shell--turns))
+    (if (and (integerp cap) (> cap 0) (> (length turns) cap))
+        (last turns cap)
+      turns)))
+
 (defun opencode-shell--render-turns (&optional force changed-turns)
   "Render immutable turn blocks without changing composer bytes or point.
 When FORCE is non-nil, rebuild every turn so anchored event positions settle.
@@ -3842,7 +3976,52 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
                                 (- (point) opencode-shell--composer-start)))
          (composer-text (opencode-shell--composer-text))
          (old-point (point))
-          (inhibit-read-only t))
+          (inhibit-read-only t)
+          ;; Only the most-recent window of turns is drawn (see
+          ;; `opencode-shell--rendered-turn-window'); state keeps every turn.
+          (rlist (opencode-shell--rendered-turn-window))
+          ;; Preserve each window's scroll position across the render.  Anchor it
+          ;; to the turn the window starts in, by turn identity + offset, so the
+          ;; view survives even a full rebuild (which deletes the whole transcript
+          ;; and would collapse a plain marker to the buffer top).  A
+          ;; reconcile/completion render is frequent with SSE; without this the
+          ;; view snaps to the top when a turn finishes.
+          (window-anchors
+           (mapcar
+            (lambda (w)
+              (let* ((ws (window-start w))
+                     (turn (seq-find
+                            (lambda (tn)
+                              (let ((ub (opencode-shell--turn-user-begin tn)))
+                                (and (markerp ub) (marker-position ub)
+                                     (<= (marker-position ub) ws))))
+                            (reverse rlist))))
+                (list w turn
+                      (and turn (- ws (marker-position
+                                       (opencode-shell--turn-user-begin turn)))))))
+            (get-buffer-window-list (current-buffer) nil t)))
+          fontify-turns)
+    (when (and (not force)
+               opencode-shell--rendered-turns
+               rlist
+               (null opencode-shell--resolved-permissions)
+               (seq-every-p #'opencode-shell--turn-rendered-p
+                            opencode-shell--rendered-turns))
+      (let ((surviving (memq (car rlist) opencode-shell--rendered-turns)))
+        (when (and surviving
+                   (not (eq surviving opencode-shell--rendered-turns))
+                   (<= (length surviving) (length rlist))
+                   (cl-every #'eq surviving (seq-take rlist (length surviving))))
+          (let* ((evicted (cl-ldiff opencode-shell--rendered-turns surviving))
+                 (evict-begin (marker-position
+                               (opencode-shell--turn-user-begin (car evicted))))
+                 (evict-end (marker-position
+                             (opencode-shell--turn-user-begin (car surviving)))))
+            (when (and evict-begin evict-end (<= evict-begin evict-end))
+              (dolist (turn evicted)
+                (opencode-shell--discard-turn-markers turn))
+              (delete-region evict-begin evict-end)
+              (setq opencode-shell--rendered-turns surviving))))))
     (let* ((known-count (length opencode-shell--rendered-turns))
            (rendered-valid
             (seq-every-p #'opencode-shell--turn-rendered-p
@@ -3850,29 +4029,47 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
            (append-only
             (and (not force)
                  rendered-valid
-                 (<= known-count (length opencode-shell--turns))
+                 (<= known-count (length rlist))
                  (cl-every #'eq opencode-shell--rendered-turns
-                           (seq-take opencode-shell--turns known-count))))
+                           (seq-take rlist known-count))))
+           (update-turns
+            (and append-only
+                 (opencode-shell--turns-to-update changed-turns)))
            ;; Bound so the descendant inserters place each subagent line under
            ;; its spawning turn without re-scanning per turn.
            (opencode-shell--descendant-anchor-map
             (and opencode-shell--known-descendant-session-ids
                  (or (not append-only)
-                     (< known-count (length opencode-shell--turns)))
+                     (< known-count (length rlist)))
                  (opencode-shell--compute-descendant-anchor-map))))
       (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
       (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
       (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
       (when append-only
-        (dolist (turn (or changed-turns opencode-shell--rendered-turns))
-          (when (memq turn opencode-shell--rendered-turns)
-            (save-excursion (opencode-shell--update-turn-response turn)))))
+        (dolist (turn update-turns)
+          (save-excursion (opencode-shell--update-turn-response turn))))
       (if append-only
-          (save-excursion
-            (when (< known-count (length opencode-shell--turns))
-              (goto-char opencode-shell--transcript-end)
-              (dolist (turn (nthcdr known-count opencode-shell--turns))
-                (opencode-shell--insert-turn-blocks turn))))
+          (let ((new-turns (nthcdr known-count rlist)))
+            (save-excursion
+              (when new-turns
+                (goto-char opencode-shell--transcript-end)
+                ;; A rendered response's trailing blank line shares its second
+                ;; newline with the composer label, which the delete-region above
+                ;; removes.  When appending after an existing turn, restore that
+                ;; blank line so the new prompt does not glue to the previous
+                ;; response (the full-render path keeps turns contiguous and adds
+                ;; the label once, so it is unaffected).
+                (when (and (> known-count 0)
+                           (not (bobp))
+                           (eq (char-before) ?\n)
+                           (let ((prev (1- (point))))
+                             (or (<= prev (point-min))
+                                 (not (eq (char-before prev) ?\n)))))
+                  (insert (propertize "\n" 'read-only t
+                                      'rear-nonsticky '(read-only))))
+                (dolist (turn new-turns)
+                  (opencode-shell--insert-turn-blocks turn))))
+            (setq fontify-turns (or (append update-turns new-turns) 'none)))
         (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
         ;; Drop gutters of turns no longer in the transcript before rebuilding.
         (opencode-shell--clear-all-turn-gutters)
@@ -3884,9 +4081,12 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
         ;; Subagent lines render only under the turn that spawned them (via
         ;; `--insert-turn-blocks'); ones whose turn cannot be resolved are not
         ;; bunched at the top.
-        (dolist (turn opencode-shell--turns)
+        (dolist (turn rlist)
           (opencode-shell--insert-turn-blocks turn))
-        (setq opencode-shell--composer-label-visible nil))
+        (setq opencode-shell--composer-label-visible nil
+              fontify-turns (or rlist 'none)))
+      (setq opencode-shell--relocated-turn
+            (opencode-shell--permission-status-turn))
       (when (and append-only
                  (not (opencode-shell--composer-visible-p))
                  opencode-shell--composer-label-visible)
@@ -3901,7 +4101,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
         (goto-char opencode-shell--composer-start)
         (opencode-shell--insert-composer-label)
         (setq opencode-shell--composer-label-visible t))
-      (setq opencode-shell--rendered-turns (copy-sequence opencode-shell--turns))
+      (setq opencode-shell--rendered-turns (copy-sequence rlist))
       (save-excursion
         (goto-char (max (point-min)
                         (- (point-max) 1 (length composer-text))))
@@ -3910,10 +4110,66 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
          (set-marker opencode-shell--permission-end (point))
          (set-marker opencode-shell--composer-start (point))))
     (opencode-shell--render-permissions)
+    (opencode-shell--fontify-transcript fontify-turns)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
-      (goto-char (min old-point opencode-shell--transcript-end)))))
+      (goto-char (min old-point opencode-shell--transcript-end)))
+    (dolist (entry window-anchors)
+      (let ((w (nth 0 entry)) (turn (nth 1 entry)) (off (nth 2 entry)))
+        (when (and (window-live-p w) turn off
+                   (markerp (opencode-shell--turn-user-begin turn))
+                   (marker-position (opencode-shell--turn-user-begin turn)))
+          (set-window-start
+           w (max (point-min)
+                  (min (point-max)
+                       (+ (marker-position (opencode-shell--turn-user-begin turn))
+                          off)))
+           t))))))
    (opencode-shell--sync-input-policy))
+
+(defun opencode-shell--fontify-transcript (&optional turns)
+  "Apply Markdown font-lock faces to assistant response bodies in TURNS.
+Scope fontification to each turn's assistant text, leaving the manual faces on
+user prompts, tool lines, and status markers untouched, so color appears even
+when `global-font-lock-mode' / jit-lock is not driving this buffer.  The
+`fontified' property, marked over the whole response region once handled, lets
+later renders skip settled turns without re-scanning."
+  (when (and font-lock-defaults (not (eq turns 'none)))
+    (dolist (turn (or turns opencode-shell--rendered-turns))
+      (when (opencode-shell--turn-rendered-p turn)
+        (let ((rb (marker-position (opencode-shell--turn-response-begin turn)))
+              (re (marker-position (opencode-shell--turn-response-end turn))))
+          (when (and (< rb re) (text-property-not-all rb re 'fontified t))
+            (let* ((start (text-property-any
+                           rb re 'opencode-shell-assistant-body t))
+                   (end (and start
+                             (next-single-property-change
+                              start 'opencode-shell-assistant-body nil re))))
+              (when (and start end (< start end))
+                (font-lock-ensure start end))
+              (let ((inhibit-read-only t))
+                (put-text-property rb re 'fontified t))
+              (when (and (eq (opencode-shell--turn-status turn) 'complete)
+                         (hash-table-p opencode-shell--response-display-cache))
+                (when-let* ((cached (gethash turn opencode-shell--response-display-cache))
+                            (orig (cdr cached)))
+                  (let* ((rel-start (and start (- start rb)))
+                         (rel-end (and end (- end rb)))
+                         (updated
+                          (if (and rel-start rel-end
+                                   (<= 0 rel-start)
+                                   (<= rel-start rel-end)
+                                   (<= rel-end (length orig)))
+                              (concat (substring orig 0 rel-start)
+                                      (let ((s (buffer-substring start end)))
+                                        (remove-text-properties
+                                         0 (length s)
+                                         '(read-only nil rear-nonsticky nil) s)
+                                        s)
+                                      (substring orig rel-end))
+                            (copy-sequence orig))))
+                    (put-text-property 0 (length updated) 'fontified t updated)
+                    (setcdr cached updated)))))))))))
 
 (defun opencode-shell--flush-render ()
   "Render the latest reconciled state when the current buffer is visible."
@@ -3926,7 +4182,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
             opencode-shell--render-event nil
             opencode-shell--render-force nil
             opencode-shell--render-dirty-turns nil)
-      (opencode-shell--render-turns force changed-turns)
+      (opencode-shell--render-turns force (or changed-turns 'none))
       (opencode-shell--log-lifecycle event)
       (force-mode-line-update))))
 
@@ -3948,6 +4204,17 @@ CHANGED-TURNS into the response blocks pending incremental update."
 
 (defun opencode-shell--render-if-visible ()
   "Schedule one render when a dirty transcript becomes visible."
+  ;; A background buffer whose runtime was torn down while a turn was still
+  ;; active (e.g. a session reopened mid-stream) stays stuck with nothing to
+  ;; update it; resume polling when it becomes visible so it can complete.
+  (when (and opencode-shell--session-id
+             (not opencode-shell--runtime-key)
+             (get-buffer-window (current-buffer) t)
+             (opencode-shell-state-polling-needed-p
+              (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+              opencode-shell--submit-in-flight
+              (not (opencode-shell--initial-hydration-complete-p))))
+    (opencode-shell--start-polling))
   (when (and opencode-shell--connection-stale opencode-shell--profile
              (get-buffer-window (current-buffer) t)
              (opencode-shell-recovery-ready-p
@@ -3988,12 +4255,19 @@ CHANGED-TURNS into the response blocks pending incremental update."
                     opencode-shell--turns)))
     (when (eq (opencode-shell--turn-status turn) 'complete)
       (setq opencode-shell--submit-in-flight nil)))
-  (when (and (not (opencode-shell--human-interaction-blocked-p))
-             (not (opencode-shell-state-polling-needed-p
-                   (mapcar #'opencode-shell--turn-status opencode-shell--turns)
-                   opencode-shell--submit-in-flight
-                    (not (opencode-shell--initial-hydration-complete-p)))))
-    (opencode-shell--stop-polling)))
+  (let ((needed (opencode-shell-state-polling-needed-p
+                 (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+                 opencode-shell--submit-in-flight
+                 (not (opencode-shell--initial-hydration-complete-p)))))
+    (cond
+     ;; Enforce the invariant symmetrically: an active turn (e.g. `receiving')
+     ;; must have a live runtime, or it is stuck forever with nothing to update
+     ;; it.  Starting is idempotent, so re-deriving lifecycle self-heals a buffer
+     ;; whose polling was torn down while work remained.
+     ((and needed (not opencode-shell--runtime-key))
+      (opencode-shell--start-polling))
+     ((and (not needed) (not (opencode-shell--human-interaction-blocked-p)))
+      (opencode-shell--stop-polling)))))
 
 
 (defun opencode-shell--render-messages
@@ -4006,7 +4280,8 @@ non-nil, remove cached server messages absent from the snapshot."
           cache-result)
       (when sequence (setq opencode-shell--message-applied-sequence sequence))
       (setq cache-result
-            (opencode-shell--cache-message-snapshot messages authoritative))
+            (opencode-shell--cache-message-snapshot messages authoritative)
+            messages (or (plist-get cache-result :messages) messages))
       (when authoritative
         (opencode-shell--restore-agent-model-history messages))
       (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
@@ -4036,7 +4311,7 @@ non-nil, remove cached server messages absent from the snapshot."
               (let ((opencode-shell--render-dirty t))
                 (opencode-shell--render-turns
                  (plist-get cache-result :force)
-                 opencode-shell--normalized-changed-turns)
+                 (or opencode-shell--normalized-changed-turns 'none))
                 (opencode-shell--log-lifecycle event)
                 (force-mode-line-update))
               (setq opencode-shell--render-dirty nil
@@ -4052,16 +4327,27 @@ PARAMS, when non-nil, are query parameters forwarded to the underlying request."
           (request-mode major-mode)
           (attempt (make-symbol "opencode-snapshot")) timer response)
       (setf (alist-get key opencode-shell--in-flight) attempt)
-      (cl-labels ((current-p ()
+      (cl-labels ((owned-p ()
+                    (eq attempt (alist-get key opencode-shell--in-flight)))
+                  (current-p ()
                     (and (eq major-mode request-mode)
                          (= generation opencode-shell--generation)
-                         (eq attempt (alist-get key opencode-shell--in-flight))))
+                         (owned-p)))
                   (settle (success value)
-                    (when (current-p)
-                      (when (timerp timer) (cancel-timer timer))
-                      (setf (alist-get key opencode-shell--in-flight) nil)
-                      (if success (funcall callback value)
-                        (when error-callback (funcall error-callback))))))
+                    ;; Release the guard whenever THIS attempt resolves, even if
+                    ;; the generation or mode changed meanwhile.  Clearing only
+                    ;; while current left a request that settled after a
+                    ;; generation bump holding its guard forever, which blocked
+                    ;; the resource (e.g. `messages') and stuck a turn in
+                    ;; `receiving' until a manual `g r'.  Apply the result only
+                    ;; while still current.
+                    (when (owned-p)
+                      (let ((apply (current-p)))
+                        (when (timerp timer) (cancel-timer timer))
+                        (setf (alist-get key opencode-shell--in-flight) nil)
+                        (when apply
+                          (if success (funcall callback value)
+                            (when error-callback (funcall error-callback))))))))
         (when (equal method "GET")
           (setq timer
                 (run-at-time
@@ -4069,11 +4355,8 @@ PARAMS, when non-nil, are query parameters forwarded to the underlying request."
                  (lambda ()
                    (when (buffer-live-p origin)
                      (with-current-buffer origin
-                       (when (current-p)
-                         (when (buffer-live-p response)
-                           (when-let ((process (get-buffer-process response)))
-                             (delete-process process))
-                           (kill-buffer response))
+                       (when (owned-p)
+                         (opencode-shell--kill-url-buffer response)
                          (settle nil nil))))))))
         (setq response
               (opencode-shell--request
@@ -4127,6 +4410,10 @@ the next full resync without a dedicated request of its own."
        (setq opencode-shell--session-title
              (or (opencode-shell--get session 'title) "Untitled"))
        (opencode-shell--rename-transcript-for-title opencode-shell--session-title)
+       (let ((subagent (opencode-shell--child-session-p session)))
+         (unless (eq subagent opencode-shell--subagent-session-p)
+           (setq opencode-shell--subagent-session-p subagent)
+           (opencode-shell--schedule-render "session-metadata")))
        (force-mode-line-update))
      (opencode-shell--sync-descendant-sessions sessions))
    nil nil '((limit . 1000))))
@@ -4175,7 +4462,21 @@ When FULL is non-nil, also refresh metadata and capabilities."
          (lambda (messages)
            (opencode-shell--settle-hydration 'messages t)
            (if (= revision opencode-shell--message-state-revision)
-               (opencode-shell--render-messages messages sequence t t)
+               (progn
+                 (setq opencode-shell--transient-reconcile-pending nil)
+                 (opencode-shell--render-messages messages sequence t t))
+             (opencode-shell--ensure-message-cache)
+             (let ((unseen
+                    (seq-remove
+                     (lambda (envelope)
+                       (let ((id (opencode-shell--message-envelope-id envelope)))
+                         (or (null id)
+                             (gethash id opencode-shell--message-envelopes)
+                             (gethash id opencode-shell--removed-message-ids))))
+                     messages)))
+               (when unseen
+                 (opencode-shell--render-messages unseen nil t nil)))
+             (setq opencode-shell--transient-reconcile-pending t)
              (opencode-shell--schedule-event-reconciliation 'messages)))
          nil (lambda () (opencode-shell--settle-hydration 'messages nil))))))
   (when (memq resource '(nil all permissions))
@@ -4278,6 +4579,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
 (defun opencode-shell--submit ()
   "Commit and asynchronously submit the current multiline composer."
   (interactive)
+  (when opencode-shell--subagent-session-p
+    (user-error "Subagent sessions are driven by their parent's task tool, not direct prompts"))
   (when (and opencode-shell--profile
              (opencode-shell--ssh-forwarded-profile-p opencode-shell--profile)
              (not (opencode-shell-recovery-ready-p
@@ -4287,37 +4590,46 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (when opencode-shell--submit-in-flight
       (user-error "A prompt delivery is already being reconciled"))
     (when (string-blank-p text) (user-error "Prompt is blank"))
-    (opencode-shell--settle-superseded-turns opencode-shell--turns t)
-    (let ((turn (opencode-shell--make-turn
-                  :id (format "msg_%s_%d" (format-time-string "%s%N")
-                              (cl-incf opencode-shell--turn-counter))
-                  :user text :status 'sending)))
-      (setq opencode-shell--turns (append opencode-shell--turns (list turn))
-            opencode-shell--request-status "sending"
-            opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
-       (opencode-shell--replace-composer "")
-       (opencode-shell--render-turns)
-       (setq buffer-undo-list nil)
-       (undo-boundary)
-       (opencode-shell--start-polling)
-      (opencode-shell--log-lifecycle "submit" t)
-      (force-mode-line-update)
-       (opencode-shell--request
-        "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
-        (lambda (_)
-         (setf (opencode-shell--turn-status turn) 'waiting)
-         (opencode-shell--schedule-render "submit-ack")
-         (opencode-shell--log-lifecycle "submit-ack")
-         (opencode-shell--resync))
-        (cons `(messageID . ,(opencode-shell--turn-id turn))
-              (opencode-shell--prompt-body text)) nil
-        (lambda ()
-         (setf (opencode-shell--turn-status turn) 'recovering)
-         (setq opencode-shell--request-status "recovering")
-         (opencode-shell--schedule-render "submit-error")
-         (opencode-shell--log-lifecycle "submit-error" t)
-         (opencode-shell--resync)
-         (force-mode-line-update))))))
+    (let ((settled (seq-filter
+                    (lambda (existing)
+                      (not (eq (opencode-shell--turn-status existing) 'complete)))
+                    opencode-shell--turns)))
+      (opencode-shell--settle-superseded-turns opencode-shell--turns t)
+      (let ((turn (opencode-shell--make-turn
+                    :id (format "msg_%s_%d" (format-time-string "%s%N")
+                                (cl-incf opencode-shell--turn-counter))
+                    :user text :status 'sending)))
+        (setq opencode-shell--turns (append opencode-shell--turns (list turn))
+              opencode-shell--session-idle-p nil
+              opencode-shell--request-status "sending"
+              opencode-shell--submit-in-flight (opencode-shell--turn-id turn))
+        (opencode-shell--replace-composer "")
+        (opencode-shell--render-turns nil (or settled 'none))
+        (setq buffer-undo-list nil)
+        (undo-boundary)
+        (opencode-shell--start-polling)
+        (opencode-shell--log-lifecycle "submit" t)
+        (force-mode-line-update)
+        (opencode-shell--request
+         "POST" (format "/session/%s/prompt_async" opencode-shell--session-id)
+         (lambda (_)
+           (when (eq (opencode-shell--turn-status turn) 'sending)
+             (setf (opencode-shell--turn-status turn) 'waiting)
+             (opencode-shell--schedule-render "submit-ack" nil (list turn)))
+           (opencode-shell--log-lifecycle "submit-ack")
+           (unless (and opencode-shell--runtime-key
+                        (opencode-shell-async-sse-connected-p
+                         opencode-shell--runtime-key))
+             (opencode-shell--resync)))
+         (cons `(messageID . ,(opencode-shell--turn-id turn))
+               (opencode-shell--prompt-body text)) nil
+         (lambda ()
+           (setf (opencode-shell--turn-status turn) 'recovering)
+           (setq opencode-shell--request-status "recovering")
+           (opencode-shell--schedule-render "submit-error" nil (list turn))
+           (opencode-shell--log-lifecycle "submit-error" t)
+           (opencode-shell--resync)
+           (force-mode-line-update)))))))
 
 (defun opencode-shell--abort ()
   "Abort work in the current session."
@@ -4327,7 +4639,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (when (and target
                (not (eq (opencode-shell--turn-status target) 'complete)))
       (setf (opencode-shell--turn-status target) 'aborting)
-      (opencode-shell--render-turns))
+      (opencode-shell--render-turns nil (list target)))
     (opencode-shell--request "POST" (format "/session/%s/abort" opencode-shell--session-id)
                              (lambda (_)
                                (when (and target
@@ -4341,7 +4653,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
                                          (equal opencode-shell--submit-in-flight
                                                 (opencode-shell--turn-id target)))
                                  (setq opencode-shell--submit-in-flight nil))
-                                (opencode-shell--schedule-render "abort-ack")
+                               (opencode-shell--schedule-render
+                                "abort-ack" nil (and target (list target)))
                                (opencode-shell--log-lifecycle "abort-ack" t)
                                (opencode-shell--resync)) '())))
 
@@ -4628,6 +4941,7 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
     (kbd "RET") #'opencode-shell--submit
     (kbd "<return>") #'opencode-shell--submit
    (kbd "g r") #'opencode-shell--resync
+   (kbd "g R") #'opencode-shell-restart
    (kbd "?") #'opencode-shell-help
     (kbd "o") #'opencode-shell--evil-open-below
     (kbd "C-n") #'opencode-shell--next-turn
@@ -4656,347 +4970,6 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
     (kbd "d") #'opencode-shell--delete-session
     (kbd "?") #'opencode-shell-sessions-help))
 
-(defun opencode-shell--server-health-callback (profile callback status)
-  "Handle a health response for PROFILE and report readiness to CALLBACK.
-The url response buffer is killed off-stack: calling `kill-buffer' directly in
-this `url-retrieve' sentinel synchronously pumps other pending health
-connections' sentinels, which re-enter this callback and can recurse until the
-Lisp stack is exhausted when the endpoint is unreachable (e.g. a dead SSH
-tunnel refusing every probe).  Deferring the kill breaks that chain."
-  (let ((response (current-buffer))
-        (ready (and (not (plist-get status :error))
-                    (<= 200 (or (bound-and-true-p url-http-response-status) 0)
-                        299))))
-    (unwind-protect
-        (funcall callback ready profile)
-      (when (buffer-live-p response)
-        (run-at-time 0 nil (lambda ()
-                             (when (buffer-live-p response)
-                               (let (kill-buffer-query-functions)
-                                 (kill-buffer response)))))))))
-
-(defun opencode-shell--auth-header (profile)
-  "Return PROFILE's authorization header pair, or nil."
-  (when (or opencode-shell-auth-function opencode-shell-auth-source-function)
-    (when-let ((token (if opencode-shell-auth-function
-                          (funcall opencode-shell-auth-function)
-                        (funcall opencode-shell-auth-source-function profile))))
-      (cons (or (plist-get profile :auth-header) "Authorization") token))))
-
-(defun opencode-shell--server-ready (profile callback)
-  "Invoke CALLBACK with PROFILE when its health endpoint is ready."
-  (let ((url-request-method "GET")
-        (url-request-extra-headers
-         (append '(("Accept" . "application/json"))
-                 (when-let ((header (opencode-shell--auth-header profile)))
-                   (list header)))))
-    (url-retrieve
-     (concat (string-remove-suffix "/" (or (plist-get profile :base-url)
-                                             opencode-shell-base-url))
-             (or (plist-get profile :health-path) "/health"))
-     (lambda (status) (opencode-shell--server-health-callback profile callback status))
-     nil t t)))
-
-(defun opencode-shell--attempt-current-p (key attempt)
-  "Return non-nil when ATTEMPT is KEY's current start attempt."
-  (eq attempt (plist-get (gethash key opencode-shell--servers) :attempt)))
-
-(defun opencode-shell--finish-start (key attempt)
-  "Finish coalesced server start KEY for ATTEMPT."
-  (let* ((state (gethash key opencode-shell--servers))
-         (callbacks (append (plist-get state :retry-callbacks)
-                            (plist-get state :callbacks))))
-     (when (opencode-shell--attempt-current-p key attempt)
-       (when (opencode-shell--ssh-forwarded-profile-p (plist-get state :profile))
-         (opencode-shell-recovery-success key)
-         (opencode-shell-async-resume-runtime key))
-        (setq state (plist-put state :callbacks nil)
-              state (plist-put state :retry-callbacks nil)
-              state (plist-put state :failure-callbacks nil)
-            state (plist-put state :checking nil)
-            state (plist-put state :starting nil)
-            state (plist-put state :attempt nil))
-      (puthash key state opencode-shell--servers)
-       (dolist (entry (nreverse callbacks))
-         (opencode-shell--ssh-invoke-start-callback entry)))))
-
-(defun opencode-shell--fail-start (key attempt message-text)
-  "Abandon KEY's ATTEMPT and report MESSAGE-TEXT."
-  (let* ((state (gethash key opencode-shell--servers))
-          (process (plist-get state :process))
-          (profile (plist-get state :profile))
-          (failures (plist-get state :failure-callbacks))
-          (ssh (and profile (opencode-shell--ssh-forwarded-profile-p profile))))
-    (when (and state (opencode-shell--attempt-current-p key attempt))
-      (when (and (plist-get state :starting)
-                  (not ssh) (processp process) (process-live-p process))
-        (delete-process process))
-      (if ssh
-          (progn
-            (unless (and (processp process) (process-live-p process))
-              (setf (plist-get state :process) nil
-                    (plist-get state :owned) nil))
-            (setf (plist-get state :checking) nil
-                  (plist-get state :starting) nil
-                  (plist-get state :attempt) nil
-                  (plist-get state :retry-callbacks) nil
-                  (plist-get state :failure-callbacks)
-                  (seq-filter #'consp failures))
-            (puthash key state opencode-shell--servers)
-            (opencode-shell--ssh-disconnected profile)
-            (dolist (failure failures)
-              (when (functionp failure) (funcall failure)))
-            (when (opencode-shell-recovery-exhausted-p key)
-              (dolist (failure (plist-get state :failure-callbacks))
-                (funcall (cadr failure)))
-              (setf (plist-get state :callbacks) nil
-                    (plist-get state :failure-callbacks) nil)
-              (unless (plist-get state :owned)
-                (remhash key opencode-shell--servers))))
-        (remhash key opencode-shell--servers)
-        (message "OpenCode: %s" message-text)
-        (dolist (failure failures) (funcall failure))))))
-
-(defun opencode-shell--process-tail (process)
-  "Return PROCESS's bounded output tail, or nil when empty."
-  (when-let ((buffer (process-buffer process)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (unless (= (point-min) (point-max))
-          (buffer-substring-no-properties
-           (max (point-min) (- (point-max) opencode-shell--process-tail-limit))
-           (point-max)))))))
-
-(defun opencode-shell--await-server (profile deadline attempt)
-  "Poll PROFILE health until DEADLINE for ATTEMPT."
-  (let* ((key (opencode-shell--server-key profile))
-         (state (gethash key opencode-shell--servers)))
-    (when (and (opencode-shell--attempt-current-p key attempt)
-               (plist-get state :starting))
-     (if (> (float-time) deadline)
-          (opencode-shell--fail-start
-           key attempt (or (plist-get state :exit-error)
-                           "server startup timed out"))
-       (opencode-shell--server-ready
-        profile
-        (lambda (ready &optional _)
-          (when (opencode-shell--attempt-current-p key attempt)
-            (if ready
-                (opencode-shell--finish-start key attempt)
-              (when (plist-get (gethash key opencode-shell--servers) :starting)
-                (run-at-time .2 nil #'opencode-shell--await-server
-                             profile deadline attempt))))))))))
-
-(defun opencode-shell--process-filter (process output)
-  "Append OUTPUT to PROCESS buffer, retaining only a bounded tail."
-  (when-let ((buffer (process-buffer process)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (goto-char (point-max)) (insert output)
-        (when (> (buffer-size) opencode-shell--process-tail-limit)
-          (delete-region (point-min)
-                         (- (point-max) opencode-shell--process-tail-limit)))))))
-
-(defun opencode-shell--process-sentinel (key attempt process _event)
-  "Handle an owned PROCESS exiting during startup for KEY."
-  (let ((state (gethash key opencode-shell--servers)))
-    (when (and state
-               (memq (process-status process) '(exit signal failed))
-               (eq process (plist-get state :process)))
-      (if (plist-get state :stopping)
-          (remhash key opencode-shell--servers)
-        (if-let ((restart-profile (plist-get state :restart-profile)))
-          (let ((callbacks (plist-get state :callbacks)))
-            (remhash key opencode-shell--servers)
-            (opencode-shell--start-server
-             restart-profile
-             (lambda (_ready)
-                (dolist (entry (nreverse callbacks))
-                  (opencode-shell--ssh-invoke-start-callback entry)))))
-        (if (and (plist-get state :starting)
-                 (opencode-shell--attempt-current-p key attempt))
-            (let* ((state (gethash key opencode-shell--servers))
-               (tail (opencode-shell--process-tail process))
-               (message-text
-                (format "server exited before becoming healthy (status %s)%s"
-                        (process-exit-status process)
-                        (if tail (format ":\n%s" tail) ""))))
-          ;; Another concurrent starter may have won the port.  Keep polling
-          ;; this attempt so a healthy endpoint can be adopted safely.
-           (setq state (plist-put state :process nil)
-                 state (plist-put state :owned nil)
-                 state (plist-put state :exit-error message-text))
-           (puthash key state opencode-shell--servers))
-           (remhash key opencode-shell--servers)
-           (when-let ((profile (plist-get state :profile)))
-             (when (opencode-shell--ssh-forwarded-profile-p profile)
-                (opencode-shell--ssh-disconnected profile)))))))))
-
-(defun opencode-shell--spawn-server (profile attempt)
-  "Start PROFILE exactly once and begin bounded health polling."
-  (let* ((key (opencode-shell--server-key profile))
-         (state (gethash key opencode-shell--servers))
-         (command (plist-get profile :start-command)))
-    (unless (and (listp command) command (seq-every-p #'stringp command))
-      (when (opencode-shell--attempt-current-p key attempt)
-        (remhash key opencode-shell--servers))
-      (user-error ":start-command must be a non-empty argv list"))
-    (when (opencode-shell--attempt-current-p key attempt)
-      (condition-case err
-        (let* ((default-directory
-                 (or (and (opencode-shell--profile-remote-p profile)
-                          temporary-file-directory)
-                     (plist-get profile :server-directory)
-                     default-directory))
-               (process (make-process
-                         :name (format "opencode-%s" key)
-                         :buffer (get-buffer-create (format " *opencode-%s*" key))
-                         :command command :noquery t :connection-type 'pipe
-                         :filter #'opencode-shell--process-filter
-                          :sentinel (lambda (process event)
-                                      (opencode-shell--process-sentinel
-                                       key attempt process event)))))
-          (puthash key (append (list :process process :owned t :starting t)
-                               state)
-                   opencode-shell--servers)
-          (if (process-live-p process)
-              (opencode-shell--await-server
-               profile (+ (float-time) (or (plist-get profile :startup-timeout) 10))
-               attempt)
-            (opencode-shell--process-sentinel key attempt process "exited")))
-       (error (opencode-shell--fail-start
-               key attempt
-               (format "could not start server: %s" (error-message-string err))))))))
-
-(defun opencode-shell--start-server
-    (&optional profile callback failure-callback retry-callback)
-  "Start PROFILE's configured process and invoke CALLBACK when healthy.
-Concurrent starts for one server are coalesced.  A remote profile may use
-`:start-command' to establish its transport, such as an SSH tunnel."
-  (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
-          (key (opencode-shell--server-key profile))
-          (state (gethash key opencode-shell--servers))
-          (command (plist-get profile :start-command)))
-    (let ((config (opencode-shell--validate-server-profile profile state)))
-    (cond
-      ((or (plist-get state :checking)
-           (plist-get state :starting)
-           (plist-get state :restart-profile))
-       (when callback
-          (let ((slot (if retry-callback :retry-callbacks :callbacks)))
-            (puthash key (plist-put state slot
-                                    (cons (cons callback profile)
-                                          (plist-get state slot)))
-                     opencode-shell--servers)))
-        (when failure-callback
-         (puthash key (plist-put state :failure-callbacks
-                                 (cons failure-callback
-                                       (plist-get state :failure-callbacks)))
-                   opencode-shell--servers)))
-      ((not command)
-       (user-error "Profile has no :start-command"))
-      ((and (plist-get state :owned)
-            (process-live-p (plist-get state :process)))
-      (let ((attempt (gensym "opencode-start-")))
-        (puthash key (plist-put (plist-put (plist-put state :checking t)
-                                          :attempt attempt)
-                                 :callbacks (append (and (not retry-callback) callback
-                                                         (list (cons callback profile)))
-                                                    (plist-get state :callbacks)))
-                  opencode-shell--servers)
-        (setq state (gethash key opencode-shell--servers))
-         (setf (plist-get state :profile) profile
-               (plist-get state :retry-callbacks)
-               (append (and retry-callback callback (list (cons callback profile)))
-                       (plist-get state :retry-callbacks))
-               (plist-get state :failure-callbacks)
-              (append (and failure-callback (list failure-callback))
-                      (plist-get state :failure-callbacks)))
-        (opencode-shell--server-ready
-         profile (lambda (ready &optional _)
-                   (when (opencode-shell--attempt-current-p key attempt)
-                     (if (or ready (not (opencode-shell--ssh-forwarded-profile-p profile)))
-                         (opencode-shell--finish-start key attempt)
-                        (opencode-shell--fail-start key attempt "SSH health unavailable")))))))
-     (t
-      (let ((attempt (gensym "opencode-start-")))
-        (puthash key (list :checking t :attempt attempt :config config
-                           :profile profile
-                           :failure-callbacks
-                           (append (and failure-callback (list failure-callback))
-                                   (plist-get state :failure-callbacks))
-                           :callbacks
-                           (append (and (not retry-callback) callback
-                                        (list (cons callback profile)))
-                                   (plist-get state :callbacks))
-                           :retry-callbacks
-                           (append (and retry-callback callback
-                                        (list (cons callback profile)))
-                                   (plist-get state :retry-callbacks)))
-                opencode-shell--servers)
-       (opencode-shell--server-ready
-        profile (lambda (ready &optional _)
-                  (when (opencode-shell--attempt-current-p key attempt)
-                    (if ready
-                        (opencode-shell--finish-start key attempt)
-                       (opencode-shell--spawn-server profile attempt)))))))))))
-
-(defun opencode-shell--stop-server (&optional profile)
-  "Stop PROFILE server only when this client owns its process."
-  (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
-          (key (opencode-shell--server-key profile))
-         (state (gethash key opencode-shell--servers))
-         (process (plist-get state :process)))
-     (unless (and (plist-get state :owned) (process-live-p process))
-       (user-error "OpenCode server is not owned by this client"))
-     (puthash key (plist-put state :stopping t) opencode-shell--servers)
-     (delete-process process)
-    (remhash key opencode-shell--servers)))
-
-(defun opencode-shell--restart-server (&optional profile)
-  "Restart PROFILE's server.
-When :restart-command is configured, it must fully stop the server (e.g.
-via pkill) and return promptly; this client then starts a fresh instance
-via :start-command once the kill command exits.  This works even when the
-current server is not owned by this client.  Without :restart-command,
-only an owned live process can be restarted."
-  (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
-         (key (opencode-shell--server-key profile))
-         (state (gethash key opencode-shell--servers))
-         (process (plist-get state :process))
-         (restart-cmd (plist-get profile :restart-command)))
-    (unless (or (and (plist-get state :owned) (process-live-p process))
-                restart-cmd)
-      (user-error "OpenCode server is not owned by this client"))
-    (when (plist-get state :restart-profile)
-      (user-error "OpenCode server restart is already in progress"))
-    (puthash key (plist-put state :restart-profile profile) opencode-shell--servers)
-    (if restart-cmd
-        (make-process
-         :name (format "opencode-restart-%s" key)
-         :command restart-cmd
-         :noquery t
-         :sentinel (lambda (_p _event)
-                     (when (plist-get (gethash key opencode-shell--servers) :restart-profile)
-                       (when (and process (process-live-p process))
-                         (delete-process process))
-                       (remhash key opencode-shell--servers)
-                       (opencode-shell--start-server profile))))
-      (delete-process process))))
-
-(defun opencode-shell--stop-all-servers ()
-  "Stop owned servers whose shared lifecycle requests exit cleanup."
-  (let (owned)
-    (maphash (lambda (_key state)
-               (when (and (plist-get state :owned)
-                          (plist-get (plist-get state :config) :stop-on-exit))
-                 (push (plist-get state :process) owned)))
-             opencode-shell--servers)
-    (clrhash opencode-shell--servers)
-    (dolist (process owned)
-      (when (process-live-p process) (delete-process process)))))
-
-(add-hook 'kill-emacs-hook #'opencode-shell--stop-all-servers)
 
 (defun opencode-shell--open-sessions (profile &optional directory current-window)
   "Prepare PROFILE and open its session browser for DIRECTORY.
@@ -5271,26 +5244,58 @@ ACTIVE means that their session browser is already live."
                (kill-buffer buffer)
                (finish)))))))))
 
-;;;###autoload
-(defun opencode-shell-status (profile)
-  "Select PROFILE and report its health and client ownership."
-  (interactive (list (opencode-shell--read-profile)))
-  (opencode-shell--server-ready
-   (opencode-shell--resolve-or-read-profile profile)
-   (lambda (ready checked-profile)
-     (let* ((state (gethash (opencode-shell--server-key checked-profile)
-                            opencode-shell--servers))
-            (ownership (if (plist-get state :owned) "owned" "external")))
-       (message "OpenCode %s: %s (%s)"
-                (opencode-shell--profile-name checked-profile)
-                (if ready "ready" "unreachable") ownership)))))
 
-;;;###autoload
-(defun opencode-shell-restart (profile)
-  "Select and restart an owned local PROFILE server."
-  (interactive (list (opencode-shell--read-profile)))
-  (opencode-shell--restart-server
-   (opencode-shell--resolve-or-read-profile profile)))
+(defun opencode-shell--migrate-live-buffer ()
+  "Upgrade in-memory caches and gutter overlays in the current transcript buffer."
+  (when (derived-mode-p 'opencode-shell-mode)
+    (opencode-shell--ensure-message-cache)
+    (clrhash opencode-shell--parent-assistant-ids)
+    (dolist (id opencode-shell--message-order)
+      (when-let ((envelope (gethash id opencode-shell--message-envelopes)))
+        (let* ((compacted (opencode-shell--compact-envelope envelope))
+               (info (opencode-shell--get compacted 'info))
+               (role (format "%s" (or (opencode-shell--get info 'role) "")))
+               (parent (or (opencode-shell--get info 'parentID)
+                           (opencode-shell--get info 'parentId))))
+          (unless (eq envelope compacted)
+            (puthash id compacted opencode-shell--message-envelopes))
+          (when (and (equal role "assistant") parent)
+            (let ((existing-ids (gethash parent opencode-shell--parent-assistant-ids)))
+              (unless (member id existing-ids)
+                (puthash parent (append existing-ids (list id))
+                         opencode-shell--parent-assistant-ids)))))))
+    (setq opencode-shell--message-order-tail (last opencode-shell--message-order))
+    (let (rebuild-gutters)
+      (dolist (turn opencode-shell--turns)
+        (setf (opencode-shell--turn-assistant-messages turn)
+              (mapcar (lambda (entry)
+                        (cons (car entry)
+                              (opencode-shell--compact-envelope (cdr entry))))
+                      (opencode-shell--turn-assistant-messages turn))
+              (opencode-shell--turn-parts turn)
+              (mapcar #'opencode-shell--compact-part
+                      (opencode-shell--turn-parts turn)))
+        (when (hash-table-p opencode-shell--turn-gutters)
+          (let ((entry (gethash turn opencode-shell--turn-gutters)))
+            (when (or (> (length (plist-get entry :user)) 2)
+                      (> (length (plist-get entry :response)) 2))
+              (setq rebuild-gutters t)))))
+      (when rebuild-gutters
+        (opencode-shell--render-turns t)))))
+
+(defun opencode-shell--migrate-live-buffers ()
+  "Upgrade in-memory caches and gutter overlays across all live transcript buffers."
+  (when (and load-file-name (not (fboundp 'opencode-shell-event-coalesce)))
+    (let ((dir (file-name-directory load-file-name)))
+      (dolist (name '("opencode-shell-sse.el" "opencode-shell-event.el"))
+        (let ((path (expand-file-name name dir)))
+          (when (file-exists-p path)
+            (load path nil nil t))))))
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (derived-mode-p 'opencode-shell-mode)
+          (opencode-shell--migrate-live-buffer))))))
 
 ;;;###autoload
 (defun opencode-shell-reload ()
@@ -5304,9 +5309,11 @@ ACTIVE means that their session browser is already live."
     (opencode-shell-async-reset)
     (let* ((main (or load-file-name (locate-library "opencode-shell")))
            (directory (and main (file-name-directory main)))
-           (names '("opencode-shell-render.el" "opencode-shell-async.el"
+           (names '("opencode-shell-render.el" "opencode-shell-sse.el"
+                    "opencode-shell-event.el" "opencode-shell-async.el"
                     "opencode-shell-state.el" "opencode-shell-interaction.el"
-                    "opencode-shell-response.el" "opencode-shell.el"))
+                    "opencode-shell-response.el" "opencode-shell-recovery.el"
+                    "opencode-shell-transport.el" "opencode-shell.el"))
            (sources (and directory
                          (mapcar (lambda (name) (expand-file-name name directory))
                                  names))))
@@ -5329,6 +5336,7 @@ ACTIVE means that their session browser is already live."
           (use-local-map opencode-shell-mode-map)
             (setq-local header-line-format '(:eval (opencode-shell--header))
                         mode-line-process '(:eval (opencode-shell--mode-line-status)))
+            (opencode-shell--migrate-live-buffer)
             (opencode-shell--configure-evil-buffer)
             (opencode-shell--refresh-composer-overlay)
             (opencode-shell--sync-input-policy)))))
@@ -5341,6 +5349,7 @@ ACTIVE means that their session browser is already live."
       (message "Reloaded OpenCode Shell"))))
 
 (opencode-shell--register-profile-commands)
+(opencode-shell--migrate-live-buffers)
 
 (dolist (command opencode-shell--mode-commands)
   (put command 'completion-predicate #'ignore))

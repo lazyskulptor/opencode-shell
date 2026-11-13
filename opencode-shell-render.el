@@ -16,16 +16,89 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Each Markdown element gets a visibly distinct hue (Zenburn-family palette,
+;; matching the role faces defined in `opencode-shell').
+
 (defface opencode-shell-markdown-code-face
-  '((t :inherit fixed-pitch))
-  "Face for Markdown code." :group 'opencode-shell)
+  '((((class color) (background dark))
+     :inherit fixed-pitch :background "#35352b" :foreground "#dfcf9f")
+    (((class color) (background light))
+     :inherit fixed-pitch :background "#f0ead6" :foreground "#5f5f00")
+    (t :inherit fixed-pitch))
+  "Face for Markdown inline and fenced code." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-bold-face
+  '((((class color) (background dark)) :foreground "#dfaf8f" :weight bold)
+    (((class color) (background light)) :foreground "#a6460f" :weight bold)
+    (t :weight bold))
+  "Face for Markdown **strong** text (orange)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-emphasis-face
+  '((((class color) (background dark)) :foreground "#dc8cc3" :slant italic)
+    (((class color) (background light)) :foreground "#8b1a7a" :slant italic)
+    (t :slant italic))
+  "Face for Markdown *emphasized* text (magenta)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-heading-face
+  '((((class color) (background dark)) :foreground "#94bff3" :weight bold)
+    (((class color) (background light)) :foreground "#1f5bb6" :weight bold)
+    (t :inherit font-lock-function-name-face :weight bold))
+  "Face for Markdown headings (blue)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-list-face
+  '((((class color) (background dark)) :foreground "#f0dfaf" :weight bold)
+    (((class color) (background light)) :foreground "#8a6d00" :weight bold)
+    (t :inherit font-lock-keyword-face))
+  "Face for Markdown list markers (yellow)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-quote-face
+  '((((class color) (background dark)) :foreground "#7f9f7f" :slant italic)
+    (((class color) (background light)) :foreground "#3a663a" :slant italic)
+    (t :inherit font-lock-comment-face))
+  "Face for Markdown blockquote markers (green)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-link-face
+  '((((class color) (background dark)) :foreground "#8cd0d3" :underline t)
+    (((class color) (background light)) :foreground "#00688b" :underline t)
+    (t :inherit link))
+  "Face for Markdown link text (cyan)." :group 'opencode-shell)
+
+(defface opencode-shell-markdown-url-face
+  '((((class color) (background dark)) :foreground "#93e0e3" :underline t)
+    (((class color) (background light)) :foreground "#3a7a7c" :underline t)
+    (t :inherit font-lock-string-face))
+  "Face for Markdown link URLs." :group 'opencode-shell)
+
+(defun opencode-shell-render--match-fenced-code (limit)
+  "Match the body of a closed ``` or ~~~ fenced code block before LIMIT."
+  (let (matched)
+    (while (and (not matched)
+                (< (point) limit)
+                (re-search-forward "^\\(```\\|~~~\\).*\n" limit t))
+      (let* ((open-beg (match-beginning 0))
+             (fence (match-string 1))
+             (body-beg (point))
+             (close-re (concat "^" (regexp-quote fence) "[ \t]*$")))
+        (if (re-search-forward close-re limit t)
+            (let ((body-end (match-beginning 0))
+                  (fence-end (match-end 0)))
+              (set-match-data (list open-beg fence-end body-beg body-end))
+              (goto-char (min limit (1+ fence-end)))
+              (setq matched t))
+          (goto-char limit))))
+    matched))
 
 (defconst opencode-shell-render-font-lock-keywords
-  '(("^\\(#{1,6}\\)\\s-+\\(.+\\)$" (2 'font-lock-function-name-face))
-    ("^\\s-*\\(?:[-+*]\\|[0-9]+[.]\\)\\s-+" . font-lock-keyword-face)
-    ("^\\s-*>\\s-*" . font-lock-comment-face)
+  '(;; Shade the body of a ``` / ~~~ fenced code block linearly.
+    (opencode-shell-render--match-fenced-code
+     (1 'opencode-shell-markdown-code-face t))
+    ("^\\(#\\{1,6\\}\\).*$" (0 'opencode-shell-markdown-heading-face))
+    ("^\\s-*\\(?:[-+*]\\|[0-9]+[.]\\)\\s-+" (0 'opencode-shell-markdown-list-face))
+    ("^\\s-*>\\s-*" (0 'opencode-shell-markdown-quote-face))
     ("\\[\\([^]\n]+\\)\\](\\([^ )\n]+\\))"
-     (1 'link t) (2 'font-lock-string-face t))
+     (1 'opencode-shell-markdown-link-face t) (2 'opencode-shell-markdown-url-face t))
+    ("\\*\\*\\([^*\n]+\\)\\*\\*" (1 'opencode-shell-markdown-bold-face))
+    ("\\(?:^\\|[^*]\\)\\(\\*[^*\n]+\\*\\)" (1 'opencode-shell-markdown-emphasis-face))
     ("`\\([^`\n]+\\)`" (1 'opencode-shell-markdown-code-face t)))
   "Conservative Markdown font-lock rules.")
 
@@ -61,9 +134,14 @@
                  for column from 0
                  do (aset widths column
                           (max (aref widths column) (string-width cell)))))
-      (while (> (apply #'+ (append widths nil)) available)
-        (let ((widest (seq-position widths (seq-max widths))))
-          (aset widths widest (1- (aref widths widest)))))
+      (let ((total (apply #'+ (append widths nil))))
+        (while (> total available)
+          (let ((widest 0))
+            (cl-loop for col from 1 below columns
+                     when (> (aref widths col) (aref widths widest))
+                     do (setq widest col))
+            (aset widths widest (1- (aref widths widest)))
+            (setq total (1- total)))))
       widths)))
 
 (defun opencode-shell-render--wrap-cell (cell width)
@@ -72,10 +150,16 @@
       '("")
     (let ((rest cell) chunks)
       (while (not (string-empty-p rest))
-        (let ((end 0))
-          (while (and (< end (length rest))
-                      (<= (string-width (substring rest 0 (1+ end))) width))
-            (setq end (1+ end)))
+        (let ((end (if (<= (string-width rest) width)
+                       (length rest)
+                     (let ((low 0)
+                           (high (length rest)))
+                       (while (< low high)
+                         (let ((mid (/ (+ low high 1) 2)))
+                           (if (<= (string-width (substring rest 0 mid)) width)
+                               (setq low mid)
+                             (setq high (1- mid)))))
+                       low))))
           (when (= end 0) (setq end 1))
           (let ((next end))
             (when (< end (length rest))
@@ -130,44 +214,46 @@
 (defun opencode-shell-render-tables (text width)
   "Return TEXT with complete pipe tables laid out within WIDTH.
 Text outside recognized tables, including fenced code blocks, is unchanged."
-  (let ((lines (split-string text "\n" nil))
-        (in-fence nil)
-        result)
-    (while lines
-      (let ((line (car lines)))
-        (cond
-         ((string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line)
-          (setq in-fence (not in-fence))
-          (push (pop lines) result))
-         ((or in-fence (< (length lines) 3))
-          (push (pop lines) result))
-         (t
-          (let* ((header (opencode-shell-render--table-cells line))
-                 (separator (opencode-shell-render--table-cells (cadr lines))))
-            (if (and header separator
-                     (= (length header) (length separator))
-                     (opencode-shell-render--table-separator-p separator)
-                     (let ((body (opencode-shell-render--table-cells (caddr lines))))
-                       (and body (= (length body) (length header)))))
-                (let ((table (list header separator))
-                      (raw-table (list (cadr lines) line))
-                      body)
-                  (setq lines (cddr lines))
-                  (while (let ((row (and lines
-                                         (opencode-shell-render--table-cells (car lines)))))
-                           (when (and row (= (length row) (length header)))
-                             (push row body)
-                             (push (pop lines) raw-table)
-                             t)))
-                  (setq table (append table (nreverse body)))
-                  (let ((rendered (opencode-shell-render--layout-table
-                                   table width)))
-                    (dolist (output-line (if rendered
-                                             (split-string rendered "\n" nil)
-                                           (nreverse raw-table)))
-                      (push output-line result))))
-              (push (pop lines) result)))))))
-    (mapconcat #'identity (nreverse result) "\n")))
+  (if (not (string-match-p "|.*---" text))
+      text
+    (let ((lines (split-string text "\n" nil))
+          (in-fence nil)
+          result)
+      (while lines
+        (let ((line (car lines)))
+          (cond
+           ((string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line)
+            (setq in-fence (not in-fence))
+            (push (pop lines) result))
+           ((or in-fence (null (cddr lines)))
+            (push (pop lines) result))
+           (t
+            (let* ((header (opencode-shell-render--table-cells line))
+                   (separator (opencode-shell-render--table-cells (cadr lines))))
+              (if (and header separator
+                       (= (length header) (length separator))
+                       (opencode-shell-render--table-separator-p separator)
+                       (let ((body (opencode-shell-render--table-cells (caddr lines))))
+                         (and body (= (length body) (length header)))))
+                  (let ((table (list header separator))
+                        (raw-table (list (cadr lines) line))
+                        body)
+                    (setq lines (cddr lines))
+                    (while (let ((row (and lines
+                                           (opencode-shell-render--table-cells (car lines)))))
+                             (when (and row (= (length row) (length header)))
+                               (push row body)
+                               (push (pop lines) raw-table)
+                               t)))
+                    (setq table (append table (nreverse body)))
+                    (let ((rendered (opencode-shell-render--layout-table
+                                     table width)))
+                      (dolist (output-line (if rendered
+                                               (split-string rendered "\n" nil)
+                                             (nreverse raw-table)))
+                        (push output-line result))))
+                (push (pop lines) result)))))))
+      (mapconcat #'identity (nreverse result) "\n"))))
 
 (defun opencode-shell-render-markdown-region (beg end)
   "Fontify Markdown between BEG and END without changing its text."

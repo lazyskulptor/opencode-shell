@@ -51,7 +51,7 @@
                        ((id . "p2") (type . "tool") (tool . "read")
                         (state . ((status . "running") (input . "SECRET")))))))))
     (let ((display (opencode-shell--response-display (car opencode-shell--turns))))
-      (should (string-match-p "TOOL> read: running\n\npartial\nReceiving" display))
+      (should (string-match-p "TOOL> read: running\n\npartial\n\nReceiving" display))
       (should-not (string-match-p "SECRET" display))
       (should-not (opencode-shell--composer-visible-p)))))
 

@@ -197,79 +197,30 @@ Return nil on success or a protocol error plist."
       (list :data (mapconcat #'identity (nreverse data) "\n")
             :event event :id id))))
 
-(defun opencode-shell-sse--continuation-byte-p (byte)
-  "Return non-nil when BYTE is a UTF-8 continuation byte."
-  (and (>= byte #x80) (<= byte #xbf)))
+(defun opencode-shell-sse--decode-utf8 (bytes)
+  "Return strict UTF-8 decoding of BYTES, or nil when BYTES is invalid."
+  (let* ((raw (with-suppressed-warnings ((obsolete string-as-unibyte))
+                (string-as-unibyte bytes)))
+         (decoded (decode-coding-string raw 'utf-8 t)))
+    (unless (string-match-p "[^\000-\x10ffff]" decoded)
+      decoded)))
 
 (defun opencode-shell-sse--valid-utf8-p (bytes)
   "Return non-nil when unibyte string BYTES is canonical UTF-8."
-  (let ((index 0) (length (length bytes)) (valid t))
-    (while (and valid
-                (< index length)
-                (setq index (string-match-p "[^\000-\177]" bytes index)))
-      (let ((first (aref bytes index)))
-        (cond
-         ((and (>= first #xc2) (<= first #xdf)
-               (< (1+ index) length)
-               (opencode-shell-sse--continuation-byte-p
-                (aref bytes (1+ index))))
-          (setq index (+ index 2)))
-         ((and (or (and (= first #xe0)
-                        (< (1+ index) length)
-                        (>= (aref bytes (1+ index)) #xa0)
-                        (<= (aref bytes (1+ index)) #xbf))
-                   (and (or (and (>= first #xe1) (<= first #xec))
-                            (and (>= first #xee) (<= first #xef)))
-                        (< (1+ index) length)
-                        (opencode-shell-sse--continuation-byte-p
-                         (aref bytes (1+ index))))
-                   (and (= first #xed)
-                        (< (1+ index) length)
-                        (>= (aref bytes (1+ index)) #x80)
-                        (<= (aref bytes (1+ index)) #x9f)))
-               (< (+ index 2) length)
-               (opencode-shell-sse--continuation-byte-p
-                (aref bytes (+ index 2))))
-          (setq index (+ index 3)))
-         ((and (or (and (= first #xf0)
-                        (< (1+ index) length)
-                        (>= (aref bytes (1+ index)) #x90)
-                        (<= (aref bytes (1+ index)) #xbf))
-                   (and (>= first #xf1) (<= first #xf3)
-                        (< (1+ index) length)
-                        (opencode-shell-sse--continuation-byte-p
-                         (aref bytes (1+ index))))
-                   (and (= first #xf4)
-                        (< (1+ index) length)
-                        (>= (aref bytes (1+ index)) #x80)
-                        (<= (aref bytes (1+ index)) #x8f)))
-               (< (+ index 3) length)
-               (opencode-shell-sse--continuation-byte-p
-                (aref bytes (+ index 2)))
-               (opencode-shell-sse--continuation-byte-p
-                (aref bytes (+ index 3))))
-          (setq index (+ index 4)))
-         (t (setq valid nil)))))
-    valid))
-
-(defun opencode-shell-sse--decode-utf8 (bytes)
-  "Return strict UTF-8 decoding of BYTES, or nil when BYTES is invalid."
-  (let ((raw (with-suppressed-warnings ((obsolete string-as-unibyte))
-               (string-as-unibyte bytes))))
-    (when (opencode-shell-sse--valid-utf8-p raw)
-      (decode-coding-string raw 'utf-8))))
+  (not (null (opencode-shell-sse--decode-utf8 bytes))))
 
 (defun opencode-shell-sse--consume-frames (parser bytes)
   "Append BYTES to PARSER's SSE input and return (EVENTS ERROR)."
   (let ((input (concat (opencode-shell-sse-parser-sse-input parser) bytes))
+        (start 0)
         events error delimiter)
     (while (and (not error)
                 (setq delimiter
                       (string-match
                        "\\(?:\r\n\\|\r\\|\n\\)\\(?:\r\n\\|\r\\|\n\\)"
-                       input)))
-      (let ((frame (substring input 0 delimiter))
-            (next-input (substring input (match-end 0))))
+                       input start)))
+      (let ((frame (substring input start delimiter))
+            (next-start (match-end 0)))
         (if (> (length frame) (opencode-shell-sse-parser-max-frame-bytes parser))
             (setq error (opencode-shell-sse--error parser 'frame-too-large))
           (if-let ((decoded (opencode-shell-sse--decode-utf8 frame)))
@@ -280,8 +231,10 @@ Return nil on success or a protocol error plist."
                     (setq decoded (substring decoded 1))))
                 (when-let ((event (opencode-shell-sse--frame-event decoded)))
                   (push event events))
-                (setq input next-input))
+                (setq start next-start))
             (setq error (opencode-shell-sse--error parser 'invalid-utf8))))))
+    (when (and (not error) (> start 0))
+      (setq input (substring input start)))
     (when (and (not error)
                (> (length input) (opencode-shell-sse-parser-max-frame-bytes parser)))
       (setq error (opencode-shell-sse--error parser 'frame-too-large)))
@@ -580,15 +533,17 @@ event plists; ON-ERROR receives typed error plists."
                                #'opencode-shell-sse--header-timeout
                                connection token))
             (setq process
-                  (make-network-process
-                   :name (format "opencode-sse-%s" (sxhash-eq token))
-                   :host host :service port :coding 'binary :noquery t
-                   :filter (lambda (stream bytes)
-                             (opencode-shell-sse--filter
-                              connection token stream bytes))
-                   :sentinel (lambda (stream event)
-                               (opencode-shell-sse--sentinel
-                                connection token stream event))))
+                  (let ((default-directory temporary-file-directory)
+                        (file-name-handler-alist nil))
+                    (make-network-process
+                     :name (format "opencode-sse-%s" (sxhash-eq token))
+                     :host host :service port :coding 'binary :noquery t
+                     :filter (lambda (stream bytes)
+                               (opencode-shell-sse--filter
+                                connection token stream bytes))
+                     :sentinel (lambda (stream event)
+                                 (opencode-shell-sse--sentinel
+                                  connection token stream event)))))
             (when (memq (opencode-shell-sse-connection-state connection)
                         '(connecting streaming))
               (unless (opencode-shell-sse-connection-process connection)

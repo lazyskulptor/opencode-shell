@@ -289,5 +289,295 @@
           (should-not opencode-shell--message-order)
           (should (gethash "u" opencode-shell--removed-message-ids)))))))
 
+(ert-deftest opencode-shell-event-decodes-and-coalesces-part-delta-events ()
+  (let ((delta-1
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"message.part.delta\",\"properties\":{\"sessionID\":\"s1\",\"messageID\":\"a1\",\"partID\":\"p1\",\"field\":\"text\",\"delta\":\"안녕 \"}}")))
+        (delta-2
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"message.part.delta\",\"properties\":{\"sessionID\":\"s1\",\"messageID\":\"a1\",\"partID\":\"p1\",\"field\":\"text\",\"delta\":\"세계\"}}"))))
+    (should (equal delta-1
+                   '(:kind part-delta :type "message.part.delta"
+                     :session-id "s1" :message-id "a1" :part-id "p1"
+                     :field "text" :delta "안녕 ")))
+    (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+          (buffer (generate-new-buffer " *event-delta-coalesce*"))
+          (runtime (list :subscribers (make-hash-table :test #'eq)
+                         :attempt 'current :backoff 1 :failures 0))
+          delivered)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (setq-local opencode-shell--generation 1))
+            (puthash buffer
+                     (list :callback #'ignore :session-id "s1"
+                           :event-callback (lambda (ev) (push ev delivered)))
+                     (plist-get runtime :subscribers))
+            (puthash 'server runtime opencode-shell-async--runtimes)
+            (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                      ((symbol-function 'timerp) (lambda (v) (eq v 'timer))))
+              (opencode-shell-async--deliver-runtime runtime 'event delta-1)
+              (opencode-shell-async--deliver-runtime runtime 'event delta-2)
+              (opencode-shell-async-drain buffer))
+            (should (= (length delivered) 1))
+            (should (equal (plist-get (car delivered) :delta) "안녕 세계")))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest opencode-shell-event-scopes-session-updated-by-info-id-and-ignores-noise ()
+  (let ((session-updated
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.updated\",\"properties\":{\"info\":{\"id\":\"session-a\"}}}")))
+        (busy-status
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-a\",\"status\":{\"type\":\"busy\"}}}")))
+        (idle-status
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-a\",\"status\":{\"type\":\"idle\"}}}")))
+        (heartbeat
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"server.heartbeat\",\"properties\":{}}")))
+        (file-edited
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"file.edited\",\"properties\":{\"file\":\"a.el\"}}")))
+        (lsp-diag
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"lsp.client.diagnostics\",\"properties\":{}}")))
+        (session-diff
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.diff\",\"properties\":{\"sessionID\":\"session-a\"}}"))))
+    (should (equal (plist-get session-updated :session-id) "session-a"))
+    (should (eq (plist-get session-updated :resource) 'messages))
+    (should (eq (plist-get busy-status :resource) 'none))
+    (should (eq (plist-get idle-status :resource) 'messages))
+    (dolist (ignored (list heartbeat file-edited lsp-diag session-diff))
+      (should (eq (plist-get ignored :resource) 'none)))
+    (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+          (buffer (generate-new-buffer " *event-ignore-noise*"))
+          (runtime (list :subscribers (make-hash-table :test #'eq)
+                         :attempt 'current :backoff 1 :failures 0)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (setq-local opencode-shell--generation 1))
+            (puthash buffer
+                     (list :callback #'ignore :session-id "session-a"
+                           :event-callback #'ignore)
+                     (plist-get runtime :subscribers))
+            (opencode-shell-async--deliver-runtime runtime 'event heartbeat)
+            (opencode-shell-async--deliver-runtime runtime 'event busy-status)
+            (with-current-buffer buffer
+              (should-not opencode-shell-async--queue)))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest opencode-shell-event-applies-user-part-and-part-delta-without-snapshot ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (let ((snapshot-count 0))
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf snapshot-count)))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+        (opencode-shell--receive-application-event
+         '(:kind message-updated :type "message.updated"
+           :session-id "session-a" :message-id "u-stream"
+           :info ((id . "u-stream") (sessionID . "session-a") (role . "user"))))
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated"
+           :session-id "session-a" :message-id "u-stream" :part-id "p-user"
+           :part ((id . "p-user") (sessionID . "session-a")
+                  (messageID . "u-stream") (type . "text")
+                  (text . "질문입니다"))))
+        (opencode-shell--receive-application-event
+         '(:kind message-updated :type "message.updated"
+           :session-id "session-a" :message-id "a-stream"
+           :info ((id . "a-stream") (sessionID . "session-a")
+                  (role . "assistant") (parentID . "u-stream"))))
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated"
+           :session-id "session-a" :message-id "a-stream" :part-id "p-text"
+           :part ((id . "p-text") (sessionID . "session-a")
+                  (messageID . "a-stream") (type . "text")
+                  (text . "답변: "))))
+        (opencode-shell--receive-application-event
+         '(:kind part-delta :type "message.part.delta"
+           :session-id "session-a" :message-id "a-stream" :part-id "p-text"
+           :field "text" :delta "성공"))
+        (opencode-shell-async-drain (current-buffer))
+        (should (zerop snapshot-count))
+        (should (= (length opencode-shell--turns) 1))
+        (should (equal (opencode-shell--turn-user (car opencode-shell--turns))
+                       "질문입니다"))
+        (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns))
+                       "답변: 성공"))))))
+
+(ert-deftest opencode-shell-event-retains-orphan-part-when-message-updated-arrives-later ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (sessionID . "session-a") (role . "user")))
+        (parts . (((id . "pu1") (type . "text") (text . "hi")))))) 1)
+    (let ((snapshot-count 0))
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf snapshot-count)))
+                ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated"
+           :session-id "session-a" :message-id "a-late" :part-id "p-late"
+           :part ((id . "p-late") (sessionID . "session-a")
+                  (messageID . "a-late") (type . "text")
+                  (text . "먼저 도착한 파트"))))
+        (opencode-shell--receive-application-event
+         '(:kind message-updated :type "message.updated"
+           :session-id "session-a" :message-id "a-late"
+           :info ((id . "a-late") (sessionID . "session-a")
+                  (role . "assistant") (parentID . "u1"))))
+        (opencode-shell-async-drain (current-buffer))
+        (should (zerop snapshot-count))
+        (should (equal (opencode-shell--turn-assistant (car opencode-shell--turns))
+                       "먼저 도착한 파트"))))))
+
+(ert-deftest opencode-shell-event-cancels-revision-reconcile-loop-when-streaming-continues ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+        (parts . (((id . "pu1") (type . "text") (text . "current")))))
+       ((info . ((id . "a1") (role . "assistant")
+                 (sessionID . "s") (parentID . "u1")))
+        (parts . nil))) 1)
+    (let (message-callback)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path callback &rest _)
+                   (when (eq key 'messages) (setq message-callback callback))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+        (opencode-shell--resync)
+        (opencode-shell--receive-application-event
+         '(:kind part-updated :type "message.part.updated" :session-id "s"
+           :message-id "a1" :part-id "p1"
+           :part ((id . "p1") (sessionID . "s") (messageID . "a1")
+                  (type . "text") (text . "stream-1"))))
+        (funcall message-callback
+                 '(((info . ((id . "u1") (role . "user") (sessionID . "s")))
+                    (parts . (((id . "pu1") (type . "text") (text . "current")))))
+                   ((info . ((id . "a1") (role . "assistant")
+                             (sessionID . "s") (parentID . "u1")))
+                    (parts . nil))))
+        (should (alist-get '(event-reconcile messages)
+                           opencode-shell-async--queue nil nil #'equal))
+        (opencode-shell--receive-application-event
+         '(:kind part-delta :type "message.part.delta" :session-id "s"
+           :message-id "a1" :part-id "p1" :field "text" :delta "-stream-2"))
+        (should-not (alist-get '(event-reconcile messages)
+                               opencode-shell-async--queue nil nil #'equal))
+        (should (equal (opencode-shell--turn-assistant
+                        (car (last opencode-shell--turns)))
+                       "stream-1-stream-2"))))))
+
+(ert-deftest opencode-shell-event-session-updated-and-settled-idle-avoid-snapshot-storm ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (sessionID . "session-a") (role . "user")))
+        (parts . (((id . "pu1") (type . "text") (text . "hi")))))
+       ((info . ((id . "a1") (sessionID . "session-a")
+                 (role . "assistant") (parentID . "u1")
+                 (finish . "stop") (time . ((completed . 2)))))
+        (parts . (((id . "pa1") (type . "text") (text . "done")))))) 1)
+    (let ((snapshot-count 0))
+      (cl-letf (((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf snapshot-count)))
+                ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+                ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+                ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+        (opencode-shell--receive-application-event
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.updated\",\"properties\":{\"info\":{\"id\":\"session-a\",\"title\":\"새 제목\"}}}")))
+        (opencode-shell--receive-application-event
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-a\",\"status\":{\"type\":\"idle\"}}}")))
+        (opencode-shell--receive-application-event
+         (opencode-shell-event-decode
+          '(:data "{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"session-a\"}}")))
+        (opencode-shell-async-drain (current-buffer))
+        (should (zerop snapshot-count))
+        (should (equal opencode-shell--session-title "새 제목"))
+        (should opencode-shell--session-idle-p)))))
+
+(ert-deftest opencode-shell-compacts-large-tool-and-reasoning-payloads-in-cache ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a")
+    (let ((big-input (make-string 5000 ?x))
+          (big-output (concat "<task id=\"child-sess-1\">" (make-string 5000 ?y)))
+          (big-thought (make-string 5000 ?z)))
+      (opencode-shell--render-messages
+       `(((info . ((id . "u1") (sessionID . "session-a") (role . "user")))
+          (parts . (((id . "pu1") (type . "text") (text . "run")))))
+         ((info . ((id . "a1") (sessionID . "session-a")
+                   (role . "assistant") (parentID . "u1")))
+          (parts . (((id . "r1") (type . "reasoning") (text . ,big-thought))
+                    ((id . "t1") (type . "tool") (tool . "task")
+                     (state . ((status . "running")
+                               (input . ,big-input)
+                               (output . ,big-output)))))))) 1)
+      (let* ((cached (gethash "a1" opencode-shell--message-envelopes))
+             (parts (opencode-shell--get cached 'parts))
+             (reasoning-part (car parts))
+             (tool-part (cadr parts))
+             (tool-state (opencode-shell--get tool-part 'state))
+             (turn (car opencode-shell--turns)))
+        (should-not (opencode-shell--get tool-state 'input))
+        (should (<= (length (opencode-shell--get tool-state 'output)) 500))
+        (should (opencode-shell--turn-spawned-session-p turn "child-sess-1"))
+        (should (<= (length (or (opencode-shell--get reasoning-part 'text) "")) 256))))))
+
+(ert-deftest opencode-shell-event-resets-idle-flag-on-new-turn-and-attaches-early-assistant ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "session-a"
+          opencode-shell--session-idle-p t)
+    (cl-letf (((symbol-function 'opencode-shell--refresh-session-metadata) #'ignore)
+              ((symbol-function 'run-with-idle-timer) (lambda (&rest _) 'timer))
+              ((symbol-function 'run-at-time) (lambda (&rest _) 'timer))
+              ((symbol-function 'timerp) (lambda (value) (eq value 'timer))))
+      ;; Assistant arrives before user message; then user arrives and task tool starts.
+      (opencode-shell--receive-application-event
+       '(:kind message-updated :type "message.updated"
+         :session-id "session-a" :message-id "a2"
+         :info ((id . "a2") (sessionID . "session-a")
+                (role . "assistant") (parentID . "u2"))))
+      (opencode-shell--receive-application-event
+       '(:kind part-updated :type "message.part.updated"
+         :session-id "session-a" :message-id "a2" :part-id "t2"
+         :part ((id . "t2") (sessionID . "session-a")
+                (messageID . "a2") (type . "tool") (tool . "task")
+                (state . ((status . "running"))))))
+      (opencode-shell--receive-application-event
+       '(:kind message-updated :type "message.updated"
+         :session-id "session-a" :message-id "u2"
+         :info ((id . "u2") (sessionID . "session-a") (role . "user"))))
+      (should-not opencode-shell--session-idle-p)
+      (should (= (length opencode-shell--turns) 1))
+      ;; Turn must stay active (`receiving'), not prematurely settle from stale idle flag.
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                  'receiving))
+      ;; Once session.idle arrives for this turn, the task-only turn settles.
+      (opencode-shell--receive-application-event
+       (opencode-shell-event-decode
+        '(:data "{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"session-a\"}}")))
+      (should (eq (opencode-shell--turn-status (car opencode-shell--turns))
+                  'complete)))))
+
 (provide 'opencode-shell-event-test)
 ;;; opencode-shell-event-test.el ends here

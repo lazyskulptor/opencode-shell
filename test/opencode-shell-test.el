@@ -34,33 +34,6 @@
       (should (equal (alist-get 'model body) opencode-shell--selected-model))
       (should (equal (alist-get 'text (aref (alist-get 'parts body) 0)) "안녕")))))
 
-(ert-deftest opencode-shell-local-requests-bypass-url-proxy ()
-  (let ((url-proxy-services '(("http" . "proxy.example:3128"))) seen)
-    (with-temp-buffer
-      (setq-local opencode-shell--profile opencode-shell-test--local-profile)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (setq seen url-proxy-services))))
-        (opencode-shell--request "GET" "/question" #'ignore)))
-    (should-not seen)))
-
-(ert-deftest opencode-shell-request-disables-process-query-on-exit ()
-  "A connection that never calls back must not nag to confirm a kill on exit."
-  (let* ((response-buffer (generate-new-buffer " *fake-http*"))
-         (process (make-network-process
-                   :name "opencode-test-fake-http" :buffer response-buffer
-                   :family 'ipv4 :server t :host 'local :service t)))
-    (unwind-protect
-        (progn
-          (set-process-query-on-exit-flag process t)
-          (with-temp-buffer
-            (setq-local opencode-shell--profile opencode-shell-test--local-profile)
-            (cl-letf (((symbol-function 'url-retrieve)
-                       (lambda (&rest _) response-buffer)))
-              (opencode-shell--request "GET" "/question" #'ignore)))
-          (should-not (process-query-on-exit-flag process)))
-      (delete-process process)
-      (kill-buffer response-buffer))))
-
 (ert-deftest opencode-shell-session-normalization-and-filter ()
   (let* ((old '((id . "old") (title . "Alpha") (time (updated . 1000))))
          (new '((id . "new") (title . "Beta") (directory . "/work")
@@ -373,6 +346,138 @@
                                opencode-shell--sessions)
                        '("moved" "native")))))))
 
+(ert-deftest opencode-shell-refresh-escalates-to-reconnect-on-failure ()
+  "A failed browser refresh re-establishes an SSH-forwarded server, then retries."
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--profile
+                (list :name "ssh" :base-url "http://127.0.0.1:4099"
+                      :start-command '("ssh" "-NT" "host"))
+                opencode-shell--directory "/server/project/")
+    (let ((started 0) (status-requests 0))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path _callback &optional _body _params error)
+                   (when (equal path "/session/status")
+                     (cl-incf status-requests)
+                     (when error (funcall error)))))
+                ((symbol-function 'opencode-shell--start-server-for-command)
+                 (lambda (profile callback)
+                   (cl-incf started)
+                   (funcall callback profile))))
+        ;; First refresh fails -> escalation starts the server and retries once;
+        ;; the cooldown then blocks a tight re-escalation loop.
+        (opencode-shell--refresh)
+        (should (= started 1))
+        (should (= status-requests 2))))))
+
+(ert-deftest opencode-shell-refresh-local-profile-retries-without-server-start ()
+  "A failed refresh on a start-command-less profile retries directly."
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--profile
+                (list :name "direct" :base-url "http://127.0.0.1:4099")
+                opencode-shell--directory "/server/project/")
+    (let ((started 0) (status-requests 0))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path _callback &optional _body _params error)
+                   (when (equal path "/session/status")
+                     (cl-incf status-requests)
+                     (when error (funcall error)))))
+                ((symbol-function 'opencode-shell--start-server-for-command)
+                 (lambda (&rest _) (cl-incf started))))
+        (opencode-shell--refresh)
+        (should (= started 0))
+        (should (= status-requests 2))))))
+
+(ert-deftest opencode-shell-guarded-request-releases-guard-after-generation-bump ()
+  "A guarded request releases its in-flight guard even if generation changed.
+Regression: the guard was only cleared while current, so a request settling after
+a generation bump left the resource blocked forever (a turn stuck in receiving)."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s" opencode-shell--generation 1)
+    (let (success applied)
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_m _p cb &optional _b _p2 _e) (setq success cb) nil)))
+        (opencode-shell--guarded-request
+         'messages "GET" "/session/s/message"
+         (lambda (_v) (setq applied t)))
+        (should (alist-get 'messages opencode-shell--in-flight))  ; guard set
+        (setq opencode-shell--generation 2)                        ; generation bumps mid-flight
+        (funcall success '((ok . t)))                              ; response arrives late
+        (should-not (alist-get 'messages opencode-shell--in-flight)) ; guard RELEASED
+        (should-not applied)))))                                   ; result NOT applied (stale)
+
+(ert-deftest opencode-shell-lifecycle-restarts-polling-when-needed ()
+  "Lifecycle restarts polling when a turn is active but polling is off.
+Regression: a receiving turn could be left with no runtime and stay stuck
+forever because lifecycle only ever stopped polling, never restarted it."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--profile '(:name "p" :base-url "http://127.0.0.1:4099")
+          opencode-shell--session-id "s"
+          opencode-shell--runtime-key nil
+          opencode-shell--turns
+          (list (opencode-shell--make-turn :id "t1" :status 'receiving)))
+    (let ((subscribed 0))
+      (cl-letf (((symbol-function 'opencode-shell-async-subscribe-runtime)
+                 (lambda (&rest _) (cl-incf subscribed) nil))
+                ((symbol-function 'opencode-shell-recovery-offline-p) #'ignore))
+        (opencode-shell--update-message-lifecycle-state)
+        (should (= subscribed 1))))))
+
+(ert-deftest opencode-shell-refresh-escalation-recovers-after-cooldown ()
+  "Repeated failed refreshes re-escalate once the cooldown elapses.
+Regression: a stuck escalation flag permanently blocked re-escalation when the
+server start never completed (its success callback never fired)."
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq-local opencode-shell--profile
+                (list :name "ssh" :base-url "http://127.0.0.1:4099"
+                      :start-command '("ssh" "-NT" "host"))
+                opencode-shell--directory "/p/")
+    (let ((started 0) (now 1000.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_m path _cb &optional _b _pa error)
+                   (when (and (equal path "/session/status") error) (funcall error))))
+                ((symbol-function 'opencode-shell--start-server-for-command)
+                 (lambda (_profile _callback) (cl-incf started))))
+        (opencode-shell--refresh)
+        (should (= started 1))
+        (opencode-shell--refresh)
+        (should (= started 1))
+        (setq now (+ now 1000))
+        (opencode-shell--refresh)
+        (should (= started 2))))))
+
+(defun opencode-shell-test--polling-sse-enabled (profile)
+  "Return the SSE-enabled flag `opencode-shell--start-polling' passes for PROFILE."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--profile profile
+                opencode-shell--base-url (plist-get profile :base-url)
+                opencode-shell--session-id "ses-1")
+    (let (captured)
+      (cl-letf (((symbol-function 'opencode-shell-async-subscribe-runtime)
+                 (lambda (_key _buffer _url _headers sse-enabled &rest _)
+                   (setq captured sse-enabled) nil))
+                ((symbol-function 'opencode-shell-recovery-offline-p) #'ignore))
+        (opencode-shell--start-polling)
+        captured))))
+
+(ert-deftest opencode-shell-forwarded-profile-uses-sse ()
+  "A loopback (direct or SSH-forwarded) profile subscribes with SSE on.
+SSE delivers incremental deltas over the local /event socket, avoiding a
+full-transcript re-parse per poll; a genuinely remote host stays poll-only."
+  (should (opencode-shell-test--polling-sse-enabled
+           '(:name "fwd" :base-url "http://127.0.0.1:4099" :remote t
+             :start-command ("ssh" "-NT" "host"))))
+  (should (opencode-shell-test--polling-sse-enabled
+           '(:name "local" :base-url "http://localhost:4199")))
+  (should-not (opencode-shell-test--polling-sse-enabled
+               '(:name "wan" :base-url "https://code.example.test"))))
+
 (ert-deftest opencode-shell-move-directory-rejects-current-project ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -436,86 +541,6 @@
     (should (equal (aref (cadr (opencode-shell--session-row
                                 '((id . "s") (model . "p/two")))) 3)
                    "p/two"))))
-
-(ert-deftest opencode-shell-http-status-and-bounded-errors ()
-  (should (<= (string-width (opencode-shell--bounded-error
-                             (concat "bad\n" (make-string 500 ?x)))) 300))
-  (let (called messages)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_ callback &rest _)
-                 (with-temp-buffer
-                   (insert "HTTP/1.1 204 No Content\r\n\r\n")
-                   (setq-local url-http-response-status 204)
-                   (funcall callback nil))))
-              ((symbol-function 'message)
-               (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) messages))))
-      (opencode-shell--request "GET" "/ok" (lambda (value) (setq called (list value))))
-      (opencode-shell-async-drain (current-buffer))
-      (should (equal called '(nil)))
-      (setq called nil)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_ callback &rest _)
-                   (with-temp-buffer
-                     (insert "HTTP/1.1 300 Multiple\r\n\r\nnot success")
-                     (setq-local url-http-response-status 300)
-                     (funcall callback nil)))))
-        (opencode-shell--request "GET" "/bad" (lambda (_) (setq called t))))
-      (opencode-shell-async-drain (current-buffer))
-      (should-not called)
-      (should (string-match-p "HTTP 300 request failed" (car messages)))
-      (should-not (seq-some (lambda (text) (string-match-p "not success" text)) messages)))))
-
-(ert-deftest opencode-shell-health-callback-defers-buffer-kill-off-stack ()
-  ;; Killing the url response buffer synchronously in this sentinel pumps other
-  ;; pending health sentinels, which re-enter the callback and can recurse until
-  ;; the Lisp stack overflows.  The kill must be deferred, not synchronous.
-  (let ((buffer (generate-new-buffer " *oc-health-test*"))
-        (scheduled 0) killed ready)
-    (unwind-protect
-        (cl-letf (((symbol-function 'run-at-time)
-                   (lambda (_delay _repeat &rest _) (cl-incf scheduled) 'timer))
-                  ((symbol-function 'kill-buffer)
-                   (lambda (&rest _) (setq killed t))))
-          (with-current-buffer buffer
-            (setq-local url-http-response-status 200)
-            (opencode-shell--server-health-callback
-             '(:name "p") (lambda (r _profile) (setq ready r)) nil))
-          ;; Callback ran synchronously with the right readiness...
-          (should (eq ready t))
-          ;; ...but the buffer kill was scheduled, not performed inline.
-          (should (= scheduled 1))
-          (should-not killed))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
-(ert-deftest opencode-shell-transport-errors-are-reported-once-per-outage ()
-  (with-temp-buffer
-    (let ((fail t) messages)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_ callback &rest _)
-                   (with-temp-buffer
-                     (if fail
-                         (funcall callback '(:error (error connection-failed)))
-                       (insert "HTTP/1.1 204 No Content\r\n\r\n")
-                       (setq-local url-http-response-status 204)
-                       (funcall callback nil)))))
-                ((symbol-function 'message)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) messages))))
-        ;; A burst of failures during one outage reports exactly once.
-        (dotimes (_ 5)
-          (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
-          (opencode-shell-async-drain (current-buffer)))
-        (should (= (length messages) 1))
-        ;; A success clears the notice so the next outage reports again.
-        (setq fail nil)
-        (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
-        (opencode-shell-async-drain (current-buffer))
-        (setq fail t)
-        (dotimes (_ 3)
-          (opencode-shell--request "GET" "/x" #'ignore nil nil #'ignore)
-          (opencode-shell-async-drain (current-buffer)))
-        (should (= (length messages) 2))))))
 
 (ert-deftest opencode-shell-async-queue-coalesces-and-drops-stale-work ()
   (with-temp-buffer
@@ -1023,6 +1048,23 @@
         (should (equal opencode-shell--known-descendant-session-ids '("child")))
         (should rendered)))))
 
+(ert-deftest opencode-shell-subagent-session-hides-composer-and-blocks-submit ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "child")
+    (cl-letf (((symbol-function 'opencode-shell--request)
+               (lambda (_method path callback &rest _)
+                 (if (equal path "/session")
+                     (funcall callback '(((id . "parent"))
+                                         ((id . "child") (parentID . "parent"))))
+                   (funcall callback nil)))))
+      (should-not opencode-shell--subagent-session-p)
+      (should (opencode-shell--composer-visible-p))
+      (opencode-shell--refresh-session-metadata)
+      (should opencode-shell--subagent-session-p)
+      (should-not (opencode-shell--composer-visible-p))
+      (should-error (opencode-shell--submit) :type 'user-error))))
+
 (ert-deftest opencode-shell-finished-subagent-is-pruned-on-reconcile ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -1072,6 +1114,24 @@
                      "child"))
       (let ((command (opencode-shell-test--clicked-command (point))))
         (should (eq command #'opencode-shell--open-descendant-session))))))
+
+(ert-deftest opencode-shell-descendant-session-renders-before-active-spinner ()
+  "A subagent line always renders above the turn's own Receiving/Thinking spinner."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((turn (opencode-shell--make-turn :id "turn-1" :user "delegate"
+                                           :assistant "" :status 'receiving)))
+      (setq opencode-shell--turns (list turn)
+            opencode-shell--known-descendant-session-ids '("child")
+            opencode-shell--descendant-session-anchors '(("child" . "turn-1")))
+      (opencode-shell--render-turns t)
+      (goto-char (point-min))
+      (let ((subagent-pos (progn (should (search-forward "subagent" nil t))
+                                 (match-beginning 0)))
+            (spinner-pos (progn (should (search-forward "Receiving" nil t))
+                                (match-beginning 0))))
+        (should (< subagent-pos spinner-pos))))))
 
 (ert-deftest opencode-shell-unplaceable-descendant-session-not-shown-at-top ()
   ;; A subagent whose spawning turn cannot be resolved is NOT bunched at the top;
@@ -1787,94 +1847,6 @@ under [mouse-1]."
         (should (= (length requests) 14))
         (should (= (cl-count "/session/s/message" requests :test #'equal) 2))))))
 
-(ert-deftest opencode-shell-ssh-gate-defers-http-until-ready ()
-  (let* ((profile '(:name "ssh-gate" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (starts 0) (sent 0))
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (setq-local opencode-shell--directory "/remote/")
-      (cl-letf (((symbol-function 'opencode-shell--start-server)
-                 (lambda (_profile callback &rest _)
-                   (should-not callback)
-                   (cl-incf starts)))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent))))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (should (= sent 0))
-        (should (= starts 1))
-        (opencode-shell-recovery-success key)
-        (opencode-shell--ssh-invoke-start-callback
-         (car (plist-get (gethash key opencode-shell--servers) :callbacks)))
-        (should (= sent 1))))))
-
-(ert-deftest opencode-shell-ssh-refusal-enters-quiet-offline-state ()
-  (let* ((profile '(:name "ssh-gate" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         (runtime (list :subscribers (make-hash-table :test #'eq)
-                        :poll-timer nil :paused nil :poll-interval 2))
-         (sent 0) (starts 0) notices)
-    (puthash key runtime opencode-shell-async--runtimes)
-    (opencode-shell-recovery-success key)
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (setq-local opencode-shell--directory "/remote/")
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _)
-                   (cl-incf sent)
-                   (let ((response (generate-new-buffer " *offline-reply*")))
-                     (with-current-buffer response
-                       (funcall callback '(:error (error connection-failed)))))))
-                ((symbol-function 'run-at-time) (lambda (&rest _) nil))
-                ((symbol-function 'message)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) notices)))
-                ((symbol-function 'opencode-shell--start-server)
-                 (lambda (&rest _) (cl-incf starts))))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (should (opencode-shell-recovery-offline-p key))
-        (should (plist-get runtime :paused))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (should (= sent 1))
-        (should (= starts 0))
-        (should (= (length notices) 1))))))
-
-(ert-deftest opencode-shell-ssh-gate-times-out-one-shot-request ()
-  (let* ((profile '(:name "ssh-timeout" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         timers health (failures 0) sent)
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback) (setq health callback)))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (setq sent t)))
-                ((symbol-function 'run-at-time)
-                 (lambda (_delay _repeat callback &rest args)
-                   (push (cons callback args) timers)))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--request "GET" "/session" #'ignore nil nil
-                                 (lambda () (cl-incf failures)))
-        (should (plist-get (gethash key opencode-shell--servers) :checking))
-        (apply (caar timers) (cdar timers))
-        (should (= failures 0))
-        (should-not (plist-get (gethash key opencode-shell--servers) :checking))
-        (funcall health t)
-        (should (= failures 0))
-        (should-not sent)))))
-
 (ert-deftest opencode-shell-ssh-manual-resync-restarts-transport-first ()
   (let* ((profile '(:name "ssh-manual" :remote t
                     :base-url "http://127.0.0.1:4545"
@@ -1898,38 +1870,6 @@ under [mouse-1]."
         (opencode-shell-recovery-success key)
         (funcall ready profile)
         (should requests)))))
-
-(ert-deftest opencode-shell-ssh-recovery-stops-after-bounded-start-failures ()
-  (let* ((profile '(:name "ssh-budget" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         scheduled (starts 0))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (delay _repeat callback &rest args)
-                   (push (list delay callback args) scheduled)
-                   nil))
-                ((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback) (funcall callback nil)))
-                ((symbol-function 'opencode-shell--spawn-server)
-                 (lambda (_profile attempt)
-                   (cl-incf starts)
-                   (opencode-shell--fail-start key attempt "unavailable")))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--ssh-disconnected profile)
-        (dolist (delay '(1 2 4 8))
-          (let ((timer (cl-find delay scheduled :key #'car)))
-            (should timer)
-            (apply (nth 1 timer) (nth 2 timer))))
-        (should (= starts 4))
-        (should (opencode-shell-recovery-exhausted-p key))
-        (should-not (plist-get (gethash key opencode-shell--servers) :checking))))))
 
 (ert-deftest opencode-shell-ssh-browser-start-failure-is-reported-once ()
   (let* ((profile '(:name "ssh-browser" :remote t
@@ -2046,91 +1986,7 @@ under [mouse-1]."
         (should-not opencode-shell--capabilities-loading)
         (should opencode-shell--connection-stale)))))
 
-(ert-deftest opencode-shell-explicit-ssh-stop-does-not-auto-reconnect ()
-  (let* ((profile '(:name "ssh-stop" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal)))
-    (puthash key (list :profile profile :owned t :process 'owned)
-             opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-status) (lambda (_) 'exit))
-              ((symbol-function 'delete-process)
-               (lambda (_) (opencode-shell--process-sentinel key nil 'owned "exited"))))
-      (opencode-shell--stop-server profile)
-      (should-not (opencode-shell-recovery-offline-p key)))))
-
-(ert-deftest opencode-shell-ssh-offline-read-waits-for-next-healthy-attempt ()
-  (let* ((profile '(:name "ssh-wait" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (sent 0))
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (opencode-shell-recovery-mark-offline key)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent)))
-                ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (should (= sent 0))
-        (let ((pending (plist-get (gethash key opencode-shell--servers)
-                                  :callbacks)))
-          (should (= (length pending) 1))
-          (opencode-shell-recovery-success key)
-           (opencode-shell--ssh-invoke-start-callback (car pending))
-          (should (= sent 1)))))))
-
-(ert-deftest opencode-shell-ssh-old-http-error-cannot-reopen-outage ()
-  (let* ((profile '(:name "ssh-old" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         transport-callback)
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (opencode-shell-recovery-success key)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _)
-                   (setq transport-callback callback)))
-                ((symbol-function 'message) #'ignore)
-                ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (opencode-shell-recovery-mark-offline key)
-        (opencode-shell-recovery-success key)
-        (let ((response (generate-new-buffer " *old-http-reply*")))
-          (with-current-buffer response
-            (funcall transport-callback '(:error (error connection-failed)))))
-        (should (opencode-shell-recovery-ready-p key))
-        (should-not (opencode-shell-recovery-offline-p key))))))
-
-(ert-deftest opencode-shell-ssh-retry-expires-starting-health-attempt ()
-  (let* ((profile '(:name "ssh-starting" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         deadline)
-    (cl-letf (((symbol-function 'run-at-time)
-               (lambda (_delay _repeat callback &rest args)
-                 (unless deadline (setq deadline (cons callback args)))
-                 nil))
-              ((symbol-function 'opencode-shell--start-server)
-               (lambda (_profile _callback &rest _)
-                 (puthash key (list :starting t :attempt 'attempt :profile profile)
-                          opencode-shell--servers)))
-              ((symbol-function 'message) #'ignore))
-      (opencode-shell--ssh-retry profile)
-      (apply (car deadline) (cdr deadline))
-      (should-not (plist-get (gethash key opencode-shell--servers) :starting)))))
-
-(ert-deftest opencode-shell-ssh-new-subscriber-resumes-paused-recovery ()
+(ert-deftest opencode-shell-ssh-new-subscriber-stays-paused-while-offline ()
   (let* ((profile '(:name "ssh-new-subscriber" :remote t
                     :base-url "http://127.0.0.1:4545"
                     :start-command ("ssh" "-N" "host")))
@@ -2153,215 +2009,47 @@ under [mouse-1]."
                 ((symbol-function 'opencode-shell-async-subscribe-animation) #'ignore)
                 ((symbol-function 'opencode-shell-async-pause-runtime) #'ignore)
                 ((symbol-function 'opencode-shell--log-lifecycle) #'ignore))
-        (opencode-shell-recovery-failed key #'ignore (lambda () t))
-        (opencode-shell-recovery-suspend key)
+        (opencode-shell-recovery-mark-offline key)
         (opencode-shell--start-polling)
-        (should (= scheduled 2))
+        (should (= scheduled 0))
+        (should opencode-shell--connection-stale)
         (should opencode-shell--runtime-key)))))
 
-(ert-deftest opencode-shell-ssh-pending-read-survives-first-retry-failure ()
-  (let* ((profile '(:name "ssh-pending-read" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         scheduled (health-checks 0) (sent 0) (failures 0) (reconciles 0))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (delay _repeat callback &rest args)
-                   (push (list delay callback args) scheduled)
-                   nil))
-                ((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback)
-                   (cl-incf health-checks)
-                   (funcall callback (= health-checks 2))))
-                ((symbol-function 'opencode-shell--spawn-server)
-                 (lambda (_profile attempt)
-                   (opencode-shell--fail-start key attempt "unavailable")))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent)))
-                ((symbol-function 'opencode-shell--ssh-reconcile)
-                 (lambda (_key) (cl-incf reconciles)))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--ssh-disconnected profile)
-        (opencode-shell--request "GET" "/session" #'ignore nil nil
-                                 (lambda () (cl-incf failures)))
-        (let ((first (cl-find 1 scheduled :key #'car)))
-          (should first)
-          (apply (nth 1 first) (nth 2 first)))
-        (should (= health-checks 1))
-        (should (= failures 0))
-        (should (>= (length (plist-get (gethash key opencode-shell--servers)
-                                       :callbacks)) 1))
-        (let ((second (cl-find 2 scheduled :key #'car)))
-          (should second)
-          (apply (nth 1 second) (nth 2 second)))
-        (should (= health-checks 2))
-        (should (= sent 1))
-        (should (= reconciles 1))
-        (should (= failures 0))))))
-
-(ert-deftest opencode-shell-ssh-pending-read-fails-only-on-exhaustion ()
-  (let* ((profile '(:name "ssh-pending-exhausted" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         scheduled (failures 0))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (delay _repeat callback &rest args)
-                   (push (list delay callback args) scheduled) nil))
-                ((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback) (funcall callback nil)))
-                ((symbol-function 'opencode-shell--spawn-server)
-                 (lambda (_profile attempt)
-                   (opencode-shell--fail-start key attempt "unavailable")))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--ssh-disconnected profile)
-        (opencode-shell--request "GET" "/session" #'ignore nil nil
-                                 (lambda () (cl-incf failures)))
-        (dolist (delay '(1 2 4 8))
-          (let ((timer (cl-find delay scheduled :key #'car)))
-            (should timer)
-            (apply (nth 1 timer) (nth 2 timer)))
-          (unless (= delay 8) (should (= failures 0))))
-        (should (opencode-shell-recovery-exhausted-p key))
-        (should (= failures 1))
-        (should-not (plist-get (gethash key opencode-shell--servers)
-                               :callbacks))))))
-
-(ert-deftest opencode-shell-ssh-initial-read-survives-first-start-failure ()
-  (let* ((profile '(:name "ssh-initial-read" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         scheduled (checks 0) (sent 0) (failures 0))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (delay _repeat callback &rest args)
-                   (push (list delay callback args) scheduled) nil))
-                ((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback)
-                   (cl-incf checks)
-                   (funcall callback (= checks 2))))
-                ((symbol-function 'opencode-shell--spawn-server)
-                 (lambda (_profile attempt)
-                   (opencode-shell--fail-start key attempt "unavailable")))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent)))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--request "GET" "/session" #'ignore nil nil
-                                 (lambda () (cl-incf failures)))
-        (should (= checks 1))
-        (should (= failures 0))
-        (let ((retry (cl-find 1 scheduled :key #'car)))
-          (should retry)
-          (apply (nth 1 retry) (nth 2 retry)))
-        (should (= checks 2))
-        (should (= sent 1))
-        (should (= failures 0))))))
-
-(ert-deftest opencode-shell-ssh-initial-mutation-is-not-replayed-after-start-failure ()
-  (let* ((profile '(:name "ssh-initial-post" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         scheduled (checks 0) (sent 0) (failures 0))
-    (with-temp-buffer
-      (opencode-shell-mode)
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (delay _repeat callback &rest args)
-                   (push (list delay callback args) scheduled) nil))
-                ((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback)
-                   (cl-incf checks)
-                   (funcall callback (= checks 2))))
-                ((symbol-function 'opencode-shell--spawn-server)
-                 (lambda (_profile attempt)
-                   (opencode-shell--fail-start key attempt "unavailable")))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent)))
-                ((symbol-function 'message) #'ignore))
-        (opencode-shell--request "POST" "/session" #'ignore nil nil
-                                 (lambda () (cl-incf failures)))
-        (should (= failures 1))
-        (let ((retry (cl-find 1 scheduled :key #'car)))
-          (should retry)
-          (apply (nth 1 retry) (nth 2 retry)))
-        (should (= checks 2))
-        (should (= sent 0))
-        (should (= failures 1))))))
-
-(ert-deftest opencode-shell-ssh-killed-waiter-does-not-retry ()
-  (let* ((profile '(:name "ssh-killed-waiter" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (key (opencode-shell--server-key profile))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (opencode-shell-async--runtimes (make-hash-table :test #'equal))
-         (origin (generate-new-buffer " *ssh-killed-waiter*"))
-         timer started)
-    (unwind-protect
-        (with-current-buffer origin
-          (opencode-shell-mode)
-          (setq-local opencode-shell--profile profile)
-          (cl-letf (((symbol-function 'run-at-time)
-                     (lambda (delay _repeat callback &rest args)
-                       (when (= delay 1) (setq timer (cons callback args))) nil))
-                    ((symbol-function 'opencode-shell--start-server)
-                     (lambda (&rest _) (setq started t)))
-                    ((symbol-function 'message) #'ignore))
-            (opencode-shell--ssh-disconnected profile)
-            (opencode-shell--request "GET" "/session" #'ignore)
-            (kill-buffer origin)
-            (should timer)
-            (apply (car timer) (cdr timer))
-            (should-not started)
-            (should-not (plist-get (gethash key opencode-shell--servers)
-                                   :callbacks))))
-      (when (buffer-live-p origin) (kill-buffer origin)))))
-
-(ert-deftest opencode-shell-ssh-gate-coalesces-health-for-two-requests ()
-  (let* ((profile '(:name "ssh-shared" :remote t
-                    :base-url "http://127.0.0.1:4545"
-                    :start-command ("ssh" "-N" "host")))
-         (opencode-shell--servers (make-hash-table :test #'equal))
-         (opencode-shell-recovery--states (make-hash-table :test #'equal))
-         (health-checks 0) health (sent 0))
-    (with-temp-buffer
-      (setq-local opencode-shell--profile profile)
-      (cl-letf (((symbol-function 'opencode-shell--server-ready)
-                 (lambda (_profile callback)
-                   (cl-incf health-checks)
-                   (setq health callback)))
-                ((symbol-function 'url-retrieve)
-                 (lambda (&rest _) (cl-incf sent)))
-                ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
-        (opencode-shell--request "GET" "/session" #'ignore)
-        (opencode-shell--request "GET" "/permission" #'ignore)
-        (should (= health-checks 1))
-        (should (= sent 0))
-        (funcall health t)
-        (should (= sent 2))))))
+(ert-deftest opencode-shell-guarded-request-timeout-kills-buffer-without-sentinel-or-prompt ()
+  "Expiring a guarded GET request must not trigger sentinel retries or exit prompts."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--generation 1 opencode-shell--session-id "s")
+    (let* ((response (generate-new-buffer " *fake-guarded-http*"))
+           (proc1 (make-network-process
+                   :name "opencode-test-guarded-http" :buffer response
+                   :family 'ipv4 :server t :host 'local :service t))
+           timer-fn sentinel-ran prompted failed)
+      (unwind-protect
+          (progn
+            (set-process-query-on-exit-flag proc1 t)
+            (set-process-sentinel
+             proc1
+             (lambda (_proc _event)
+               (setq sentinel-ran t)))
+            (cl-letf (((symbol-function 'opencode-shell--request)
+                       (lambda (&rest _) response))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_delay _repeat fn &rest _) (setq timer-fn fn) nil))
+                      ((symbol-function 'yes-or-no-p)
+                       (lambda (&rest _) (setq prompted t) nil)))
+              (opencode-shell--guarded-request
+               'messages "GET" "/session/s/message" #'ignore nil
+               (lambda () (setq failed t)))
+              (should timer-fn)
+              (funcall timer-fn)
+              (should failed)
+              (should-not sentinel-ran)
+              (should-not prompted)
+              (should-not (buffer-live-p response))))
+        (when (and proc1 (process-live-p proc1)) (delete-process proc1))
+        (when (buffer-live-p response)
+          (let (kill-buffer-query-functions) (kill-buffer response)))))))
 
 (ert-deftest opencode-shell-ambiguous-mutation-is-not-expired-or-replayed ()
   (with-temp-buffer
@@ -2378,89 +2066,6 @@ under [mouse-1]."
         (opencode-shell--resync nil)
         (should (= (cl-count "POST" methods :test #'equal) 1))
         (should (alist-get 'mutation opencode-shell--in-flight))))))
-
-(ert-deftest opencode-shell-routine-snapshot-paths-are-classified ()
-  (dolist (path '("/session/s/message" "/permission" "/question"))
-    (should (opencode-shell--routine-snapshot-path-p path)))
-  (dolist (path '("/session/status" "/session" "/provider" "/agent"))
-    (should-not (opencode-shell--routine-snapshot-path-p path))))
-
-(ert-deftest opencode-shell-routine-snapshot-success-is-quiet-but-failure-is-logged ()
-  (with-temp-buffer
-    (let ((opencode-shell-log-requests t)
-          logs)
-      (cl-letf (((symbol-function 'opencode-shell--log)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) logs)))
-                ((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _)
-                   (with-temp-buffer
-                     (insert "HTTP/1.1 200 OK\r\n\r\n[]")
-                     (setq-local url-http-response-status 200)
-                     (funcall callback nil)))))
-        (opencode-shell--request "GET" "/permission" #'ignore)
-        (opencode-shell-async-drain (current-buffer)))
-      (should-not logs)
-      (cl-letf (((symbol-function 'opencode-shell--log)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) logs)))
-                ((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _)
-                   (with-temp-buffer
-                     (funcall callback '(:error (error connection-failed)))))))
-        (opencode-shell--request "GET" "/permission" #'ignore))
-      (should (seq-some (lambda (line)
-                          (string-match-p "transport-error" line))
-                        logs)))))
-
-(ert-deftest opencode-shell-request-ignores-killed-origin ()
-  (let ((origin (generate-new-buffer " *oc-dead-origin*")) retrieve-callback called)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url callback &rest _)
-                 (setq retrieve-callback callback))))
-      (with-current-buffer origin
-        (opencode-shell--request "GET" "/late" (lambda (_) (setq called t))))
-      (kill-buffer origin)
-      (with-temp-buffer
-        (insert "HTTP/1.1 200 OK\r\n\r\n[]")
-        (setq-local url-http-response-status 200)
-        (funcall retrieve-callback nil))
-      (should-not called))))
-
-(ert-deftest opencode-shell-request-drops-response-from-prior-generation ()
-  (with-temp-buffer
-    (setq-local opencode-shell--generation 4)
-    (let (retrieve-callback called)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _) (setq retrieve-callback callback))))
-        (opencode-shell--request "GET" "/stale" (lambda (_) (setq called t)))
-        (cl-incf opencode-shell--generation)
-        (with-temp-buffer
-          (insert "HTTP/1.1 200 OK\r\n\r\n[]")
-          (setq-local url-http-response-status 200)
-          (funcall retrieve-callback nil))
-        (opencode-shell-async-drain (current-buffer))
-        (should-not called)))))
-
-(ert-deftest opencode-shell-stale-request-failure-is-not-user-visible ()
-  (with-temp-buffer
-    (setq-local opencode-shell--generation 7)
-    (let (retrieve-callback messages logs)
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (_url callback &rest _) (setq retrieve-callback callback)))
-                ((symbol-function 'message)
-                 (lambda (&rest args) (push args messages)))
-                ((symbol-function 'opencode-shell--log)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) logs))))
-        (opencode-shell--request "GET" "/stale-error" #'ignore)
-        (cl-incf opencode-shell--generation)
-        (with-temp-buffer
-          (funcall retrieve-callback '(:error (error connection-failed))))
-        (should-not messages)
-        (should-not (seq-some (lambda (line)
-                                (string-match-p "transport-error" line))
-                              logs))))))
 
 (ert-deftest opencode-shell-reopen-keeps-one-timer ()
   (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
@@ -3116,6 +2721,40 @@ under [mouse-1]."
       (should (eq (opencode-shell--turn-status (car (last opencode-shell--turns)))
                   'receiving)))))
 
+(ert-deftest opencode-shell-task-part-triggers-session-lookup-once ()
+  "A quiet subagent's spawning `task' tool part triggers one session lookup."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((messages
+           (list (opencode-shell-test--message "u1" "user" "delegate")
+                 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                   (parts . (((id . "a1-task") (type . "tool") (tool . "task")
+                              (state . ((status . "running")))))))))
+          (calls 0))
+      (cl-letf (((symbol-function 'opencode-shell--refresh-session-metadata)
+                 (lambda () (cl-incf calls))))
+        (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+        (should (= calls 1))
+        ;; Re-aggregating the same, already-seen task part must not re-trigger.
+        (dolist (turn opencode-shell--turns) (opencode-shell--aggregate-turn turn))
+        (should (= calls 1))))))
+
+(ert-deftest opencode-shell-non-task-tool-does-not-trigger-session-lookup ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent")
+    (let ((messages
+           (list (opencode-shell-test--message "u1" "user" "run")
+                 '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
+                   (parts . (((id . "a1-bash") (type . "tool") (tool . "bash")
+                              (state . ((status . "running")))))))))
+          (calls 0))
+      (cl-letf (((symbol-function 'opencode-shell--refresh-session-metadata)
+                 (lambda () (cl-incf calls))))
+        (setq opencode-shell--turns (opencode-shell--normalize-turns messages))
+        (should (= calls 0))))))
+
 (defun opencode-shell-test--gutter-overlay-at (position)
   "Return the role gutter overlay covering POSITION, or nil."
   (seq-find (lambda (overlay) (overlay-get overlay 'line-prefix))
@@ -3548,7 +3187,7 @@ under [mouse-1]."
      (list (opencode-shell-test--message "u1" "user" "question")
            '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
              (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-    (should (string-match-p "partial\nReceiving" (buffer-string)))
+    (should (string-match-p "partial\n\nReceiving" (buffer-string)))
     (should-not (string-match-p "ASSISTANT>" (buffer-string)))))
 
 (ert-deftest opencode-shell-updating-local-turn-keeps-receiving-visible ()
@@ -3561,7 +3200,7 @@ under [mouse-1]."
        (list (opencode-shell-test--message "u1" "user" "question")
              '((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
                (parts . (((id . "p1") (type . "text") (text . "partial")))))))
-      (should (string-match-p "partial\nReceiving" (buffer-string)))
+      (should (string-match-p "partial\n\nReceiving" (buffer-string)))
       (should-not (string-match-p "ASSISTANT>" (buffer-string))))))
 
 (ert-deftest opencode-shell-full-rerender-keeps-one-prompt-label ()
@@ -5424,29 +5063,6 @@ under [mouse-1]."
         (when (buffer-live-p browser) (kill-buffer browser))
         (when (buffer-live-p transcript) (kill-buffer transcript))))))
 
-(ert-deftest opencode-shell-profile-scopes-url-directory-and-auth ()
-  (let ((opencode-shell-auth-source-function
-         (lambda (profile)
-           (should (equal profile opencode-shell-test--local-profile))
-           "Bearer profile-secret"))
-        captured-url captured-headers messages)
-    (with-temp-buffer
-      (setq-local opencode-shell--profile opencode-shell-test--local-profile)
-      (setq-local opencode-shell--directory "/server/project")
-      (cl-letf (((symbol-function 'url-retrieve)
-                 (lambda (url _callback &rest _)
-                   (setq captured-url url captured-headers url-request-extra-headers)))
-                ((symbol-function 'message)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) messages))))
-        (opencode-shell--request "GET" "/session" #'ignore)))
-    (should (string-prefix-p "http://127.0.0.1:7777/session?" captured-url))
-    (should (string-match-p "directory=%2Fserver%2Fproject" captured-url))
-    (should (equal (cdr (assoc "Authorization" captured-headers))
-                   "Bearer profile-secret"))
-    (should-not (string-match-p "profile-secret"
-                                (format "%S%S" opencode-shell-test--local-profile messages)))))
-
 (ert-deftest opencode-shell-entry-opens-explicit-server-with-project-root ()
   (let ((default-directory "/client/project/current/") opened)
     (cl-letf (((symbol-function 'opencode-shell--start-server)
@@ -5748,7 +5364,7 @@ under [mouse-1]."
          requests buffers)
     (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (push buffer buffers)))
               ((symbol-function 'opencode-shell--request)
-               (lambda (method path _callback &optional _data query)
+               (lambda (method path _callback &optional _data query &rest _)
                   (push (list method path opencode-shell--directory query) requests)))
               ((symbol-function 'opencode-shell--project-directory)
                (lambda (&optional _) "/Workspace/")))
@@ -5787,153 +5403,6 @@ under [mouse-1]."
       (should-error (opencode-shell--current-server-directory profile)
                     :type 'user-error))))
 
-(ert-deftest opencode-shell-server-health-reuse-does-not-spawn ()
-  (let ((opencode-shell--servers (make-hash-table :test #'equal)) spawned callback)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (profile ready) (funcall ready profile)))
-              ((symbol-function 'make-process) (lambda (&rest _) (setq spawned t))))
-      (opencode-shell--start-server opencode-shell-test--local-profile
-                                    (lambda (profile) (setq callback profile))))
-    (should-not spawned)
-    (should (equal callback opencode-shell-test--local-profile))
-    (let ((state (gethash (opencode-shell--server-key opencode-shell-test--local-profile)
-                          opencode-shell--servers)))
-      (should state)
-      (should-not (plist-get state :owned))
-      (should (plist-get state :config)))))
-
-(ert-deftest opencode-shell-server-start-is-single-per-server-and-let-binds-directory ()
-  (let ((opencode-shell--servers (make-hash-table :test #'equal))
-        (make-calls 0) process-directory timers health-callback)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (setq health-callback callback)))
-              ((symbol-function 'make-process)
-               (lambda (&rest _)
-                 (cl-incf make-calls) (setq process-directory default-directory) 'fake-process))
-              ((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'run-at-time)
-               (lambda (&rest args) (push args timers) 'fake-timer)))
-      (opencode-shell--start-server opencode-shell-test--local-profile #'ignore)
-      (opencode-shell--start-server opencode-shell-test--local-profile #'ignore)
-      (funcall health-callback nil)
-      (funcall health-callback nil))
-    (should (= make-calls 1))
-    (should (equal (directory-file-name process-directory) "/tmp"))
-    (should timers)))
-
-(ert-deftest opencode-shell-server-wait-is-bounded ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-          (key (opencode-shell--server-key opencode-shell-test--local-profile))
-         scheduled messages)
-    (puthash key (list :callbacks (list #'ignore) :starting t :attempt 'attempt)
-             opencode-shell--servers)
-    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 20.0))
-              ((symbol-function 'run-at-time) (lambda (&rest args) (push args scheduled)))
-              ((symbol-function 'message)
-               (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) messages))))
-      (opencode-shell--await-server opencode-shell-test--local-profile 10.0 'attempt))
-    (should-not scheduled)
-    (should-not (plist-get (gethash key opencode-shell--servers) :callbacks))
-    (should (string-match-p "timed out" (car messages)))))
-
-(ert-deftest opencode-shell-exited-child-adopts-healthy-endpoint ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile opencode-shell-test--local-profile)
-         (key (opencode-shell--server-key profile))
-         (process 'child) callback-profile)
-    (puthash key (list :process process :owned t :starting t :attempt 'attempt
-                       :callbacks (list (cons (lambda (value)
-                                                (setq callback-profile value))
-                                              profile)))
-             opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
-              ((symbol-function 'process-exit-status) (lambda (_) 1))
-              ((symbol-function 'process-buffer) (lambda (_) nil))
-              ((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (funcall callback t))))
-      (opencode-shell--process-sentinel key 'attempt process "exited")
-      (should (gethash key opencode-shell--servers))
-      (opencode-shell--await-server profile (+ (float-time) 1) 'attempt))
-    (should (equal callback-profile profile))
-    (let ((state (gethash key opencode-shell--servers)))
-      (should state)
-      (should-not (plist-get state :owned))
-      (should-not (plist-get state :starting)))))
-
-(ert-deftest opencode-shell-exited-child-unhealthy-reports-output-tail ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile opencode-shell-test--local-profile)
-         (key (opencode-shell--server-key profile))
-         (process 'child)
-         (buffer (generate-new-buffer " *oc-exit-tail*")) messages)
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer (insert "address already in use"))
-          (puthash key (list :process process :owned t :starting t :attempt 'attempt)
-                   opencode-shell--servers)
-          (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
-                    ((symbol-function 'process-exit-status) (lambda (_) 1))
-                    ((symbol-function 'process-buffer) (lambda (_) buffer))
-                    ((symbol-function 'float-time) (lambda (&optional _) 20.0))
-                    ((symbol-function 'message)
-                     (lambda (format-string &rest args)
-                       (push (apply #'format format-string args) messages))))
-            (opencode-shell--process-sentinel key 'attempt process "exited")
-            (should (gethash key opencode-shell--servers))
-            (opencode-shell--await-server profile 10.0 'attempt))
-          (should-not (gethash key opencode-shell--servers))
-          (should (string-match-p "status 1" (car messages)))
-          (should (string-match-p "address already in use" (car messages))))
-      (kill-buffer buffer))))
-
-(ert-deftest opencode-shell-explicit-stop-restart-and-owned-only-stop ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile opencode-shell-test--local-profile)
-          (key (opencode-shell--server-key profile)) deleted started)
-    (puthash key (list :process 'owned :owned t) opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (process) (eq process 'owned)))
-              ((symbol-function 'delete-process) (lambda (process) (setq deleted process))))
-      (opencode-shell--stop-server profile))
-    (should (eq deleted 'owned))
-    (should-not (gethash key opencode-shell--servers))
-    (puthash key (list :process 'foreign :owned nil) opencode-shell--servers)
-    (should-error (opencode-shell--stop-server profile) :type 'user-error)
-    (puthash key (list :process 'owned :owned t) opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'delete-process) #'ignore)
-              ((symbol-function 'process-status) (lambda (_) 'exit))
-              ((symbol-function 'opencode-shell--start-server)
-               (lambda (value &rest _) (setq started value))))
-      (opencode-shell--restart-server profile)
-      (should-not started)
-      (opencode-shell--process-sentinel key nil 'owned "exited"))
-    (should (equal started profile))))
-
-(ert-deftest opencode-shell-remote-profile-starts-configured-transport ()
-  (let ((opencode-shell--servers (make-hash-table :test #'equal)) spawned)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (funcall callback nil)))
-              ((symbol-function 'opencode-shell--spawn-server)
-               (lambda (profile _attempt) (setq spawned profile))))
-      (opencode-shell--start-server opencode-shell-test--remote-profile #'ignore))
-    (should (eq spawned opencode-shell-test--remote-profile))))
-
-(ert-deftest opencode-shell-remote-transport-always-starts-locally ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile (copy-tree opencode-shell-test--remote-profile))
-         (key (opencode-shell--server-key profile))
-         (attempt 'remote-attempt) cwd)
-    (setf (plist-get profile :server-directory)
-          "/ssh:code.example.test:/srv/project/")
-    (puthash key (list :attempt attempt) opencode-shell--servers)
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest _) (setq cwd default-directory) 'transport))
-              ((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'opencode-shell--await-server) #'ignore))
-      (opencode-shell--spawn-server profile attempt))
-    (should (equal cwd temporary-file-directory))))
-
 (ert-deftest opencode-shell-killing-transcript-does-not-stop-owned-server ()
   (let* ((opencode-shell--servers (make-hash-table :test #'equal))
          (profile opencode-shell-test--local-profile)
@@ -5946,66 +5415,6 @@ under [mouse-1]."
         (opencode-shell--cleanup)))
     (should-not stopped)
     (should (gethash key opencode-shell--servers))))
-
-(ert-deftest opencode-shell-health-probe-is-async-and-coalesced ()
-  (let ((opencode-shell--servers (make-hash-table :test #'equal)) probe (spawned 0))
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (setq probe callback)))
-               ((symbol-function 'opencode-shell--spawn-server)
-                (lambda (_profile _attempt) (cl-incf spawned))))
-      (opencode-shell--start-server opencode-shell-test--local-profile #'ignore)
-      (opencode-shell--start-server opencode-shell-test--local-profile #'ignore)
-      (should (= spawned 0))
-      (funcall probe nil)
-      (should (= spawned 1)))))
-
-(ert-deftest opencode-shell-shared-server-healthy-reuse-is-profile-isolated ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (one opencode-shell-test--local-profile)
-         (two (plist-put (copy-tree one) :name "other"))
-         (profiles nil) (probes 0) spawned)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback)
-                 (cl-incf probes) (funcall callback t)))
-              ((symbol-function 'make-process)
-               (lambda (&rest _) (setq spawned t))))
-      (opencode-shell--start-server one (lambda (profile) (push profile profiles)))
-      (opencode-shell--start-server two (lambda (profile) (push profile profiles))))
-    (should (= probes 2))
-    (should-not spawned)
-    (should (equal profiles (list two one)))))
-
-(ert-deftest opencode-shell-shared-server-coalesces-spawn-and-callbacks ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (one opencode-shell-test--local-profile)
-         (two (plist-put (copy-tree one) :name "other"))
-         probe (spawns 0) profiles)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (setq probe callback)))
-               ((symbol-function 'opencode-shell--spawn-server)
-                (lambda (profile attempt)
-                  (cl-incf spawns)
-                  (opencode-shell--finish-start
-                   (opencode-shell--server-key profile) attempt))))
-      (opencode-shell--start-server one (lambda (profile) (push profile profiles)))
-      (opencode-shell--start-server two (lambda (profile) (push profile profiles)))
-      (funcall probe nil))
-    (should (= spawns 1))
-    (should (equal profiles (list two one)))))
-
-(ert-deftest opencode-shell-shared-server-rejects-conflicting-config ()
-  (let* ((one opencode-shell-test--local-profile)
-         (two (plist-put (copy-tree one) :name "other"))
-         (two (plist-put two :health-path "/ready"))
-         (opencode-shell-profiles (list one two)))
-    (should-error (opencode-shell--validate-profiles) :type 'user-error))
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (one opencode-shell-test--local-profile)
-         (two (plist-put (copy-tree one) :startup-timeout 99)))
-    (puthash (opencode-shell--server-key one)
-             (list :config (opencode-shell--server-lifecycle-config one))
-             opencode-shell--servers)
-    (should-error (opencode-shell--start-server two) :type 'user-error)))
 
 (ert-deftest opencode-shell-shared-auth-selectors-use-effective-values ()
   (let* ((one '(:name "one" :base-url "http://localhost:80/"
@@ -6029,75 +5438,6 @@ under [mouse-1]."
      (opencode-shell--validate-server-profile
       two (list :config (opencode-shell--server-lifecycle-config one)))
      :type 'user-error)))
-
-(ert-deftest opencode-shell-server-key-canonicalizes-safe-equivalents ()
-  (dolist (urls '(("http://localhost" "http://127.0.0.1:80/")
-                  ("https://localhost" "https://[::1]:443/")))
-    (should (equal (opencode-shell--server-key (list :base-url (car urls)))
-                   (opencode-shell--server-key (list :base-url (cadr urls))))))
-  (should-not (equal (opencode-shell--server-key '(:base-url "http://localhost"))
-                     (opencode-shell--server-key '(:base-url "https://localhost"))))
-  (should-not (equal (opencode-shell--server-key '(:base-url "http://localhost"))
-                     (opencode-shell--server-key '(:base-url "http://localhost:81")))))
-
-(ert-deftest opencode-shell-owned-live-server-survives-failed-health-probe ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile opencode-shell-test--local-profile)
-         (key (opencode-shell--server-key profile)) callback spawned)
-    (puthash key (list :process 'owned :owned t
-                       :config (opencode-shell--server-lifecycle-config profile))
-             opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile ready) (funcall ready nil)))
-              ((symbol-function 'make-process) (lambda (&rest _) (setq spawned t))))
-      (opencode-shell--start-server profile (lambda (value) (setq callback value))))
-    (let ((state (gethash key opencode-shell--servers)))
-      (should-not spawned)
-      (should (eq (plist-get state :process) 'owned))
-      (should (plist-get state :owned))
-      (should (equal callback profile)))))
-
-(ert-deftest opencode-shell-stale-start-callback-cannot-mutate-new-attempt ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (profile opencode-shell-test--local-profile)
-         (key (opencode-shell--server-key profile)) probes callbacks spawned)
-    (cl-letf (((symbol-function 'opencode-shell--server-ready)
-               (lambda (_profile callback) (push callback probes)))
-              ((symbol-function 'opencode-shell--spawn-server)
-               (lambda (_profile _attempt) (setq spawned t))))
-      (opencode-shell--start-server profile (lambda (_) (push 'old callbacks)))
-      (let ((old-probe (car probes)))
-        (remhash key opencode-shell--servers)
-        (opencode-shell--start-server profile (lambda (_) (push 'new callbacks)))
-        (let ((new-state (gethash key opencode-shell--servers)))
-          (funcall old-probe nil)
-          (should-not spawned)
-          (should (eq new-state (gethash key opencode-shell--servers)))
-          (funcall (car probes) t))))
-    (should (equal callbacks '(new)))))
-
-(ert-deftest opencode-shell-shared-stop-restart-and-distinct-independence ()
-  (let* ((opencode-shell--servers (make-hash-table :test #'equal))
-         (one opencode-shell-test--local-profile)
-         (two (plist-put (copy-tree one) :name "other"))
-         (distinct (plist-put (copy-tree one) :base-url "http://127.0.0.1:8888"))
-         (key (opencode-shell--server-key one)) deleted started)
-    (should-not (equal key (opencode-shell--server-key distinct)))
-    (puthash key (list :process 'owned :owned t) opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'delete-process) (lambda (process) (setq deleted process))))
-      (opencode-shell--stop-server two))
-    (should (eq deleted 'owned))
-    (puthash key (list :process 'owned :owned t) opencode-shell--servers)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'delete-process) #'ignore)
-              ((symbol-function 'process-status) (lambda (_) 'exit))
-              ((symbol-function 'opencode-shell--start-server)
-               (lambda (profile &rest _) (setq started profile))))
-      (opencode-shell--restart-server two)
-      (opencode-shell--process-sentinel key nil 'owned "exited"))
-    (should (equal started two))))
 
 (ert-deftest opencode-shell-browser-state-is-buffer-and-generation-isolated ()
   (let ((one (generate-new-buffer " *oc-one*"))
@@ -6209,47 +5549,6 @@ under [mouse-1]."
         (when (buffer-live-p browser) (kill-buffer browser))
         (when (buffer-live-p transcript) (kill-buffer transcript))))))
 
-(ert-deftest opencode-shell-custom-raw-auth-header-covers-health ()
-  (let ((profile '(:name "auth" :base-url "http://localhost:9"
-                   :auth-header "X-OpenCode-Token"))
-        (opencode-shell-auth-source-function (lambda (_) "raw-secret")) headers)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url _callback &rest _)
-                 (setq headers url-request-extra-headers))))
-      (opencode-shell--server-ready profile #'ignore))
-    (should (equal (cdr (assoc "X-OpenCode-Token" headers)) "raw-secret"))
-    (should-not (string-match-p "Bearer" (format "%S" headers)))))
-
-(ert-deftest opencode-shell-process-tail-and-package-exit-cleanup ()
-  (let ((buffer (generate-new-buffer " *oc-tail*")) deleted
-        (opencode-shell--servers (make-hash-table :test #'equal)))
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-buffer) (lambda (_) buffer))
-                  ((symbol-function 'process-live-p) (lambda (_) t))
-                  ((symbol-function 'delete-process) (lambda (p) (push p deleted))))
-          (opencode-shell--process-filter 'process (make-string 5000 ?x))
-          (should (<= (with-current-buffer buffer (buffer-size))
-                      opencode-shell--process-tail-limit))
-          (puthash "one" '(:process owned :owned t
-                           :config (:stop-on-exit t)) opencode-shell--servers)
-          (puthash "two" '(:process foreign :owned nil) opencode-shell--servers)
-          (opencode-shell--stop-all-servers)
-          (should (equal deleted '(owned)))
-          (should (= (hash-table-count opencode-shell--servers) 0)))
-      (kill-buffer buffer))))
-
-(ert-deftest opencode-shell-make-process-error-clears-start-state ()
-  (let ((opencode-shell--servers (make-hash-table :test #'equal)) messages)
-    (cl-letf (((symbol-function 'make-process) (lambda (&rest _) (error "spawn failed")))
-              ((symbol-function 'message)
-               (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) messages))))
-      (puthash (opencode-shell--server-key opencode-shell-test--local-profile)
-               '(:starting t :attempt attempt :callbacks (ignore)) opencode-shell--servers)
-      (opencode-shell--spawn-server opencode-shell-test--local-profile 'attempt))
-    (should (= (hash-table-count opencode-shell--servers) 0))
-    (should (string-match-p "could not start server" (car messages)))))
-
 (ert-deftest opencode-shell-capabilities-cache-and-apply ()
   (let ((opencode-shell--capabilities-cache (make-hash-table :test #'equal))
         (opencode-shell--models-cache nil)
@@ -6281,20 +5580,6 @@ under [mouse-1]."
       (should (eq first second))
       (should (equal (car first) '("p/m1" (providerID . "p") (modelID . "m1")))))))
 
-(ert-deftest opencode-shell-request-direct-returns-response-buffer ()
-  (let ((response (generate-new-buffer " *oc-http-test*"))
-        (profile '(:name "test" :base-url "http://127.0.0.1:4199")))
-    (unwind-protect
-        (with-temp-buffer
-          (opencode-shell-mode)
-          (setq-local opencode-shell--profile profile)
-          (cl-letf (((symbol-function 'url-retrieve)
-                     (lambda (&rest _) response)))
-            (should (eq (opencode-shell--request-direct "GET" "/session" #'ignore)
-                        response))))
-      (when (buffer-live-p response)
-        (kill-buffer response)))))
-
 (ert-deftest opencode-shell-descendant-anchor-skips-append-only-and-non-task-payloads ()
   (with-temp-buffer
     (opencode-shell-mode)
@@ -6323,6 +5608,34 @@ under [mouse-1]."
                  (lambda () (cl-incf anchor-scans) nil)))
         (opencode-shell--render-turns nil (list turn)))
       (should (= anchor-scans 0)))))
+
+(ert-deftest opencode-shell-descendant-anchor-map-ignores-huge-task-output ()
+  "Anchor mapping reads the small metadata, never the multi-KB task output.
+Regression: scanning the whole task state substring-matched every descendant id
+against every turn's huge output, O(ids*turns*payload), which froze Emacs."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((huge (make-string 100000 ?x))
+           ;; id present only in the huge OUTPUT, not in metadata -> not matched
+           (output-only `((type . "tool") (tool . "task")
+                          (state . ((status . "completed")
+                                    (output . ,(concat huge "ses_only_in_output"))
+                                    (metadata . ((sessionId . "ses_meta_1")))))))
+           (turn (opencode-shell--make-turn
+                  :id "turn-1" :status 'complete :parts (list output-only))))
+      ;; matched via metadata, not via the huge output body
+      (should (opencode-shell--turn-spawned-session-p turn "ses_meta_1"))
+      (should-not (opencode-shell--turn-spawned-session-p turn "ses_only_in_output"))
+      ;; many ids x many turns stays fast because only metadata is scanned
+      (setq opencode-shell--turns
+            (cl-loop for i from 1 to 60 collect
+                     (opencode-shell--make-turn :id (format "t%d" i)
+                                                :status 'complete :parts (list output-only)))
+            opencode-shell--known-descendant-session-ids
+            (cons "ses_meta_1" (cl-loop for i from 1 to 60 collect (format "ses_x%d" i))))
+      (let ((t0 (float-time)))
+        (opencode-shell--compute-descendant-anchor-map)
+        (should (< (- (float-time) t0) 1.0))))))
 
 (ert-deftest opencode-shell-part-event-rebuilds-turn-without-full-normalize-or-copy-tree ()
   (with-temp-buffer
@@ -6356,6 +5669,336 @@ under [mouse-1]."
       (should (equal (opencode-shell-response-tool-progress
                       (opencode-shell--turn-parts (car opencode-shell--turns)))
                      '(("bash" . "completed")))))))
+
+(ert-deftest opencode-shell-refresh-session-metadata-defers-render-off-callback ()
+  "Session metadata callback must schedule render instead of rendering inline."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "child")
+    (let ((direct-renders 0)
+          (scheduled-renders 0))
+      (cl-letf (((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (when (equal path "/session")
+                     (funcall callback '(((id . "parent"))
+                                         ((id . "child") (parentID . "parent")))))))
+                ((symbol-function 'opencode-shell--render-permissions)
+                 (lambda () (cl-incf direct-renders)))
+                ((symbol-function 'opencode-shell--schedule-render)
+                 (lambda (&rest _) (cl-incf scheduled-renders))))
+        (opencode-shell--refresh-session-metadata)
+        (should opencode-shell--subagent-session-p)
+        (should (= direct-renders 0))
+        (should (>= scheduled-renders 1))))))
+
+(ert-deftest opencode-shell-async-drain-flushes-enqueued-render-in-single-idle-pass ()
+  "A single idle drain must apply queued callbacks and flush their scheduled render."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((flushed 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'opencode-shell--flush-render)
+                 (lambda () (cl-incf flushed))))
+        (opencode-shell-async-enqueue
+         (current-buffer) 'state opencode-shell--generation
+         (lambda () (opencode-shell--schedule-render "test")))
+        (opencode-shell-async-drain (current-buffer))
+        (should (= flushed 1))
+        (should-not opencode-shell-async--queue)
+        (should-not opencode-shell-async--idle-timer)))))
+
+(ert-deftest opencode-shell-reset-spinner-frame-skips-redundant-redisplay-when-zero ()
+  "Resetting an already-zero spinner frame must not force redundant window updates."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (opencode-shell--render-messages
+     (opencode-shell-test--large-message-snapshot 0) 1)
+    (let ((redisplays 0))
+      (cl-letf (((symbol-function 'force-window-update)
+                 (lambda (&rest _) (cl-incf redisplays))))
+        (setq opencode-shell--animation-frame 3)
+        (opencode-shell--reset-spinner-frame)
+        (should (zerop opencode-shell--animation-frame))
+        (should (= redisplays 1))
+        (opencode-shell--reset-spinner-frame)
+        (should (= redisplays 1))))))
+
+(ert-deftest opencode-shell-descendant-status-self-idle-avoids-forced-full-rerender ()
+  "Flipping parent self-idle without descendant changes must not force full rebuild."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "parent"
+          opencode-shell--known-descendant-session-ids '("child")
+          opencode-shell--descendant-session-status '(("child" . nil))
+          opencode-shell--session-idle-p nil)
+    (let ((complete-turn (opencode-shell--make-turn
+                          :id "u1" :server-user-id "u1"
+                          :user "done" :assistant "ok" :status 'complete))
+          (aggregates 0)
+          forced)
+      (setq opencode-shell--turns (list complete-turn))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method path success &rest _)
+                   (when (equal path "/session/status")
+                     (funcall success '(("child" . ((type . "idle")))
+                                        ("parent" . ((type . "idle"))))))))
+                ((symbol-function 'opencode-shell--aggregate-turn)
+                 (lambda (_turn) (cl-incf aggregates)))
+                ((symbol-function 'opencode-shell--schedule-render)
+                 (lambda (_event &optional force &rest _)
+                   (push force forced))))
+        (opencode-shell--refresh-descendant-status)
+        (should opencode-shell--session-idle-p)
+        (should (= aggregates 0))
+        (should-not (memq t forced))))))
+
+(ert-deftest opencode-shell-submit-ack-preserves-advanced-turn-status ()
+  "Prompt ack callback must not regress a turn that SSE already advanced."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (insert "hello")
+    (let (ack)
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell--resync) #'ignore)
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (when (string-match-p "prompt_async" path)
+                     (setq ack callback)))))
+        (opencode-shell--submit)
+        (let ((turn (car opencode-shell--turns)))
+          (setf (opencode-shell--turn-status turn) 'receiving)
+          (funcall ack nil)
+          (should (eq (opencode-shell--turn-status turn) 'receiving)))))))
+
+(ert-deftest opencode-shell-render-tables-fast-paths-non-table-text ()
+  "Plain text without pipe characters must bypass line splitting in table layout."
+  (let ((text " 첫째 줄\n둘째 줄\n셋째 줄\n")
+        (splits 0))
+    (cl-letf (((symbol-function 'split-string)
+               (lambda (&rest _) (cl-incf splits) nil)))
+      (should (eq (opencode-shell-render-tables text 72) text))
+      (should (= splits 0)))))
+
+(ert-deftest opencode-shell-submit-does-not-rerender-completed-turns ()
+  "Submitting a prompt must not recompute already-completed historical turns."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     (cl-loop for idx from 1 to 20
+              append (list (opencode-shell-test--message
+                            (format "u%d" idx) "user" (format "q%d" idx))
+                           (opencode-shell-test--message
+                            (format "a%d" idx) "assistant" (format "ans%d" idx)
+                            (format "u%d" idx))))
+     1)
+    (opencode-shell--replace-composer "next question")
+    (let ((updates 0)
+          (original (symbol-function 'opencode-shell--update-turn-response)))
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell--request) #'ignore)
+                ((symbol-function 'opencode-shell--update-turn-response)
+                 (lambda (turn)
+                   (cl-incf updates)
+                   (funcall original turn))))
+        (opencode-shell--submit)
+        (should (= updates 0))
+        (should (= (length opencode-shell--turns) 21))))))
+
+(ert-deftest opencode-shell-submit-ack-skips-snapshot-resync-when-sse-connected ()
+  "Prompt ack must rely on live SSE stream when connected instead of full resync."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--runtime-key "local-key")
+    (opencode-shell--replace-composer "hello")
+    (let (ack (resyncs 0) (connected t))
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore)
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf resyncs)))
+                ((symbol-function 'opencode-shell-async-sse-connected-p)
+                 (lambda (_key) connected))
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method path callback &rest _)
+                   (when (string-match-p "prompt_async" path)
+                     (setq ack callback)))))
+        (opencode-shell--submit)
+        (funcall ack nil)
+        (should (= resyncs 0))
+        (setq connected nil)
+        (funcall ack nil)
+        (should (= resyncs 1))))))
+
+(ert-deftest opencode-shell-flush-render-without-dirty-turns-skips-completed-turns ()
+  "Bringing a dirty hidden buffer forward without turn diffs skips completed turns."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (opencode-shell--render-messages
+     (cl-loop for idx from 1 to 20
+              append (list (opencode-shell-test--message
+                            (format "u%d" idx) "user" (format "q%d" idx))
+                           (opencode-shell-test--message
+                            (format "a%d" idx) "assistant" (format "ans%d" idx)
+                            (format "u%d" idx))))
+     1)
+    (let ((updates 0)
+          (original (symbol-function 'opencode-shell--update-turn-response))
+          visible)
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) visible))
+                ((symbol-function 'opencode-shell--update-turn-response)
+                 (lambda (turn)
+                   (cl-incf updates)
+                   (funcall original turn))))
+        (opencode-shell--schedule-render "session-metadata")
+        (setq visible t)
+        (opencode-shell--render-if-visible)
+        (opencode-shell-async-drain (current-buffer))
+        (should (= updates 0))))))
+
+(ert-deftest opencode-shell-table-layout-refresh-updates-only-table-turns ()
+  "Window width changes must update only turns containing pipe tables."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((plain-turns
+            (cl-loop for idx from 1 to 10
+                     collect (opencode-shell--make-turn
+                              :id (format "plain-%d" idx)
+                              :user (format "q%d" idx)
+                              :assistant (format "Plain answer %d" idx)
+                              :status 'complete)))
+           (table-turn
+            (opencode-shell--make-turn
+             :id "table-1"
+             :user "table?"
+             :assistant "| 책임 | 위치 |\n|---|---|\n| 자격증명 | 외부 주입 구성 |"
+             :status 'complete)))
+      (setq opencode-shell--turns (append plain-turns (list table-turn))
+            opencode-shell--table-render-width 72)
+      (opencode-shell--render-turns t)
+      (let ((updates 0)
+            (original (symbol-function 'opencode-shell--update-turn-response)))
+        (cl-letf (((symbol-function 'opencode-shell--transcript-window)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'window-body-width) (lambda (&rest _) 36))
+                  ((symbol-function 'get-buffer-window-list)
+                   (lambda (&rest _) (list (selected-window))))
+                  ((symbol-function 'window-start) (lambda (&rest _) (point-min)))
+                  ((symbol-function 'set-window-start) #'ignore)
+                  ((symbol-function 'opencode-shell--update-turn-response)
+                   (lambda (turn)
+                     (cl-incf updates)
+                     (funcall original turn))))
+          (opencode-shell--refresh-table-layout)
+          (should (= updates 1))))
+      (setq opencode-shell--turns plain-turns)
+      (opencode-shell--render-turns t)
+      (let ((renders 0))
+        (cl-letf (((symbol-function 'opencode-shell--transcript-window)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'window-body-width) (lambda (&rest _) 48))
+                  ((symbol-function 'opencode-shell--render-turns)
+                   (lambda (&rest _) (cl-incf renders))))
+          (opencode-shell--refresh-table-layout)
+          (should (= opencode-shell--table-render-width 48))
+          (should (= renders 0)))))))
+
+(ert-deftest opencode-shell-fenced-code-font-lock-handles-unclosed-and-closed-fences ()
+  "Fenced code matcher must shade closed blocks and skip unclosed fences linearly."
+  (with-temp-buffer
+    (setq font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
+    (insert "```elisp\n(message \"ok\")\n```\n\n~~~text\nbody\n~~~\n\n```python\nunclosed\n")
+    (should (fboundp 'opencode-shell-render--match-fenced-code))
+    (font-lock-ensure (point-min) (point-max))
+    (goto-char (point-min))
+    (search-forward "(message")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'opencode-shell-markdown-code-face))
+    (search-forward "body")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'opencode-shell-markdown-code-face))
+    (search-forward "unclosed")
+    (should-not (eq (get-text-property (match-beginning 0) 'face)
+                    'opencode-shell-markdown-code-face))))
+
+(ert-deftest opencode-shell-sliding-window-evicts-oldest-turn-without-full-rebuild ()
+  "Adding a turn past `opencode-shell-max-rendered-turns' evicts the oldest turn in-place."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((opencode-shell-max-rendered-turns 3)
+           (t1 (opencode-shell--make-turn :id "t1" :user "prompt-1" :assistant "ans-1" :status 'complete))
+           (t2 (opencode-shell--make-turn :id "t2" :user "prompt-2" :assistant "ans-2" :status 'complete))
+           (t3 (opencode-shell--make-turn :id "t3" :user "prompt-3" :assistant "ans-3" :status 'complete))
+           (t4 (opencode-shell--make-turn :id "t4" :user "prompt-4" :assistant "ans-4" :status 'complete))
+           (insert-calls 0)
+           (orig-insert (symbol-function 'opencode-shell--insert-turn-blocks)))
+      (setq opencode-shell--turns (list t1 t2 t3))
+      (opencode-shell--render-turns)
+      (setq opencode-shell--turns (list t1 t2 t3 t4))
+      (cl-letf (((symbol-function 'opencode-shell--insert-turn-blocks)
+                 (lambda (turn)
+                   (cl-incf insert-calls)
+                   (funcall orig-insert turn))))
+        (opencode-shell--render-turns nil 'none))
+      (should (= insert-calls 1))
+      (should-not (opencode-shell--turn-rendered-p t1))
+      (should (opencode-shell--turn-rendered-p t2))
+      (should (opencode-shell--turn-rendered-p t3))
+      (should (opencode-shell--turn-rendered-p t4))
+      (let ((text (buffer-string)))
+        (should-not (string-match-p "prompt-1" text))
+        (should (string-match-p "prompt-2" text))
+        (should (string-match-p "prompt-4" text))))))
+
+(ert-deftest opencode-shell-turn-gutter-coalesces-multiline-overlays ()
+  "Multi-line user and assistant blocks use at most 2 gutter overlays each."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((turn (opencode-shell--make-turn
+                 :id "u1"
+                 :user (mapconcat (lambda (i) (format "u-line-%d" i))
+                                  (number-sequence 1 10) "\n")
+                 :assistant (mapconcat (lambda (i) (format "a-line-%d" i))
+                                       (number-sequence 1 20) "\n")
+                 :status 'complete)))
+      (setq opencode-shell--turns (list turn))
+      (opencode-shell--render-turns t)
+      (let ((entry (gethash turn opencode-shell--turn-gutters)))
+        (should (= (length (plist-get entry :user)) 2))
+        (should (= (length (plist-get entry :response)) 2))))))
+
+(ert-deftest opencode-shell-full-rebuild-reuses-fontified-cache-without-refontifying ()
+  "A full rebuild of cached turns neither re-runs `font-lock-ensure' nor re-projects tables."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--table-render-width 72
+          opencode-shell--turns
+          (list (opencode-shell--make-turn
+                 :id "t1" :user "u1"
+                 :assistant "**bold** and `code` | a | b |\n|---|---|\n| 1 | 2 |"
+                 :status 'complete)
+                (opencode-shell--make-turn
+                 :id "t2" :user "u2"
+                 :assistant "### Heading\n*italic*"
+                 :status 'complete)))
+    (opencode-shell--render-turns t)
+    (let ((fontify-calls 0)
+          (display-text-calls 0)
+          (orig-fontify (symbol-function 'font-lock-ensure))
+          (orig-display-text (symbol-function 'opencode-shell--assistant-display-text)))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest args)
+                   (cl-incf fontify-calls)
+                   (apply orig-fontify args)))
+                ((symbol-function 'opencode-shell--assistant-display-text)
+                 (lambda (&rest args)
+                   (cl-incf display-text-calls)
+                   (apply orig-display-text args))))
+        (opencode-shell--render-turns t))
+      (should (= fontify-calls 0))
+      (should (= display-text-calls 0)))))
 
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

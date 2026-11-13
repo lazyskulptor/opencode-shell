@@ -16,6 +16,8 @@
 (require 'opencode-shell-sse)
 (require 'opencode-shell-event)
 
+(defvar opencode-shell--generation)
+
 (defvar opencode-shell-async--runtimes (make-hash-table :test #'equal)
   "Shared runtime state keyed by server identity.")
 
@@ -60,28 +62,39 @@
 
 (defun opencode-shell-async--deliver-runtime (runtime _reason &optional event)
   "Deliver a wake or decoded EVENT to matching RUNTIME subscribers."
-  (maphash
-   (lambda (buffer subscription)
-     (if (not (buffer-live-p buffer))
-         (remhash buffer (plist-get runtime :subscribers))
-       (let ((event-session (and event (plist-get event :session-id)))
-             (subscriber-session (and (listp subscription)
-                                      (plist-get subscription :session-id))))
-         (when (or (null event-session)
-                   (null subscriber-session)
-                   (equal event-session subscriber-session))
-           (with-current-buffer buffer
-             (let ((event-callback (and event (listp subscription)
-                                        (plist-get subscription :event-callback)))
-                   (callback (opencode-shell-async--subscription-callback subscription)))
-               (if event-callback
+  (unless (and event (eq (plist-get event :resource) 'none))
+    (maphash
+     (lambda (buffer subscription)
+       (if (not (buffer-live-p buffer))
+           (remhash buffer (plist-get runtime :subscribers))
+         (let ((event-session (and event (plist-get event :session-id)))
+               (subscriber-session (and (listp subscription)
+                                        (plist-get subscription :session-id))))
+           (when (or (null event-session)
+                     (null subscriber-session)
+                     (equal event-session subscriber-session))
+             (with-current-buffer buffer
+               (let ((event-callback (and event (listp subscription)
+                                          (plist-get subscription :event-callback)))
+                     (callback (opencode-shell-async--subscription-callback subscription)))
+                 (if event-callback
+                     (let* ((key (cons 'runtime-event
+                                       (opencode-shell-event-identity event)))
+                            (existing (assoc key opencode-shell-async--queue))
+                            (previous (and existing
+                                           (or (null (nth 1 existing))
+                                               (and (boundp 'opencode-shell--generation)
+                                                    (= (nth 1 existing)
+                                                       opencode-shell--generation)))
+                                           (nth 3 existing)))
+                            (merged (if previous
+                                        (opencode-shell-event-coalesce previous event)
+                                      event)))
+                       (opencode-shell-async-enqueue
+                        buffer key opencode-shell--generation event-callback merged))
                    (opencode-shell-async-enqueue
-                    buffer (cons 'runtime-event
-                                 (opencode-shell-event-identity event))
-                    opencode-shell--generation event-callback event)
-                 (opencode-shell-async-enqueue
-                  buffer 'runtime-wake opencode-shell--generation callback))))))))
-   (plist-get runtime :subscribers)))
+                    buffer 'runtime-wake opencode-shell--generation callback))))))))
+     (plist-get runtime :subscribers))))
 
 (defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)
   "Emit a privacy-safe runtime message for RUNTIME."
@@ -109,25 +122,36 @@
 (defun opencode-shell-async-pause-runtime (key)
   "Suspend KEY's HTTP poll timer without dropping its subscribers."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (when (timerp (plist-get runtime :poll-timer))
-      (cancel-timer (plist-get runtime :poll-timer)))
+    (dolist (timer (list (plist-get runtime :poll-timer)
+                         (plist-get runtime :reconnect-timer)))
+      (when (timerp timer)
+        (cancel-timer timer)))
+    (when-let ((connection (plist-get runtime :connection)))
+      (opencode-shell-sse-stop connection))
     (setf (plist-get runtime :poll-timer) nil
+          (plist-get runtime :reconnect-timer) nil
+          (plist-get runtime :connection) nil
+          (plist-get runtime :attempt) nil
           (plist-get runtime :paused) t)))
 
 (defun opencode-shell-async-resume-runtime (key)
   "Resume KEY's existing polling cadence after transport recovery."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (setf (plist-get runtime :paused) nil)
-    (when (and (> (hash-table-count (plist-get runtime :subscribers)) 0)
-               (not (timerp (plist-get runtime :poll-timer))))
-      (let ((interval (plist-get runtime :poll-interval)))
-        (setf (plist-get runtime :poll-timer)
-              (run-at-time interval interval #'opencode-shell-async--poll-runtime key))))))
+    (when (plist-get runtime :paused)
+      (setf (plist-get runtime :paused) nil)
+      (when (and (> (hash-table-count (plist-get runtime :subscribers)) 0)
+                 (not (timerp (plist-get runtime :poll-timer))))
+        (let ((interval (plist-get runtime :poll-interval)))
+          (setf (plist-get runtime :poll-timer)
+                (run-at-time interval interval #'opencode-shell-async--poll-runtime key))))
+      (when (plist-get runtime :sse-enabled)
+        (opencode-shell-async--connect key)))))
 
 (defun opencode-shell-async--schedule-reconnect (key)
   "Schedule a bounded asynchronous reconnect for runtime KEY."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
-    (unless (or (zerop (hash-table-count (plist-get runtime :subscribers)))
+    (unless (or (plist-get runtime :paused)
+                (zerop (hash-table-count (plist-get runtime :subscribers)))
                 (timerp (plist-get runtime :reconnect-timer)))
       (let ((delay (min 30 (or (plist-get runtime :backoff) 1))))
         (opencode-shell-async--runtime-log runtime "transport=fallback reconnect=%ss" delay)
@@ -140,7 +164,8 @@
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
-            (plist-get runtime :failures) 0)
+            (plist-get runtime :failures) 0
+            (plist-get runtime :ticks) 0)
       (let ((application-event (opencode-shell-event-decode event)))
         (opencode-shell-async--runtime-log
          runtime "transport=sse wake=event type=%s scope=%s"
@@ -250,6 +275,12 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
       (setf (plist-get runtime :connection) nil))
     runtime))
 
+(defun opencode-shell-async-sse-connected-p (key)
+  "Return non-nil when runtime KEY has a live streaming SSE connection."
+  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+    (and (not (plist-get runtime :paused))
+         (opencode-shell-sse-connected-p (plist-get runtime :connection)))))
+
 (defun opencode-shell-async-unsubscribe-runtime (key buffer)
   "Unsubscribe BUFFER and stop KEY runtime when it has no subscribers."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
@@ -283,7 +314,21 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
             (when (or (null generation)
                       (and (boundp 'opencode-shell--generation)
                            (= generation opencode-shell--generation)))
-              (apply function arguments))))))))
+              (apply function arguments)))))
+      (when-let ((render (assoc 'render opencode-shell-async--queue)))
+        (setq opencode-shell-async--queue
+              (assoc-delete-all 'render opencode-shell-async--queue))
+        (unless opencode-shell-async--queue
+          (when (timerp opencode-shell-async--idle-timer)
+            (cancel-timer opencode-shell-async--idle-timer))
+          (setq opencode-shell-async--idle-timer nil))
+        (let ((generation (nth 1 render))
+              (function (nth 2 render))
+              (arguments (nthcdr 3 render)))
+          (when (or (null generation)
+                    (and (boundp 'opencode-shell--generation)
+                         (= generation opencode-shell--generation)))
+            (apply function arguments)))))))
 
 (defun opencode-shell-async-enqueue (buffer key generation function &rest arguments)
   "Enqueue FUNCTION with ARGUMENTS for BUFFER under KEY.

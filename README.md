@@ -121,7 +121,8 @@ inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybinding
 | `C-c C-v` | `opencode-shell--select-model` | Select model for the active agent (persisted per agent) |
 | `C-c C-m` / `C-<tab>` | `opencode-shell--select-agent` / `next-agent` | Select or cycle visible primary agents |
 | `C-c C-a` / normal `a` | `opencode-shell--abort` | Abort the active assistant response |
-| `C-c C-r` / normal `g` / `g r` | `opencode-shell--resync` | Resync authoritative session snapshot (and retry SSH recovery if offline) |
+| `C-c C-r` / normal `g` / `g r` | `opencode-shell--resync` | Resync authoritative session snapshot; session data only, never touches the transport |
+| `C-c C-k` / normal `g R` | `opencode-shell-restart` | Force-reconnect: kill and respawn the server/SSH tunnel itself, not just the data |
 | `C-c ?` / normal `?` | `opencode-shell-help` | Open transcript Transient menu |
 | Header mouse-1 | `opencode-shell-copy-session-id` | Click `session:<id>` in the header line to copy the session ID |
 
@@ -149,7 +150,6 @@ the card are also mouse-clickable.
 | `M-x opencode-shell-rename-session` | Ask OpenCode's hidden `title` agent to summarize and retitle the session, then clean up the temporary exchange |
 | `M-x opencode-shell-move-session-directory` | Rebind the current buffer's project directory scope client-side without losing history or state |
 | `M-x opencode-shell-status` | Show server health and owned process lifecycle status |
-| `M-x opencode-shell-restart` | Restart the managed local process or SSH transport for a profile |
 | `M-x opencode-shell-log` | Open the privacy-safe diagnostic log buffer (`*OpenCode Shell Log*` or session log) |
 
 ---
