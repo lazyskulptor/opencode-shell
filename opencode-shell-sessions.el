@@ -75,5 +75,77 @@ Each retained session keeps its server-reported directory unchanged."
    " " (opencode-shell--model-name (opencode-shell-sessions--get session 'model)
                                     (opencode-shell-sessions--get session 'providerID))))
 
+(defun opencode-shell--child-session-p (session)
+  "Return non-nil when SESSION belongs to a parent session."
+  (let ((parent (or (opencode-shell-sessions--get session 'parentID)
+                    (opencode-shell-sessions--get session 'parentId))))
+    (and parent (not (equal parent "")))))
+
+(defvar opencode-shell-sessions-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'opencode-shell--refresh)
+    (define-key map (kbd "RET") #'opencode-shell--open-at-point)
+    (define-key map (kbd "c") #'opencode-shell--create-session)
+    (define-key map (kbd "/") #'opencode-shell--filter)
+    (define-key map (kbd "T") #'opencode-shell--toggle-child-sessions)
+    (define-key map (kbd "d") #'opencode-shell--delete-session)
+    (define-key map (kbd "?") #'opencode-shell-sessions-help)
+    map))
+
+(defun opencode-shell-sessions-help ()
+  "Display the session browser transient menu."
+  (interactive)
+  (require 'transient)
+  (transient-setup 'opencode-shell-sessions-menu))
+
+(declare-function transient-setup "transient")
+(defvar opencode-shell-sessions-menu nil)
+
+(require 'transient)
+(transient-define-prefix opencode-shell-sessions-menu ()
+    "OpenCode session actions."
+    [["Session"
+      ("RET" "Open" opencode-shell--open-at-point)
+      ("c" "Create here" opencode-shell--create-session)
+      ("d" "Delete" opencode-shell--delete-session)]
+     ["List"
+      ("g" "Refresh" opencode-shell--refresh)
+      ("/" "Filter" opencode-shell--filter)
+      ("T" "Toggle child sessions" opencode-shell--toggle-child-sessions)]
+     ["Global"
+      ("s" "Start (select profile)" opencode-shell-start)
+       ("l" "Sessions (select profile)" opencode-shell)
+       ("b" "Shell buffers" opencode-shell-switch-buffer)
+       ("f" "Find saved session" opencode-shell-find-session)
+       ("F" "Find session (server)" opencode-shell-find-session-with-server)]])
+
+(define-derived-mode opencode-shell-sessions-mode tabulated-list-mode "OpenCode Sessions"
+  "Browse canonical OpenCode sessions."
+  (setq tabulated-list-format
+        [("Title" 28 t) ("ID" 10 t) ("Agent" 12 t)
+         ("Model" 18 t) ("Status" 10 t) ("Updated" 16 t)])
+  (setq-local header-line-format nil)
+  (setq tabulated-list-padding 2 tabulated-list-sort-key '("Updated" . t))
+  (add-hook 'tabulated-list-revert-hook #'opencode-shell--refresh nil t)
+  (add-hook 'window-configuration-change-hook
+            #'opencode-shell--render-session-browser-if-visible nil t)
+  (add-hook 'kill-buffer-hook #'opencode-shell-async-cancel nil t)
+  (tabulated-list-init-header))
+
+(defun opencode-shell--setup-sessions-evil-buffer ()
+  "Install session browser bindings in the current Evil buffer."
+  (when (fboundp 'evil-local-set-key)
+    (evil-local-set-key 'normal (kbd "g") nil)
+    (dolist (binding `((,(kbd "RET") . opencode-shell--open-at-point)
+                       (,(kbd "g r") . opencode-shell--refresh)
+                       (,(kbd "c") . opencode-shell--create-session)
+                       (,(kbd "/") . opencode-shell--filter)
+                       (,(kbd "T") . opencode-shell--toggle-child-sessions)
+                       (,(kbd "d") . opencode-shell--delete-session)
+                       (,(kbd "?") . opencode-shell-sessions-help)))
+      (evil-local-set-key 'normal (car binding) (cdr binding)))))
+
+(add-hook 'opencode-shell-sessions-mode-hook
+          #'opencode-shell--setup-sessions-evil-buffer)
 (provide 'opencode-shell-sessions)
 ;;; opencode-shell-sessions.el ends here
