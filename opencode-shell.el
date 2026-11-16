@@ -480,6 +480,13 @@ Move the associated API log buffer so its name stays in sync."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
+(defcustom opencode-shell-fallback-resync-interval 15
+  "Seconds between full-history resyncs while SSE is down.
+Fallback polling still reconciles cheap resources every tick, but re-fetching a
+large message history that often would freeze the UI; this throttles the full
+resync so a dropped stream stays usable on big sessions."
+  :type 'number :group 'opencode-shell)
+
 (defcustom opencode-shell-animation-interval 0.2
   "Seconds between UI-only request-status animation frames."
   :type 'number :group 'opencode-shell)
@@ -556,6 +563,8 @@ once the owning `/session' snapshot is known; nil (permit editing) until then.")
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--runtime-key nil)
 (defvar-local opencode-shell--connection-stale nil)
+(defvar-local opencode-shell--last-fallback-full-sync nil
+  "Time of the last throttled full resync during SSE-down fallback polling.")
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--composer-overlay nil)
@@ -1974,6 +1983,12 @@ large transcript snapshot every tick is the dominant freeze on big sessions."
   (opencode-shell--refresh-questions)
   (opencode-shell--refresh-descendant-status))
 
+(defun opencode-shell--fallback-full-sync-due-p ()
+  "Return non-nil when a throttled full-history fallback resync is due."
+  (or (null opencode-shell--last-fallback-full-sync)
+      (>= (- (float-time) opencode-shell--last-fallback-full-sync)
+          opencode-shell-fallback-resync-interval)))
+
 (defun opencode-shell--start-polling ()
   "Start periodic network polling and UI animation if needed."
   (unless opencode-shell--runtime-key
@@ -1995,10 +2010,15 @@ large transcript snapshot every tick is the dominant freeze on big sessions."
                 (opencode-shell--profile-sse-eligible-p profile)
                 opencode-shell-poll-interval
                 (lambda ()
-                  (if (and (opencode-shell-async-sse-connected-p key)
-                           (opencode-shell--initial-hydration-complete-p))
-                      (opencode-shell--reconcile-cheap)
-                    (opencode-shell--resync nil)))
+                  (cond
+                   ((not (opencode-shell--initial-hydration-complete-p))
+                    (opencode-shell--resync nil))
+                   ((opencode-shell-async-sse-connected-p key)
+                    (opencode-shell--reconcile-cheap))
+                   ((opencode-shell--fallback-full-sync-due-p)
+                    (setq opencode-shell--last-fallback-full-sync (float-time))
+                    (opencode-shell--resync nil))
+                   (t (opencode-shell--reconcile-cheap))))
                 (lambda (event)
                   (when opencode-shell-log-requests
                     (opencode-shell--log "OpenCode async %s" event)))

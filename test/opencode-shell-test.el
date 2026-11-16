@@ -5880,6 +5880,36 @@ message re-fetch while SSE is connected; it re-fetches when disconnected."
         (opencode-shell--schedule-event-reconciliation 'messages)
         (should (= full-resyncs 1))))))
 
+(ert-deftest opencode-shell-fallback-poll-throttles-full-resync ()
+  "While SSE is down, cheap resources reconcile each tick but the full message
+history is re-fetched at most every fallback-resync-interval."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "s"
+                opencode-shell--profile '(:name "t" :base-url "http://127.0.0.1:4099")
+                opencode-shell-fallback-resync-interval 15)
+    (let ((connected nil) (full-resyncs 0) (cheap 0) captured-cb)
+      (cl-letf (((symbol-function 'opencode-shell-async-subscribe-runtime)
+                 (lambda (_k _b _u _h _sse _pi callback &rest _)
+                   (setq captured-cb callback) nil))
+                ((symbol-function 'opencode-shell-async-subscribe-animation) #'ignore)
+                ((symbol-function 'opencode-shell-recovery-offline-p) #'ignore)
+                ((symbol-function 'opencode-shell--log-lifecycle) #'ignore)
+                ((symbol-function 'opencode-shell-async-sse-connected-p)
+                 (lambda (_k) connected))
+                ((symbol-function 'opencode-shell--initial-hydration-complete-p)
+                 (lambda () t))
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf full-resyncs)))
+                ((symbol-function 'opencode-shell--reconcile-cheap)
+                 (lambda () (cl-incf cheap))))
+        (opencode-shell--start-polling)
+        (funcall captured-cb)
+        (should (= full-resyncs 1))
+        (funcall captured-cb)
+        (should (= cheap 1))
+        (should (= full-resyncs 1))))))
+
 (ert-deftest opencode-shell-flush-render-without-dirty-turns-skips-completed-turns ()
   "Bringing a dirty hidden buffer forward without turn diffs skips completed turns."
   (with-temp-buffer
