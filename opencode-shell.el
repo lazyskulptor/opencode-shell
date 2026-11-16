@@ -3844,7 +3844,7 @@ coalesces repeated changes into a single off-hook render."
                 (lambda (turn)
                   (when-let ((raw (opencode-shell--turn-assistant turn)))
                     (string-match-p "|" raw)))
-                opencode-shell--turns)))
+                opencode-shell--rendered-turns)))
           (setq opencode-shell--table-render-width width)
           (cond
            (opencode-shell--render-dirty

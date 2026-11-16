@@ -5955,6 +5955,34 @@ message re-fetch while SSE is connected; it re-fetches when disconnected."
           (should (= opencode-shell--table-render-width 48))
           (should (= renders 0)))))))
 
+(ert-deftest opencode-shell-refresh-table-layout-scans-rendered-window-only ()
+  "Width changes must scan only the rendered window, not every tracked turn."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((opencode-shell-max-rendered-turns 3)
+           (turns (cl-loop for idx from 1 to 10
+                           collect (opencode-shell--make-turn
+                                    :id (format "t%d" idx)
+                                    :user (format "q%d" idx)
+                                    :assistant "| a | b |\n|---|---|\n| 1 | 2 |"
+                                    :status 'complete))))
+      (setq opencode-shell--turns turns
+            opencode-shell--table-render-width 72)
+      (opencode-shell--render-turns t)
+      (should (= (length opencode-shell--rendered-turns) 3))
+      (let ((scanned nil)
+            (original (symbol-function 'opencode-shell--turn-assistant)))
+        (cl-letf (((symbol-function 'opencode-shell--turn-assistant)
+                   (lambda (turn) (push turn scanned) (funcall original turn)))
+                  ((symbol-function 'opencode-shell--transcript-window)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'window-body-width) (lambda (&rest _) 40))
+                  ((symbol-function 'get-buffer-window-list) (lambda (&rest _) nil)))
+          (opencode-shell--refresh-table-layout))
+        (should (seq-every-p (lambda (turn)
+                               (memq turn opencode-shell--rendered-turns))
+                             scanned))))))
+
 (ert-deftest opencode-shell-fenced-code-font-lock-handles-unclosed-and-closed-fences ()
   "Fenced code matcher must shade closed blocks and skip unclosed fences linearly."
   (with-temp-buffer
