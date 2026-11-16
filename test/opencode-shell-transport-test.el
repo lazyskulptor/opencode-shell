@@ -1436,5 +1436,137 @@
         (should url)
         (should-not async)))))
 
+(ert-deftest opencode-shell-async-fetch-success-error-is-not-decode-error ()
+  "A throwing application callback is not a second transport failure."
+  (with-temp-buffer
+    (let (sentinel response (successes 0) (failures 0))
+      (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+                 (lambda () t))
+                ((symbol-function 'opencode-shell--auth-header) #'ignore)
+                ((symbol-function 'opencode-shell--url) (lambda (&rest _) "/fixture"))
+                ((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (setq sentinel (plist-get args :sentinel)
+                         response (plist-get args :buffer))
+                   'fetch))
+                ((symbol-function 'process-status) (lambda (_) 'exit))
+                ((symbol-function 'process-exit-status) (lambda (_) 0))
+                ((symbol-function 'process-buffer) (lambda (_) response)))
+        (opencode-shell--fetch-snapshot-async
+         "/fixture"
+         (lambda (_value) (cl-incf successes) (error "application failed"))
+         (lambda () (cl-incf failures)))
+        (with-current-buffer response (insert "[]"))
+        (should-error (funcall sentinel 'fetch "finished"))
+        (should (= successes 1))
+        (should (= failures 0))
+        (should-not (buffer-live-p response))))))
+
+(ert-deftest opencode-shell-async-fetch-owner-lifecycle-cancels-request ()
+  "Every owner exit path cancels only its request and releases its resources."
+  (dolist (action '(cancel kill unsubscribe reset response-kill mode-change))
+    (let ((owner (generate-new-buffer " *fetch-owner*"))
+          response sentinel deadline
+          (deleted 0) (callbacks 0))
+      (unwind-protect
+          (with-current-buffer owner
+            (let ((schedule (symbol-function 'run-at-time)))
+              (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+                         (lambda () t))
+                        ((symbol-function 'opencode-shell--auth-header) #'ignore)
+                        ((symbol-function 'opencode-shell--url)
+                         (lambda (&rest _) "/fixture"))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_seconds repeat callback &rest args)
+                           (setq deadline (apply schedule 600 repeat callback args))))
+                        ((symbol-function 'make-process)
+                         (lambda (&rest args)
+                           (setq sentinel (plist-get args :sentinel)
+                                 response (plist-get args :buffer))
+                           'fetch))
+                        ((symbol-function 'processp) (lambda (p) (eq p 'fetch)))
+                        ((symbol-function 'process-live-p) (lambda (_) (= deleted 0)))
+                        ((symbol-function 'process-status) (lambda (_) 'signal))
+                        ((symbol-function 'delete-process)
+                         (lambda (p)
+                           (cl-incf deleted)
+                           ;; Exercise synchronous sentinel re-entry on cancellation.
+                           (funcall sentinel p "killed"))))
+                (opencode-shell--fetch-snapshot-async
+                 "/fixture" (lambda (_) (cl-incf callbacks))
+                 (lambda () (cl-incf callbacks)))
+                (pcase action
+                  ('cancel (opencode-shell-async-cancel))
+                  ('kill (kill-buffer owner))
+                  ('unsubscribe (opencode-shell-async-unsubscribe-runtime 'fixture owner))
+                  ('reset (opencode-shell-async-reset))
+                  ('response-kill (kill-buffer response))
+                  ('mode-change (fundamental-mode)))
+                (should (= deleted 1))
+                (should (= callbacks 0))
+                (should-not (buffer-live-p response))
+                (should-not (memq deadline timer-list))
+                (funcall sentinel 'fetch "late terminal notification")
+                (should (= callbacks 0)))))
+        (when (timerp deadline) (cancel-timer deadline))
+        (when (buffer-live-p response) (kill-buffer response))
+        (when (buffer-live-p owner) (kill-buffer owner))))))
+
+(ert-deftest opencode-shell-async-fetch-start-failure-cleans-allocated-resources ()
+  "Both allocation and spawn failures release partially acquired resources."
+  (dolist (failure '(allocation spawn))
+    (with-temp-buffer
+      (let (header response deadline (failures 0)
+            (new-buffer (symbol-function 'generate-new-buffer))
+            (temp-file (symbol-function 'make-temp-file))
+            (schedule (symbol-function 'run-at-time)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+                       (lambda () t))
+                      ((symbol-function 'opencode-shell--auth-header)
+                       (lambda (_) '("X-Fixture" . "fixture")))
+                      ((symbol-function 'opencode-shell--url)
+                       (lambda (&rest _) "/fixture"))
+                      ((symbol-function 'make-temp-file)
+                       (lambda (&rest args) (setq header (apply temp-file args))))
+                      ((symbol-function 'generate-new-buffer)
+                       (lambda (&rest args)
+                         (if (eq failure 'allocation) (error "allocation failed")
+                           (setq response (apply new-buffer args)))))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_seconds repeat callback &rest args)
+                         (setq deadline (apply schedule 600 repeat callback args))))
+                      ((symbol-function 'make-process)
+                       (lambda (&rest _) (error "spawn failed"))))
+              (opencode-shell--fetch-snapshot-async
+               "/fixture" #'ignore (lambda () (cl-incf failures)))
+              (should (= failures 1))
+              (should-not (file-exists-p header))
+              (should-not (buffer-live-p response))
+              (should-not (memq deadline timer-list))
+              (should-not opencode-shell-async--request-cancellations))
+          (when (and header (file-exists-p header)) (delete-file header))
+          (when (timerp deadline) (cancel-timer deadline))
+          (when (buffer-live-p response) (kill-buffer response)))))))
+
+(ert-deftest opencode-shell-async-request-cancellation-is-owner-scoped ()
+  "Unsubscribing one owner must not cancel another owner's request."
+  (with-temp-buffer
+    (let ((other (generate-new-buffer " *other-request-owner*"))
+          (ours 0) (theirs 0))
+      (unwind-protect
+          (progn
+            (opencode-shell-async-register-request
+             (current-buffer) (lambda () (cl-incf ours)))
+            (opencode-shell-async-register-request
+             other (lambda () (cl-incf theirs)))
+            (opencode-shell-async-unsubscribe-runtime 'fixture (current-buffer))
+            (should (= ours 1))
+            (should (= theirs 0))
+            (opencode-shell-async-cancel other)
+            (should (= ours 1))
+            (should (= theirs 1)))
+        (kill-buffer other)))))
+
 (provide 'opencode-shell-transport-test)
 ;;; opencode-shell-transport-test.el ends here

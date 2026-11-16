@@ -5842,7 +5842,8 @@ while SSE is live."
                  (lambda (&rest _)
                    (cl-incf full)
                    ;; Simulate the authoritative snapshot applying successfully.
-                   (opencode-shell--confirm-session-updated))))
+                   (opencode-shell--confirm-session-updated
+                    opencode-shell--pending-session-updated))))
         (opencode-shell--reconcile-quiet)
         (should (= full 1))
         ;; Unchanged marker: idle tick stays cheap.
@@ -6172,6 +6173,157 @@ a full resync before hydration completes."
         (opencode-shell--render-turns t))
       (should (= fontify-calls 0))
       (should (= display-text-calls 0)))))
+
+(ert-deftest opencode-shell-reconcile-snapshot-confirms-only-request-marker ()
+  "An older response cannot confirm a marker observed while it was in flight."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--pending-session-updated 2)
+    (let (receive)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &rest _)
+                   (setq receive callback)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--render-messages) #'ignore))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (setq opencode-shell--pending-session-updated 3
+              opencode-shell--in-flight '((messages . t)))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (funcall receive nil)
+        (should (= opencode-shell--reconciled-session-updated 2))
+        (should (= opencode-shell--pending-session-updated 3))))))
+
+(ert-deftest opencode-shell-reconcile-partial-snapshot-does-not-confirm ()
+  "A revision race only merges unseen records, never confirming full recovery."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--pending-session-updated 2)
+    (let (receive)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &rest _)
+                   (setq receive callback)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--schedule-event-reconciliation) #'ignore))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (cl-incf opencode-shell--message-state-revision)
+        (funcall receive nil)
+        (should (= opencode-shell--reconciled-session-updated 1))
+        (should (= opencode-shell--pending-session-updated 2))))))
+
+(ert-deftest opencode-shell-reconcile-snapshot-without-marker-does-not-consume ()
+  "An initial request cannot confirm a marker first observed after it started."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let (receive)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &rest _)
+                   (setq receive callback)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--render-messages) #'ignore))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (setq opencode-shell--pending-session-updated 3)
+        (funcall receive nil)
+        (should-not opencode-shell--reconciled-session-updated)
+        (should (= opencode-shell--pending-session-updated 3))))))
+
+(ert-deftest opencode-shell-reconcile-superseded-snapshot-does-not-confirm ()
+  "A response older than the applied sequence cannot confirm recovery."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--pending-session-updated 2)
+    (let (receive applied)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &rest _)
+                   (setq receive callback)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--render-messages)
+                 (lambda (&rest _) (setq applied t))))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (setq opencode-shell--message-applied-sequence
+              (1+ opencode-shell--message-request-sequence))
+        (funcall receive nil)
+        (should-not applied)
+        (should (= opencode-shell--reconciled-session-updated 1))
+        (should (= opencode-shell--pending-session-updated 2))))))
+
+(ert-deftest opencode-shell-reconcile-failed-application-does-not-confirm ()
+  "An application exception must leave recovery pending."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--pending-session-updated 2)
+    (let (receive)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &rest _)
+                   (setq receive callback)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--render-messages)
+                 (lambda (&rest _) (error "application failed"))))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (should-error (funcall receive nil))
+        (should (= opencode-shell--reconciled-session-updated 1))
+        (should (= opencode-shell--pending-session-updated 2))))))
+
+(ert-deftest opencode-shell-reconcile-newer-marker-retries-after-failed-followup ()
+  "Real cache application confirms only the captured marker, even across retries."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--pending-session-updated 2)
+    (let (receive reject)
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method _path callback &optional _body failure &rest _)
+                   (setq receive callback reject failure)))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (setq opencode-shell--pending-session-updated 3)
+        (funcall receive nil)
+        (should (= opencode-shell--reconciled-session-updated 2))
+        (should (= opencode-shell--pending-session-updated 3))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (funcall reject)
+        (should (= opencode-shell--reconciled-session-updated 2))
+        (should (= opencode-shell--pending-session-updated 3))
+        (opencode-shell--resync-snapshots nil 'messages)
+        (funcall receive nil)
+        (should (= opencode-shell--reconciled-session-updated 3))
+        (should-not opencode-shell--pending-session-updated)))))
+
+(ert-deftest opencode-shell-guarded-request-cancel-releases-slot-and-timer ()
+  "Owner cancellation releases the guard without reporting transport failure."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let (deadline (failures 0) (schedule (symbol-function 'run-at-time)))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_seconds repeat callback &rest args)
+                   (setq deadline (apply schedule 600 repeat callback args))))
+                ((symbol-function 'opencode-shell--request) #'ignore))
+        (opencode-shell--guarded-request
+         'messages "GET" "/fixture" #'ignore nil (lambda () (cl-incf failures)))
+        (should (alist-get 'messages opencode-shell--in-flight))
+        (unwind-protect
+            (progn
+              (opencode-shell-async-cancel)
+              (should-not (alist-get 'messages opencode-shell--in-flight))
+              (should-not (memq deadline timer-list))
+              (should (= failures 0)))
+          (when (timerp deadline) (cancel-timer deadline)))))))
 
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

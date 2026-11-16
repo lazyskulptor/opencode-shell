@@ -41,6 +41,32 @@
 (defvar-local opencode-shell-async--idle-timer nil
   "Idle timer draining `opencode-shell-async--queue'.")
 
+(defvar-local opencode-shell-async--request-cancellations nil
+  "Cancellation functions for requests owned by this buffer.")
+
+(defun opencode-shell-async-register-request (buffer cancel)
+  "Register idempotent CANCEL for a request owned by BUFFER.
+Transport retains resource cleanup; the runtime only owns cancellation scope."
+  (with-current-buffer buffer
+    (push cancel opencode-shell-async--request-cancellations)
+    (add-hook 'kill-buffer-hook #'opencode-shell-async-cancel-requests nil t)
+    (add-hook 'change-major-mode-hook #'opencode-shell-async-cancel-requests nil t)))
+
+(defun opencode-shell-async-unregister-request (buffer cancel)
+  "Release CANCEL's registration from BUFFER after request settlement."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq opencode-shell-async--request-cancellations
+            (delq cancel opencode-shell-async--request-cancellations)))))
+
+(defun opencode-shell-async-cancel-requests (&optional buffer)
+  "Cancel requests owned by BUFFER, or the current buffer, without delivering results."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((cancellations opencode-shell-async--request-cancellations))
+      ;; Detach before invocation: a cancellation may re-enter cleanup.
+      (setq opencode-shell-async--request-cancellations nil)
+      (dolist (cancel cancellations) (funcall cancel)))))
+
 (defun opencode-shell-async-runtime-get (key)
   "Return shared runtime registered under KEY."
   (gethash key opencode-shell-async--runtimes))
@@ -283,6 +309,7 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
 
 (defun opencode-shell-async-unsubscribe-runtime (key buffer)
   "Unsubscribe BUFFER and stop KEY runtime when it has no subscribers."
+  (opencode-shell-async-cancel-requests buffer)
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (remhash buffer (plist-get runtime :subscribers))
     (when (zerop (hash-table-count (plist-get runtime :subscribers)))
@@ -346,8 +373,9 @@ Only the latest pending value for KEY and GENERATION is retained."
                                    #'opencode-shell-async-drain buffer))))))
 
 (defun opencode-shell-async-cancel (&optional buffer)
-  "Cancel queued work for BUFFER or the current buffer."
+  "Cancel queued work and owned requests for BUFFER or the current buffer."
   (with-current-buffer (or buffer (current-buffer))
+    (opencode-shell-async-cancel-requests)
     (when (timerp opencode-shell-async--idle-timer)
       (cancel-timer opencode-shell-async--idle-timer))
     (setq opencode-shell-async--idle-timer nil
@@ -417,7 +445,8 @@ Only the latest pending value for KEY and GENERATION is retained."
 (defun opencode-shell-async-reset ()
   "Cancel queued work in package buffers and clear shared runtimes."
   (dolist (buffer (buffer-list))
-    (when (buffer-local-value 'opencode-shell-async--queue buffer)
+    (when (or (buffer-local-value 'opencode-shell-async--queue buffer)
+              (buffer-local-value 'opencode-shell-async--request-cancellations buffer))
       (opencode-shell-async-cancel buffer)))
   (clrhash opencode-shell-async--animation-subscribers)
   (when (timerp opencode-shell-async--animation-timer)

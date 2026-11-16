@@ -553,9 +553,8 @@ once the owning `/session' snapshot is known; nil (permit editing) until then.")
   "Time of the last validated application event delivered to this transcript.")
 (defvar-local opencode-shell--reconciled-session-updated nil
   "Last `/session/:id' `time.updated' marker confirmed by a full snapshot.
-Set to the server marker only after the transcript has been authoritatively
-re-fetched (or baselined on the first probe when SSE is not live), so a change
-observed before the snapshot is never silently treated as already applied.")
+Set to the request's captured marker only after its authoritative snapshot has
+been applied, never from a probe or a partial merge.")
 (defvar-local opencode-shell--pending-session-updated nil
   "Marker whose change was deferred because SSE was delivering.
 While SSE is live a marker advance is not dropped but held here; once SSE goes
@@ -1806,15 +1805,16 @@ polluting the user's undo history."
        (<= (- (float-time) opencode-shell--last-event-time)
            opencode-shell--sse-delivery-window)))
 
-(defun opencode-shell--confirm-session-updated ()
-  "Confirm the pending session marker after an authoritative snapshot applied.
-Only a successfully applied full message snapshot may advance the confirmed
-marker; a failed, skipped, or still-in-flight fetch leaves it pending so the next
-probe retries instead of silently treating a missed change as delivered."
-  (when opencode-shell--pending-session-updated
+(defun opencode-shell--confirm-session-updated (marker)
+  "Confirm request-local MARKER after its authoritative snapshot applied.
+Newer pending markers remain outstanding for a subsequent snapshot."
+  (when marker
     (setq opencode-shell--reconciled-session-updated
-          opencode-shell--pending-session-updated
-          opencode-shell--pending-session-updated nil)))
+          (max marker (or opencode-shell--reconciled-session-updated 0)))
+    (when (and opencode-shell--pending-session-updated
+               (<= opencode-shell--pending-session-updated
+                   opencode-shell--reconciled-session-updated))
+      (setq opencode-shell--pending-session-updated nil))))
 
 (defun opencode-shell--reconcile-quiet ()
   "Reconcile cheap resources and fetch full history only when it changed.
@@ -4132,7 +4132,7 @@ PARAMS, when non-nil, are query parameters forwarded to the underlying request."
     (let ((origin (current-buffer))
           (generation opencode-shell--generation)
           (request-mode major-mode)
-          (attempt (make-symbol "opencode-snapshot")) timer response)
+          (attempt (make-symbol "opencode-snapshot")) timer response cancel-request)
       (setf (alist-get key opencode-shell--in-flight) attempt)
       (cl-labels ((owned-p ()
                     (eq attempt (alist-get key opencode-shell--in-flight)))
@@ -4140,6 +4140,14 @@ PARAMS, when non-nil, are query parameters forwarded to the underlying request."
                     (and (eq major-mode request-mode)
                          (= generation opencode-shell--generation)
                          (owned-p)))
+                  (release ()
+                    (when (timerp timer) (cancel-timer timer))
+                    (opencode-shell-async-unregister-request origin cancel-request)
+                    (setf (alist-get key opencode-shell--in-flight) nil))
+                  (cancel ()
+                    (when (owned-p)
+                      (release)
+                      (opencode-shell--kill-url-buffer response)))
                   (settle (success value)
                     ;; Release the guard whenever THIS attempt resolves, even if
                     ;; the generation or mode changed meanwhile.  Clearing only
@@ -4150,11 +4158,12 @@ PARAMS, when non-nil, are query parameters forwarded to the underlying request."
                     ;; while still current.
                     (when (owned-p)
                       (let ((apply (current-p)))
-                        (when (timerp timer) (cancel-timer timer))
-                        (setf (alist-get key opencode-shell--in-flight) nil)
+                        (release)
                         (when apply
                           (if success (funcall callback value)
                             (when error-callback (funcall error-callback))))))))
+        (setq cancel-request #'cancel)
+        (opencode-shell-async-register-request origin cancel-request)
         (when (equal method "GET")
           (setq timer
                 (run-at-time
@@ -4262,17 +4271,18 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (when (memq resource '(nil all messages))
     (unless (alist-get 'messages opencode-shell--in-flight)
       (let ((sequence (cl-incf opencode-shell--message-request-sequence))
-            (revision opencode-shell--message-state-revision))
+            (revision opencode-shell--message-state-revision)
+            (marker opencode-shell--pending-session-updated))
         (opencode-shell--guarded-request
          'messages
          "GET" (format "/session/%s/message" opencode-shell--session-id)
          (lambda (messages)
            (opencode-shell--settle-hydration 'messages t)
-           (opencode-shell--confirm-session-updated)
            (if (= revision opencode-shell--message-state-revision)
-               (progn
+               (when (> sequence opencode-shell--message-applied-sequence)
                  (setq opencode-shell--transient-reconcile-pending nil)
-                 (opencode-shell--render-messages messages sequence t t))
+                 (opencode-shell--render-messages messages sequence t t)
+                 (opencode-shell--confirm-session-updated marker))
              (opencode-shell--ensure-message-cache)
              (let ((unseen
                     (seq-remove

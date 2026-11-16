@@ -92,7 +92,12 @@ authoritative snapshot and advances *only* when a full message snapshot actually
 applies: the first probe (unknown baseline) and any advance request one recovery
 when SSE is quiet, an advance seen while SSE is delivering is *deferred*
 (`--pending-session-updated`) rather than consumed, and a failed, skipped, or
-still-in-flight fetch leaves the advance pending so the next probe retries it. A
+still-in-flight fetch leaves the advance pending so the next probe retries it.
+Each request captures its target marker before sending. Only an authoritative model
+application with an unchanged message revision confirms that captured marker;
+it cannot confirm a newer marker observed while the request was in flight.
+The partial unseen-message merge used after a revision race does not confirm
+recovery, and a superseded sequence or application exception leaves it pending. A
 change SSE missed (e.g. only a `session.status` event arrived) is therefore still
 confirmed once SSE goes quiet, and no observed advance is silently dropped. Idle
 or SSE-covered ticks never re-download a large transcript.
@@ -100,9 +105,10 @@ Initial hydration, reconnect, fallback-with-changes, and explicit resync always
 fetch the full snapshot; unsupported events keep an immediate full recovery.
 Re-fetching a large transcript every tick is the freeze this avoids.
 Optionally (`opencode-shell-async-snapshot-fetch`, off by default), the full
-`GET /session/:id/message' fetch for a change is run in a `curl' subprocess so
-its multi-MB receive stays off the main thread; the finished body is then parsed
-and applied under the same generation, buffer-liveness, and SSH-epoch guards as
+`GET /session/:id/message' fetch for a change is run in a `curl' subprocess.
+Curl handles HTTP outside Emacs, but stdout reception and JSON parsing still run
+on Emacs's main thread; this is not an off-thread parsing guarantee. The result is
+applied under the same generation, buffer-liveness, and SSH-epoch guards as
 the `url-retrieve' path (failures mirror its SSH/epoch handling), which remains
 the default and the stub-compatible fallback. The subprocess path claims its
 single terminal transition exactly once — whether from a terminal process status
@@ -113,6 +119,14 @@ process and cleaning its buffer and header temp file), cleans up the same
 resources when the process cannot be started, and runs cleanup even if a terminal
 callback signals. The body parse itself still runs on the main thread
 (subprocess-side compaction is a further, optional optimization).
+Decoding failures invoke the error callback; an exception from the success
+callback propagates after cleanup and must not invoke a second callback.
+The async runtime keeps only owner-scoped cancellation functions; transport owns
+process, deadline, and temporary-resource cleanup. Buffer kill/mode change,
+unsubscribe, reset/reload, and ordinary async cancellation invoke that same
+idempotent terminal path without delivering success/failure or marking a server
+offline. Guarded requests also release their own deadline and in-flight slot.
+Killing the response buffer (including a guard timeout) cancels its subprocess.
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.

@@ -994,22 +994,52 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
       (opencode-shell--request-direct "GET" path callback nil params error-callback)
     (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
            (auth (opencode-shell--auth-header profile))
-           (header-file (and auth (make-temp-file "opencode-header-")))
-           (buffer (generate-new-buffer " *oc-async-fetch*"))
+           (owner (current-buffer))
+           header-file buffer cancel-request
            (settled nil)
            (proc nil)
            timer)
       (cl-labels
           ((cleanup ()
              (when (timerp timer) (cancel-timer timer))
-             (when (buffer-live-p buffer) (kill-buffer buffer))
+             (opencode-shell-async-unregister-request owner cancel-request)
+             (when (and (processp proc) (process-live-p proc))
+               (ignore-errors (delete-process proc)))
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (remove-hook 'kill-buffer-hook cancel-request t))
+               (kill-buffer buffer))
              (when header-file (ignore-errors (delete-file header-file))))
            (finalize (thunk)
              (unless settled
                (setq settled t)
-               (unwind-protect (funcall thunk) (cleanup)))))
+               (unwind-protect (funcall thunk) (cleanup))))
+           (fail ()
+             (when error-callback (funcall error-callback)))
+           (cancel ()
+             ;; Claim settlement before process deletion can re-enter the sentinel.
+             (finalize #'ignore))
+           (receive (process)
+             (if (and (eq (process-status process) 'exit)
+                      (zerop (process-exit-status process)))
+                 (let (value decoded)
+                   (condition-case nil
+                       (setq value (opencode-shell--json-parse-body
+                                    (with-current-buffer (process-buffer process)
+                                      (buffer-string)))
+                             decoded t)
+                     (error nil))
+                   ;; Application exceptions are not transport/decode failures.
+                   (if decoded (funcall callback value) (fail)))
+               (fail))))
         (condition-case _start-error
             (progn
+              (setq cancel-request #'cancel
+                    header-file (and auth (make-temp-file "opencode-header-"))
+                    buffer (generate-new-buffer " *oc-async-fetch*"))
+              (opencode-shell-async-register-request owner cancel-request)
+              (with-current-buffer buffer
+                (add-hook 'kill-buffer-hook cancel-request nil t))
               (when header-file
                 (with-temp-file header-file
                   (insert (format "%s: %s\n" (car auth) (cdr auth)))))
@@ -1017,11 +1047,7 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                     (run-at-time
                      opencode-shell--url-retrieve-timeout nil
                      (lambda ()
-                       (finalize
-                        (lambda ()
-                          (when (and proc (process-live-p proc))
-                            (ignore-errors (delete-process proc)))
-                          (when error-callback (funcall error-callback)))))))
+                       (finalize #'fail))))
               (setq proc
                     (make-process
                      :name "opencode-async-fetch" :buffer buffer :noquery t
@@ -1031,19 +1057,8 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                      :sentinel
                      (lambda (p _event)
                        (when (memq (process-status p) '(exit signal failed))
-                         (finalize
-                          (lambda ()
-                            (if (and (eq (process-status p) 'exit)
-                                     (zerop (process-exit-status p)))
-                                (condition-case _decode
-                                    (funcall callback
-                                             (opencode-shell--json-parse-body
-                                              (with-current-buffer (process-buffer p)
-                                                (buffer-string))))
-                                  (error (when error-callback
-                                           (funcall error-callback))))
-                              (when error-callback (funcall error-callback))))))))))
-          (error (finalize (lambda () (when error-callback (funcall error-callback))))))
+                         (finalize (lambda () (receive p))))))))
+          (error (finalize #'fail)))
         buffer))))
 
 (provide 'opencode-shell-transport)
