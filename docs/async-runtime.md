@@ -85,12 +85,16 @@ Update/removal events coalesce by message or part identity, so their final order
 is preserved within a delivery burst. Unsupported message, permission, and
 question events reconcile only their affected resource; malformed or unclassified
 events and the first event after reconnect reconcile all polling state.
-While SSE is live and initial hydration is complete, periodic (and event-driven)
-reconciliation touches only cheap resources (`/permission`, `/question`,
-`/status`) and never re-downloads the full message history, which stays current
-through validated deltas. The full message snapshot is fetched only on initial
-hydration, SSE reconnect or fallback polling, or an explicit resync; re-fetching
-a large transcript every poll/reconcile tick is the dominant freeze it avoids.
+Periodic (and `session.status`/`idle`) reconciliation stays cheap: it reconciles
+`/permission`, `/question`, and `/status`, and probes `GET /session/:id' for its
+`time.updated` marker (a few hundred bytes). The full message history is
+re-fetched only when that marker advanced and SSE is not already delivering the
+change (tracked by the last validated event time), so idle or SSE-covered ticks
+never re-download a large transcript while changes SSE missed still surface
+without a manual resync. Initial hydration, reconnect, fallback-with-changes, and
+explicit resync always fetch the full snapshot; unsupported events keep an
+immediate full recovery. Re-fetching a large transcript every tick is the freeze
+this avoids.
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.
