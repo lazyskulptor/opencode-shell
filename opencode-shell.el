@@ -405,14 +405,6 @@ profiles make the result ambiguous."
          (remote (and client-root (file-remote-p client-root))))
     (file-name-as-directory
      (if remote (concat remote server-directory) server-directory))))
-(defun opencode-shell--profile-directory (profile directory)
-  "Return DIRECTORY in PROFILE server-native form."
-  (opencode-shell--server-directory directory profile))
-
-(defun opencode-shell--buffer-scope (profile directory)
-  "Return a stable buffer scope for PROFILE and server-native DIRECTORY."
-  (format "%s:%s" (opencode-shell--profile-key profile) (or directory "")))
-
 (defun opencode-shell--directory-leaf (directory)
   "Return a concise display leaf for DIRECTORY."
   (let* ((path (or directory default-directory "/"))
@@ -2136,12 +2128,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                                        (opencode-shell--get incoming 'parts)))
     merged))
 
-(defun opencode-shell--continuation-finish-p (finish)
-  "Return non-nil when FINISH indicates more assistant steps will follow.
-On OpenCode 1.18.30, \"tool-calls\" is the only observed non-terminal value;
-every other populated value (observed: \"stop\") is terminal."
-  (equal (format "%s" finish) "tool-calls"))
-
 (defun opencode-shell--message-error-label (info)
   "Return a bounded, single-line human-readable label for INFO's terminal
 error, or nil."
@@ -2229,10 +2215,6 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
         (setq opencode-shell--last-lifecycle-signature summary)
         (opencode-shell--log "Lifecycle%s %s"
                              (if event (format "[%s]" event) "") summary)))))
-
-(defun opencode-shell--turn-by-server-id (id turns)
-  "Find the turn with server user ID ID in TURNS."
-  (seq-find (lambda (turn) (equal id (opencode-shell--turn-server-user-id turn))) turns))
 
 (defun opencode-shell--turn-by-id (id turns)
   "Find the turn whose stable client or server ID equals ID."
@@ -3188,23 +3170,6 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
                               'font-lock-face 'shadow
                               'read-only t 'rear-nonsticky '(read-only face))))))))
 
-(defun opencode-shell--commit-permission-result (record)
-  "Replace the active permission card with a fixed transcript RECORD."
-  (opencode-shell--without-user-undo
-   (let ((inhibit-read-only t)
-         (composer-gap (- opencode-shell--composer-start
-                          opencode-shell--permission-end)))
-    (save-excursion
-      (goto-char opencode-shell--permission-begin)
-      (delete-region opencode-shell--permission-begin opencode-shell--permission-end)
-      (insert (propertize (opencode-shell--permission-result-text record)
-                          'font-lock-face 'shadow
-                          'read-only t 'rear-nonsticky '(read-only face)))
-      (set-marker opencode-shell--transcript-end (point))
-      (set-marker opencode-shell--permission-begin (point))
-      (set-marker opencode-shell--permission-end (point))
-      (set-marker opencode-shell--composer-start (+ (point) composer-gap))))))
-
 (defun opencode-shell--permission-at-point ()
   "Return the permission object at point, or the first pending request."
   (or (get-text-property (point) 'opencode-shell-permission)
@@ -3563,11 +3528,6 @@ text properties) keep gutter glyphs out of copied text."
             (push rest-overlay overlays)))))
     (setq entry (plist-put entry role overlays))
     (puthash turn entry opencode-shell--turn-gutters)))
-
-(defun opencode-shell--assistant-text (turn)
-  "Return TURN's assistant display text, or nil when it has none."
-  (let ((text (opencode-shell--assistant-display-text turn)))
-    (unless (string-empty-p text) text)))
 
 (defun opencode-shell--apply-response-gutter (turn response-begin response-end)
   "Apply TURN's assistant gutter within RESPONSE-BEGIN..RESPONSE-END.
@@ -4258,14 +4218,6 @@ CHANGED-TURNS into the response blocks pending incremental update."
         (opencode-shell--schedule-render opencode-shell--render-event
                                          opencode-shell--render-force
                                          opencode-shell--render-dirty-turns)))
-
-(defun opencode-shell--transcript-state-signature ()
-  "Return the normalized transcript state that can affect presentation."
-  (list
-   (mapcar #'opencode-shell--turn-state-signature opencode-shell--turns)
-   opencode-shell--request-status
-   opencode-shell--submit-in-flight
-   (opencode-shell--composer-visible-p)))
 
 (defun opencode-shell--message-lifecycle-signature ()
   "Return top-level message lifecycle state outside individual turns."

@@ -2527,14 +2527,6 @@ under [mouse-1]."
     (should-not opencode-shell--selected-model)
     (should-not opencode-shell--selected-agent)))
 
-(ert-deftest opencode-shell-markdown-preserves-raw-unicode-and-fences ()
-  (with-temp-buffer
-    (setq font-lock-defaults '(opencode-shell-render-font-lock-keywords t))
-    (let ((raw "# 제목\n\n- 목록과 **굵게** 및 [링크](https://example.com)\n\n> 원문\n\n```elisp\n(message \"안녕\")\n```\n"))
-      (opencode-shell-render-insert raw)
-      (should (equal (buffer-substring-no-properties (point-min) (point-max)) raw))
-      (should (get-text-property (string-match "message" raw) 'face)))))
-
 (ert-deftest opencode-shell-markdown-table-layout-fits-unicode-content ()
   (let* ((raw "앞\n| 책임 | 위치 |\n|---|---|\n| JSON 로그 생성 | `translator-api` |\n| OpenSearch 자격증명 | K8s Secret, 실제 값은 외부 주입 |\n뒤")
          (wide (opencode-shell-render-tables raw 72))

@@ -497,10 +497,6 @@ just this client's local transport to it."
                        :object-type 'alist :array-type 'list
                        :null-object nil :false-object nil)))
 
-(defun opencode-shell--json-read-buffer ()
-  "Read the HTTP response body at point as JSON."
-  (opencode-shell--json-parse-body (opencode-shell--http-response-body)))
-
 (defun opencode-shell--routine-snapshot-path-p (path)
   "Return non-nil when successful PATH polling should stay out of logs."
   (or (member path '("/permission" "/question"))
