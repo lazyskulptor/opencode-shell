@@ -1806,6 +1806,16 @@ polluting the user's undo history."
        (<= (- (float-time) opencode-shell--last-event-time)
            opencode-shell--sse-delivery-window)))
 
+(defun opencode-shell--confirm-session-updated ()
+  "Confirm the pending session marker after an authoritative snapshot applied.
+Only a successfully applied full message snapshot may advance the confirmed
+marker; a failed, skipped, or still-in-flight fetch leaves it pending so the next
+probe retries instead of silently treating a missed change as delivered."
+  (when opencode-shell--pending-session-updated
+    (setq opencode-shell--reconciled-session-updated
+          opencode-shell--pending-session-updated
+          opencode-shell--pending-session-updated nil)))
+
 (defun opencode-shell--reconcile-quiet ()
   "Reconcile cheap resources and fetch full history only when it changed.
 Always reconciles cheap resources and probes `GET /session/:id' for its
@@ -1825,26 +1835,20 @@ missed are still recovered automatically without a manual resync."
       (lambda (session)
         (let ((updated (opencode-shell--time session)))
           (when (> updated 0)
-            (let ((live (opencode-shell--sse-recently-delivered-p)))
-              (cond
-               ;; No confirmed baseline yet: we cannot prove the local snapshot
-               ;; matches `updated', so recover once instead of trusting it.
-               ((null opencode-shell--reconciled-session-updated)
-                (setq opencode-shell--reconciled-session-updated updated)
-                (unless live (opencode-shell--resync nil)))
-               ;; Change advanced while SSE delivers: defer, do not consume.
-               ((and live (> updated opencode-shell--reconciled-session-updated))
-                (setq opencode-shell--pending-session-updated updated))
-               ;; Change advanced and SSE is quiet: recover now.
-               ((> updated opencode-shell--reconciled-session-updated)
-                (setq opencode-shell--reconciled-session-updated updated
-                      opencode-shell--pending-session-updated nil)
-                (opencode-shell--resync nil))
-               ;; A deferred change is still outstanding; confirm it now.
-               (opencode-shell--pending-session-updated
-                (setq opencode-shell--reconciled-session-updated updated
-                      opencode-shell--pending-session-updated nil)
-                (opencode-shell--resync nil)))))))
+            (cond
+             ;; Unknown baseline or an advance: schedule recovery.  While SSE is
+             ;; delivering we only DEFER; the marker is confirmed later by the
+             ;; authoritative snapshot callback, never from this probe, so a
+             ;; failed or skipped fetch cannot permanently consume the advance.
+             ((or (null opencode-shell--reconciled-session-updated)
+                  (> updated opencode-shell--reconciled-session-updated))
+              (setq opencode-shell--pending-session-updated updated)
+              (unless (opencode-shell--sse-recently-delivered-p)
+                (opencode-shell--resync nil)))
+             ;; The applied snapshot already covers the marker: clear any stale
+             ;; deferral.
+             (opencode-shell--pending-session-updated
+              (setq opencode-shell--pending-session-updated nil))))))
      nil nil)))
 
 (defun opencode-shell--start-polling ()
@@ -4264,6 +4268,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
          "GET" (format "/session/%s/message" opencode-shell--session-id)
          (lambda (messages)
            (opencode-shell--settle-hydration 'messages t)
+           (opencode-shell--confirm-session-updated)
            (if (= revision opencode-shell--message-state-revision)
                (progn
                  (setq opencode-shell--transient-reconcile-pending nil)

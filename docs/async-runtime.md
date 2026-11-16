@@ -88,12 +88,14 @@ events and the first event after reconnect reconcile all polling state.
 Periodic (and `session.status`/`idle`) reconciliation stays cheap: it reconciles
 `/permission`, `/question`, and `/status`, and probes `GET /session/:id' for its
 `time.updated` marker (a few hundred bytes). A confirmed marker tracks the last
-authoritative snapshot: the first probe (unknown baseline) recovers once when SSE
-is quiet, an advance while SSE is quiet triggers one full re-fetch, and an advance
-seen while SSE is delivering is *deferred* (`--pending-session-updated`) rather
-than consumed, so a change SSE missed (e.g. only a `session.status` event arrived)
-is still confirmed once SSE goes quiet. Idle or SSE-covered ticks never
-re-download a large transcript, and no observed advance is silently dropped.
+authoritative snapshot and advances *only* when a full message snapshot actually
+applies: the first probe (unknown baseline) and any advance request one recovery
+when SSE is quiet, an advance seen while SSE is delivering is *deferred*
+(`--pending-session-updated`) rather than consumed, and a failed, skipped, or
+still-in-flight fetch leaves the advance pending so the next probe retries it. A
+change SSE missed (e.g. only a `session.status` event arrived) is therefore still
+confirmed once SSE goes quiet, and no observed advance is silently dropped. Idle
+or SSE-covered ticks never re-download a large transcript.
 Initial hydration, reconnect, fallback-with-changes, and explicit resync always
 fetch the full snapshot; unsupported events keep an immediate full recovery.
 Re-fetching a large transcript every tick is the freeze this avoids.

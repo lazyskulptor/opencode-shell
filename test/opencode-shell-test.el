@@ -5839,8 +5839,10 @@ while SSE is live."
                 ((symbol-function 'opencode-shell--sse-recently-delivered-p)
                  (lambda () delivered))
                 ((symbol-function 'opencode-shell--resync)
-                 (lambda (&rest _) (cl-incf full))))
-        ;; Unknown baseline while SSE is quiet: recover once.
+                 (lambda (&rest _)
+                   (cl-incf full)
+                   ;; Simulate the authoritative snapshot applying successfully.
+                   (opencode-shell--confirm-session-updated))))
         (opencode-shell--reconcile-quiet)
         (should (= full 1))
         ;; Unchanged marker: idle tick stays cheap.
@@ -5884,6 +5886,33 @@ rather than being consumed and lost."
         (setq delivered nil)
         (opencode-shell--reconcile-quiet)
         (should (= full 1))))))
+
+(ert-deftest opencode-shell-reconcile-quiet-does-not-consume-on-failed-resync ()
+  "An unconfirmed (failed/skipped/in-flight) snapshot never advances the marker;
+the advance stays pending and is retried on the next probe."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "s"
+                opencode-shell--reconciled-session-updated 1)
+    (let ((updated 2) (full 0))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_k _m path cb &rest _)
+                   (when (string-match-p "/session/s\\'" path)
+                     (funcall cb `((time . ((updated . ,updated))))))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore)
+                ((symbol-function 'opencode-shell--sse-recently-delivered-p) (lambda () nil))
+                ;; A fetch that never confirms (failed, skipped, or in-flight).
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf full))))
+        (opencode-shell--reconcile-quiet)
+        (should (= full 1))
+        (should (= opencode-shell--reconciled-session-updated 1))
+        (should (= opencode-shell--pending-session-updated 2))
+        ;; The marker was never confirmed, so the next probe retries.
+        (opencode-shell--reconcile-quiet)
+        (should (= full 2))
+        (should (= opencode-shell--reconciled-session-updated 1))))))
 
 (ert-deftest opencode-shell-periodic-poll-runs-quiet-reconcile ()
   "The periodic poll reconciles quietly once hydration is done, and only forces
