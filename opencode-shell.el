@@ -481,13 +481,6 @@ Move the associated API log buffer so its name stays in sync."
   "Seconds between transcript/status polls while a session buffer is live."
   :type 'number :group 'opencode-shell)
 
-(defcustom opencode-shell-fallback-resync-interval 15
-  "Seconds between full-history resyncs while SSE is down.
-Fallback polling still reconciles cheap resources every tick, but re-fetching a
-large message history that often would freeze the UI; this throttles the full
-resync so a dropped stream stays usable on big sessions."
-  :type 'number :group 'opencode-shell)
-
 (defcustom opencode-shell-animation-interval 0.2
   "Seconds between UI-only request-status animation frames."
   :type 'number :group 'opencode-shell)
@@ -564,8 +557,13 @@ once the owning `/session' snapshot is known; nil (permit editing) until then.")
 (defvar-local opencode-shell--selected-agent nil)
 (defvar-local opencode-shell--runtime-key nil)
 (defvar-local opencode-shell--connection-stale nil)
-(defvar-local opencode-shell--last-fallback-full-sync nil
-  "Time of the last throttled full resync during SSE-down fallback polling.")
+(defvar-local opencode-shell--last-event-time nil
+  "Time of the last validated application event delivered to this transcript.")
+(defvar-local opencode-shell--reconciled-session-updated nil
+  "Last `/session/:id' `time.updated' marker seen by periodic reconciliation.")
+
+(defconst opencode-shell--sse-delivery-window 5
+  "Seconds within which a received SSE event counts as live incremental delivery.")
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--composer-overlay nil)
@@ -1971,24 +1969,40 @@ polluting the user's undo history."
   (setq opencode-shell--runtime-key nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
-(defun opencode-shell--reconcile-cheap ()
-  "Reconcile cheap polling resources without re-fetching the message history.
-Messages stay current through validated SSE deltas; the full history is fetched
-only on initial hydration, reconnect, SSE fallback, or an explicit resync.
-This is the periodic/event reconciliation path while SSE is live: fetching a
-large transcript snapshot every tick is the dominant freeze on big sessions."
+(defun opencode-shell--sse-recently-delivered-p ()
+  "Return non-nil when a validated SSE event arrived within the delivery window."
+  (and opencode-shell--last-event-time
+       (<= (- (float-time) opencode-shell--last-event-time)
+           opencode-shell--sse-delivery-window)))
+
+(defun opencode-shell--reconcile-quiet ()
+  "Reconcile cheap resources and fetch full history only when it changed.
+Always reconciles cheap resources and probes `GET /session/:id' for its
+`time.updated' marker (a few hundred bytes).  A full message resync runs only
+when that marker advanced and SSE is not already delivering the change, so idle
+or large sessions never re-download the transcript every tick, while changes SSE
+missed are still recovered automatically without a manual resync."
   (opencode-shell--guarded-request
    'permissions "GET" "/permission"
    (lambda (items) (opencode-shell--receive-permissions items t))
    nil #'opencode-shell--consume-permission-refresh-pending)
   (opencode-shell--refresh-questions)
-  (opencode-shell--refresh-descendant-status))
-
-(defun opencode-shell--fallback-full-sync-due-p ()
-  "Return non-nil when a throttled full-history fallback resync is due."
-  (or (null opencode-shell--last-fallback-full-sync)
-      (>= (- (float-time) opencode-shell--last-fallback-full-sync)
-          opencode-shell-fallback-resync-interval)))
+  (opencode-shell--refresh-descendant-status)
+  (opencode-shell--guarded-request
+   'session-updated "GET" (format "/session/%s" opencode-shell--session-id)
+   (lambda (session)
+     (let ((updated (opencode-shell--get
+                     (opencode-shell--get session 'time) 'updated)))
+       (when updated
+         (cond
+          ((null opencode-shell--reconciled-session-updated)
+           (setq opencode-shell--reconciled-session-updated updated))
+          ((equal updated opencode-shell--reconciled-session-updated) nil)
+          (t
+           (setq opencode-shell--reconciled-session-updated updated)
+           (unless (opencode-shell--sse-recently-delivered-p)
+             (opencode-shell--resync nil)))))))
+   nil nil))
 
 (defun opencode-shell--start-polling ()
   "Start periodic network polling and UI animation if needed."
@@ -2011,15 +2025,9 @@ large transcript snapshot every tick is the dominant freeze on big sessions."
                 (opencode-shell--profile-sse-eligible-p profile)
                 opencode-shell-poll-interval
                 (lambda ()
-                  (cond
-                   ((not (opencode-shell--initial-hydration-complete-p))
-                    (opencode-shell--resync nil))
-                   ((opencode-shell-async-sse-connected-p key)
-                    (opencode-shell--reconcile-cheap))
-                   ((opencode-shell--fallback-full-sync-due-p)
-                    (setq opencode-shell--last-fallback-full-sync (float-time))
-                    (opencode-shell--resync nil))
-                   (t (opencode-shell--reconcile-cheap))))
+                  (if (opencode-shell--initial-hydration-complete-p)
+                      (opencode-shell--reconcile-quiet)
+                    (opencode-shell--resync nil)))
                 (lambda (event)
                   (when opencode-shell-log-requests
                     (opencode-shell--log "OpenCode async %s" event)))
@@ -2539,19 +2547,15 @@ instead of re-normalizing every part on each signature/display-cache probe."
              (opencode-shell--turn-locally-settled turn)
              (opencode-shell--turn-terminal-error turn))))
 
-(defun opencode-shell--schedule-event-reconciliation (&optional resource)
+(defun opencode-shell--schedule-event-reconciliation (&optional resource quiet)
   "Coalesce an authoritative snapshot reconciliation for RESOURCE.
-When RESOURCE is messages and SSE is live, reconcile only cheap resources; the
-full message history is fetched on reconnect, fallback, or explicit resync."
-  (let* ((resource (or resource 'all))
-         (cheap (and (eq resource 'messages)
-                     (opencode-shell--initial-hydration-complete-p)
-                     (opencode-shell-async-sse-connected-p
-                      opencode-shell--runtime-key))))
+QUIET reconciles cheap resources plus a change-gated message re-fetch (see
+`opencode-shell--reconcile-quiet'); otherwise RESOURCE is fully re-fetched."
+  (let ((resource (or resource 'all)))
     (opencode-shell-async-enqueue
      (current-buffer) (list 'event-reconcile resource) opencode-shell--generation
-     (if cheap
-         #'opencode-shell--reconcile-cheap
+     (if quiet
+         #'opencode-shell--reconcile-quiet
        (lambda () (opencode-shell--resync nil resource))))))
 
 (defun opencode-shell--apply-message-event (event)
@@ -2731,6 +2735,7 @@ full message history is fetched on reconnect, fallback, or explicit resync."
   "Apply decoded application EVENT or reconcile when it is not safe locally."
   (when (and (derived-mode-p 'opencode-shell-mode)
              (not (eq (plist-get event :resource) 'none)))
+    (setq opencode-shell--last-event-time (float-time))
     (opencode-shell--ensure-message-cache)
     (let ((kind (plist-get event :kind))
           (type (plist-get event :type)))
@@ -2773,10 +2778,10 @@ full message history is fetched on reconnect, fallback, or explicit resync."
             (opencode-shell--refresh-descendant-status))
           (when (or (null opencode-shell--turns)
                     opencode-shell--submit-in-flight
-                    (seq-some (lambda (turn)
-                                (not (eq (opencode-shell--turn-status turn) 'complete)))
-                              opencode-shell--turns))
-            (opencode-shell--schedule-event-reconciliation 'messages))))
+            (seq-some (lambda (turn)
+                        (not (eq (opencode-shell--turn-status turn) 'complete)))
+                      opencode-shell--turns))
+            (opencode-shell--schedule-event-reconciliation 'messages t))))
        (t
         (opencode-shell--schedule-event-reconciliation
          (or (plist-get event :resource) 'messages)))))))
