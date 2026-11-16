@@ -32,6 +32,7 @@
 (require 'opencode-shell-interaction)
 (require 'opencode-shell-response)
 (require 'opencode-shell-messages)
+(require 'opencode-shell-sessions)
 (require 'opencode-shell-recovery)
 (require 'opencode-shell-transport)
 
@@ -788,62 +789,10 @@ web UI.  Nil (unknown) is conservative and keeps the original behavior.")
      (plist-get runtime :subscribers))))
 
 
-(defun opencode-shell--time (session)
-  "Return SESSION update time as a sortable number."
-  (let* ((time (opencode-shell--get session 'time))
-         (updated (or (opencode-shell--get time 'updated)
-                      (opencode-shell--get session 'updated))))
-    (cond ((numberp updated) updated)
-          ((stringp updated) (float-time (date-to-time updated)))
-          (t 0))))
-
-(defun opencode-shell--normalize-sessions (sessions)
-  "Normalize and newest-first sort SESSIONS, deduplicating by ID.
-Each retained session keeps its server-reported directory unchanged."
-  (let ((seen (make-hash-table :test #'equal)) result)
-    (dolist (session (sort (copy-sequence (or sessions nil))
-                           (lambda (a b) (> (opencode-shell--time a)
-                                            (opencode-shell--time b)))))
-      (let ((id (opencode-shell--get session 'id)))
-        (when (and id (not (gethash id seen)))
-          (puthash id t seen)
-          (push session result))))
-    (nreverse result)))
-
-(defun opencode-shell--model-value (model &optional provider-id)
-  "Normalize MODEL to a providerID/modelID object."
-  (cond
-   ((stringp model)
-    (let ((parts (split-string model "/")))
-      `((providerID . ,(or provider-id (and (> (length parts) 1) (car parts))))
-        (modelID . ,(car (last parts))))))
-   ((listp model)
-    (let ((model-id (or (opencode-shell--get model 'modelID)
-                        (opencode-shell--get model 'id))))
-      (and model-id
-           `((providerID . ,(or (opencode-shell--get model 'providerID) provider-id))
-             (modelID . ,model-id)))))))
-
-(defun opencode-shell--model-name (model &optional provider-id)
-  "Return display name for normalized MODEL."
-  (let* ((value (opencode-shell--model-value model provider-id))
-         (provider (opencode-shell--get value 'providerID))
-         (id (opencode-shell--get value 'modelID)))
-    (if provider (format "%s/%s" provider id) (or id ""))))
-
 (defun opencode-shell--status (id)
   "Return compact status for session ID."
   (let ((status (opencode-shell--get opencode-shell--session-status id)))
     (format "%s" (or (opencode-shell--get status 'type) status "idle"))))
-
-(defun opencode-shell--session-text (session)
-  "Return searchable text for SESSION."
-  (concat
-   (mapconcat #'identity
-              (mapcar (lambda (key) (format "%s" (or (opencode-shell--get session key) "")))
-                      '(title id directory project agent modelID providerID)) " ")
-   " " (opencode-shell--model-name (opencode-shell--get session 'model)
-                                      (opencode-shell--get session 'providerID))))
 
 (defun opencode-shell--session-row (session)
   "Return a `tabulated-list-entries' row for SESSION."
