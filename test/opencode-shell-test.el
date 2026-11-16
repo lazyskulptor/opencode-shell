@@ -5823,8 +5823,9 @@ against every turn's huge output, O(ids*turns*payload), which froze Emacs."
         (should (= resyncs 1))))))
 
 (ert-deftest opencode-shell-reconcile-quiet-full-resync-only-on-change ()
-  "Periodic reconciliation full-resyncs only when the session updated marker
-advanced and SSE is not already delivering; idle ticks stay cheap."
+  "Periodic reconciliation recovers an unknown baseline once, full-resyncs when
+the marker advances and SSE is quiet, and defers (does not drop) an advance seen
+while SSE is live."
   (with-temp-buffer
     (opencode-shell-mode)
     (setq-local opencode-shell--session-id "s")
@@ -5839,14 +5840,48 @@ advanced and SSE is not already delivering; idle ticks stay cheap."
                  (lambda () delivered))
                 ((symbol-function 'opencode-shell--resync)
                  (lambda (&rest _) (cl-incf full))))
-        (opencode-shell--reconcile-quiet)
-        (should (= full 0))
-        (opencode-shell--reconcile-quiet)
-        (should (= full 0))
-        (setq updated 2)
+        ;; Unknown baseline while SSE is quiet: recover once.
         (opencode-shell--reconcile-quiet)
         (should (= full 1))
+        ;; Unchanged marker: idle tick stays cheap.
+        (opencode-shell--reconcile-quiet)
+        (should (= full 1))
+        ;; Advanced with SSE quiet: recover.
+        (setq updated 2)
+        (opencode-shell--reconcile-quiet)
+        (should (= full 2))
+        ;; Advanced while SSE delivers: defer, do not drop.
         (setq updated 3 delivered t)
+        (opencode-shell--reconcile-quiet)
+        (should (= full 2))
+        (should (= opencode-shell--pending-session-updated 3))
+        ;; SSE goes quiet: the deferred change is confirmed.
+        (setq delivered nil)
+        (opencode-shell--reconcile-quiet)
+        (should (= full 3))
+        (should (null opencode-shell--pending-session-updated))))))
+
+(ert-deftest opencode-shell-reconcile-quiet-defers-status-only-sse-change ()
+  "A marker advance suppressed by non-message SSE is recovered once SSE is quiet,
+rather than being consumed and lost."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "s"
+                opencode-shell--reconciled-session-updated 1)
+    (let ((updated 2) (full 0) (delivered t))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method path callback &rest _)
+                   (when (string-match-p "/session/s\\'" path)
+                     (funcall callback `((time . ((updated . ,updated))))))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore)
+                ((symbol-function 'opencode-shell--sse-recently-delivered-p)
+                 (lambda () delivered))
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf full))))
+        (opencode-shell--reconcile-quiet)
+        (should (= full 0))
+        (setq delivered nil)
         (opencode-shell--reconcile-quiet)
         (should (= full 1))))))
 

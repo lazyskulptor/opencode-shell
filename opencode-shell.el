@@ -552,7 +552,14 @@ once the owning `/session' snapshot is known; nil (permit editing) until then.")
 (defvar-local opencode-shell--last-event-time nil
   "Time of the last validated application event delivered to this transcript.")
 (defvar-local opencode-shell--reconciled-session-updated nil
-  "Last `/session/:id' `time.updated' marker seen by periodic reconciliation.")
+  "Last `/session/:id' `time.updated' marker confirmed by a full snapshot.
+Set to the server marker only after the transcript has been authoritatively
+re-fetched (or baselined on the first probe when SSE is not live), so a change
+observed before the snapshot is never silently treated as already applied.")
+(defvar-local opencode-shell--pending-session-updated nil
+  "Marker whose change was deferred because SSE was delivering.
+While SSE is live a marker advance is not dropped but held here; once SSE goes
+quiet the next probe performs the authoritative resync to confirm it.")
 
 (defconst opencode-shell--sse-delivery-window 5
   "Seconds within which a received SSE event counts as live incremental delivery.")
@@ -1815,17 +1822,29 @@ missed are still recovered automatically without a manual resync."
   (when opencode-shell--session-id
     (opencode-shell--guarded-request
      'session-updated "GET" (format "/session/%s" opencode-shell--session-id)
-     (lambda (session)
-       (let ((updated (opencode-shell--time session)))
-         (when (> updated 0)
-           (cond
-            ((null opencode-shell--reconciled-session-updated)
-             (setq opencode-shell--reconciled-session-updated updated))
-            ((= updated opencode-shell--reconciled-session-updated) nil)
-            (t
-             (setq opencode-shell--reconciled-session-updated updated)
-             (unless (opencode-shell--sse-recently-delivered-p)
-               (opencode-shell--resync nil)))))))
+      (lambda (session)
+        (let ((updated (opencode-shell--time session)))
+          (when (> updated 0)
+            (let ((live (opencode-shell--sse-recently-delivered-p)))
+              (cond
+               ;; No confirmed baseline yet: we cannot prove the local snapshot
+               ;; matches `updated', so recover once instead of trusting it.
+               ((null opencode-shell--reconciled-session-updated)
+                (setq opencode-shell--reconciled-session-updated updated)
+                (unless live (opencode-shell--resync nil)))
+               ;; Change advanced while SSE delivers: defer, do not consume.
+               ((and live (> updated opencode-shell--reconciled-session-updated))
+                (setq opencode-shell--pending-session-updated updated))
+               ;; Change advanced and SSE is quiet: recover now.
+               ((> updated opencode-shell--reconciled-session-updated)
+                (setq opencode-shell--reconciled-session-updated updated
+                      opencode-shell--pending-session-updated nil)
+                (opencode-shell--resync nil))
+               ;; A deferred change is still outstanding; confirm it now.
+               (opencode-shell--pending-session-updated
+                (setq opencode-shell--reconciled-session-updated updated
+                      opencode-shell--pending-session-updated nil)
+                (opencode-shell--resync nil)))))))
      nil nil)))
 
 (defun opencode-shell--start-polling ()

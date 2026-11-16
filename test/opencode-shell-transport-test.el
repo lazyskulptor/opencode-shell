@@ -1295,6 +1295,8 @@
                  (setq sentinel (plist-get args :sentinel)
                        buf (plist-get args :buffer))
                  (list 'proc)))
+              ((symbol-function 'process-status) (lambda (_p) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_p) 0))
               ((symbol-function 'process-buffer) (lambda (_p) buf)))
       (opencode-shell--fetch-snapshot-async "/x"
                                             (lambda (value) (setq result value))
@@ -1303,6 +1305,47 @@
       (with-current-buffer buf (insert "{\"a\":1}"))
       (funcall sentinel 'proc "finished\n")
       (should (equal result '((a . 1)))))))
+
+(ert-deftest opencode-shell-async-fetch-ignores-nonterminal-sentinel ()
+  "A non-terminal sentinel notification must not settle or invoke callbacks."
+  (let (sentinel called buf)
+    (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+               (lambda () t))
+              ((symbol-function 'opencode-shell--url)
+               (lambda (&rest _) "http://x/message"))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq sentinel (plist-get args :sentinel)
+                       buf (plist-get args :buffer))
+                 (list 'proc)))
+              ((symbol-function 'process-status) (lambda (_p) 'run))
+              ((symbol-function 'process-buffer) (lambda (_p) buf)))
+      (opencode-shell--fetch-snapshot-async "/x"
+                                            (lambda (_v) (setq called t))
+                                            (lambda () (setq called t)))
+      (with-current-buffer buf (insert "partial"))
+      (funcall sentinel 'proc "running\n")
+      (should-not called))))
+
+(ert-deftest opencode-shell-async-fetch-reports-curl-failure ()
+  "A non-zero curl exit invokes the error callback, not the success callback."
+  (let (sentinel got-error buf)
+    (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+               (lambda () t))
+              ((symbol-function 'opencode-shell--url)
+               (lambda (&rest _) "http://x/message"))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq sentinel (plist-get args :sentinel)
+                       buf (plist-get args :buffer))
+                 (list 'proc)))
+              ((symbol-function 'process-status) (lambda (_p) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_p) 22))
+              ((symbol-function 'process-buffer) (lambda (_p) buf)))
+      (opencode-shell--fetch-snapshot-async "/x" #'ignore
+                                            (lambda () (setq got-error t)))
+      (funcall sentinel 'proc "exited abnormally\n")
+      (should got-error))))
 
 (ert-deftest opencode-shell-async-fetch-falls-back-when-unavailable ()
   "Without curl, the async fetch defers to the synchronous request-direct path."

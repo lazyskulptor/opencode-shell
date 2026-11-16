@@ -87,21 +87,27 @@ question events reconcile only their affected resource; malformed or unclassifie
 events and the first event after reconnect reconcile all polling state.
 Periodic (and `session.status`/`idle`) reconciliation stays cheap: it reconciles
 `/permission`, `/question`, and `/status`, and probes `GET /session/:id' for its
-`time.updated` marker (a few hundred bytes). The full message history is
-re-fetched only when that marker advanced and SSE is not already delivering the
-change (tracked by the last validated event time), so idle or SSE-covered ticks
-never re-download a large transcript while changes SSE missed still surface
-without a manual resync. Initial hydration, reconnect, fallback-with-changes, and
-explicit resync always fetch the full snapshot; unsupported events keep an
-immediate full recovery. Re-fetching a large transcript every tick is the freeze
-this avoids.
+`time.updated` marker (a few hundred bytes). A confirmed marker tracks the last
+authoritative snapshot: the first probe (unknown baseline) recovers once when SSE
+is quiet, an advance while SSE is quiet triggers one full re-fetch, and an advance
+seen while SSE is delivering is *deferred* (`--pending-session-updated`) rather
+than consumed, so a change SSE missed (e.g. only a `session.status` event arrived)
+is still confirmed once SSE goes quiet. Idle or SSE-covered ticks never
+re-download a large transcript, and no observed advance is silently dropped.
+Initial hydration, reconnect, fallback-with-changes, and explicit resync always
+fetch the full snapshot; unsupported events keep an immediate full recovery.
+Re-fetching a large transcript every tick is the freeze this avoids.
 Optionally (`opencode-shell-async-snapshot-fetch`, off by default), the full
 `GET /session/:id/message' fetch for a change is run in a `curl' subprocess so
 its multi-MB receive stays off the main thread; the finished body is then parsed
 and applied under the same generation, buffer-liveness, and SSH-epoch guards as
-the `url-retrieve' path, which remains the default and the stub-compatible
-fallback. The body parse itself still runs on the main thread (subprocess-side
-compaction is a further, optional optimization).
+the `url-retrieve' path (failures mirror its SSH/epoch handling), which remains
+the default and the stub-compatible fallback. The subprocess path settles exactly
+once on a terminal process status (not a raw event string), bounds the request
+with `opencode-shell--url-retrieve-timeout` (killing a hung process and cleaning
+its buffer and header temp file), and cleans up the same resources when the
+process cannot be started. The body parse itself still runs on the main thread
+(subprocess-side compaction is a further, optional optimization).
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.

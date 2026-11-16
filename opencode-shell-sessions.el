@@ -6,9 +6,18 @@
 
 ;;; Commentary:
 
-;; Pure, buffer-independent normalization for OpenCode session and model
-;; records: update ordering, searchable text, and providerID/modelID display.
-;; No buffer state, no I/O.  The session browser UI stays in `opencode-shell'.
+;; Session browser support extracted from `opencode-shell':
+;;
+;; - Pure, buffer-independent normalization for OpenCode session and model
+;;   records: update ordering, searchable text, and providerID/modelID display.
+;; - The session browser presentation layer: mode map, help, transient menu,
+;;   the derived mode, and the Evil setup hook.
+;; - Self-contained file persistence for recent locations and directory
+;;   overrides (defcustoms, load/save helpers, and backing vars), read at load
+;;   time.
+;;
+;; Buffer-local browser state and the network/command logic stay in
+;; `opencode-shell'; this module depends on none of it at load time.
 
 ;;; Code:
 

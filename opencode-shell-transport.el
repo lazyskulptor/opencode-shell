@@ -784,11 +784,16 @@ the deferred keyed application of the parsed value."
             (setq opencode-shell--request-error-notified nil)
             (funcall callback value))))))
    (lambda ()
-     (when (and (buffer-live-p origin)
+     (when (and (not (and ssh (not (= transport-epoch
+                                     (opencode-shell-recovery-epoch key)))))
+                (buffer-live-p origin)
                 (with-current-buffer origin
                   (= generation opencode-shell--generation)))
        (with-current-buffer origin
-         (unless ssh (opencode-shell-async-pause-runtime key))
+         (if ssh
+             (opencode-shell--ssh-disconnected
+              (or opencode-shell--profile (opencode-shell--default-profile)))
+           (opencode-shell-async-pause-runtime key))
          (when error-callback
            (opencode-shell-async-enqueue
             origin (list 'request-error request-id) generation error-callback)))))
@@ -982,7 +987,7 @@ sessions where the receive burst is felt."
 
 (defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params)
   "Fetch large JSON snapshot PATH in a subprocess and call CALLBACK with the
-decoded value on completion, or ERROR-CALLBACK on failure. Falls back to
+decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
 `opencode-shell--request-direct' when the subprocess path is unavailable, so
 `url-retrieve' stubs and non-curl environments keep working unchanged."
   (if (not (opencode-shell--async-fetch-available-p))
@@ -990,26 +995,58 @@ decoded value on completion, or ERROR-CALLBACK on failure. Falls back to
     (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
            (auth (opencode-shell--auth-header profile))
            (header-file (and auth (make-temp-file "opencode-header-")))
-           (buffer (generate-new-buffer " *oc-async-fetch*")))
-      (when header-file
-        (with-temp-file header-file
-          (insert (format "%s: %s\n" (car auth) (cdr auth)))))
-      (make-process
-       :name "opencode-async-fetch" :buffer buffer :noquery t
-       :command (append (list "curl" "-fsS" (opencode-shell--url path params))
-                        (and header-file (list "-H" (concat "@" header-file))))
-       :sentinel
-       (lambda (proc event)
-         (unwind-protect
-             (if (string-prefix-p "finished" event)
-                 (let ((body (with-current-buffer (process-buffer proc)
-                               (buffer-string))))
-                   (condition-case err
-                       (funcall callback (opencode-shell--json-parse-body body))
-                     (error (when error-callback (funcall error-callback)))))
-               (when error-callback (funcall error-callback)))
-           (kill-buffer (process-buffer proc))
-           (when header-file (ignore-errors (delete-file header-file)))))))))
+           (buffer (generate-new-buffer " *oc-async-fetch*"))
+           (settled nil)
+           (proc nil)
+           timer)
+      (cl-labels
+          ((cleanup ()
+             (when (timerp timer) (cancel-timer timer))
+             (when (buffer-live-p buffer) (kill-buffer buffer))
+             (when header-file (ignore-errors (delete-file header-file))))
+           (settle ()
+             (unless settled
+               (setq settled t)
+               (cleanup)))
+           (fail ()
+             (settle)
+             (when error-callback (funcall error-callback))))
+        (condition-case _start-error
+            (progn
+              (when header-file
+                (with-temp-file header-file
+                  (insert (format "%s: %s\n" (car auth) (cdr auth)))))
+              (setq timer
+                    (run-at-time
+                     opencode-shell--url-retrieve-timeout nil
+                     (lambda ()
+                       (when (and proc (process-live-p proc))
+                         (ignore-errors (delete-process proc)))
+                       (fail))))
+              (setq proc
+                    (make-process
+                     :name "opencode-async-fetch" :buffer buffer :noquery t
+                     :command (append (list "curl" "-fsS" (opencode-shell--url path params))
+                                      (and header-file
+                                           (list "-H" (concat "@" header-file))))
+                     :sentinel
+                     (lambda (p _event)
+                       (when (memq (process-status p) '(exit signal failed))
+                         (unless settled
+                           (setq settled t)
+                           (if (and (eq (process-status p) 'exit)
+                                    (zerop (process-exit-status p)))
+                               (condition-case _decode
+                                   (funcall callback
+                                            (opencode-shell--json-parse-body
+                                             (with-current-buffer (process-buffer p)
+                                               (buffer-string))))
+                                 (error (when error-callback
+                                          (funcall error-callback))))
+                             (when error-callback (funcall error-callback)))
+                           (cleanup)))))))
+          (error (fail)))
+        buffer))))
 
 (provide 'opencode-shell-transport)
 ;;; opencode-shell-transport.el ends here
