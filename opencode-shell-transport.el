@@ -762,6 +762,38 @@ that guard."
     (opencode-shell--silence-url-buffer-process response-buffer)
     response-buffer))
 
+(defun opencode-shell--request-direct-async
+    (path origin generation request-id key ssh transport-epoch
+          callback error-callback params)
+  "Fetch PATH in a subprocess and apply CALLBACK under the same guards as
+`opencode-shell--request-direct': generation, buffer liveness, SSH epoch, and
+the deferred keyed application of the parsed value."
+  (opencode-shell--fetch-snapshot-async
+   path
+   (lambda (value)
+     (when (and (not (and ssh (not (= transport-epoch
+                                     (opencode-shell-recovery-epoch key)))))
+                (buffer-live-p origin)
+                (with-current-buffer origin
+                  (= generation opencode-shell--generation)))
+       (with-current-buffer origin
+         (opencode-shell-async-resume-runtime key)
+         (opencode-shell-async-enqueue
+          origin (list 'request request-id) generation
+          (lambda ()
+            (setq opencode-shell--request-error-notified nil)
+            (funcall callback value))))))
+   (lambda ()
+     (when (and (buffer-live-p origin)
+                (with-current-buffer origin
+                  (= generation opencode-shell--generation)))
+       (with-current-buffer origin
+         (unless ssh (opencode-shell-async-pause-runtime key))
+         (when error-callback
+           (opencode-shell-async-enqueue
+            origin (list 'request-error request-id) generation error-callback)))))
+   params))
+
 (defun opencode-shell--request-direct (method path callback &optional body params error-callback)
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
 BODY is JSON encoded, PARAMS are query parameters, and ERROR-CALLBACK is
@@ -792,7 +824,13 @@ called after a transport, status, or decoding failure."
          (quiet-success (opencode-shell--routine-snapshot-path-p path)))
     (when (and opencode-shell-log-requests (not quiet-success))
       (opencode-shell--log "OpenCode API #%d → %s %s" request-id method path))
-    (opencode-shell--url-retrieve-no-query
+    (if (and (equal method "GET")
+             (opencode-shell--large-snapshot-path-p path)
+             (opencode-shell--async-fetch-available-p))
+        (opencode-shell--request-direct-async
+         path origin request-generation request-id key ssh transport-epoch
+         callback error-callback params)
+      (opencode-shell--url-retrieve-no-query
                  (opencode-shell--url path params)
                  (lambda (status)
        (let ((response (current-buffer)))
@@ -885,7 +923,7 @@ called after a transport, status, or decoding failure."
                           origin (list 'request-error request-id)
                            request-generation error-callback))))))))
             (opencode-shell--kill-url-buffer response))))
-     nil t t)))
+     nil t t))))
 ;;;###autoload
 (defun opencode-shell-status (profile)
   "Select PROFILE and report its health and client ownership."
@@ -926,9 +964,21 @@ riskier, slower operation that only applies to profiles with
   (interactive (list (opencode-shell--resolve-or-read-profile opencode-shell--profile)))
   (opencode-shell--restart-service-process (opencode-shell--resolve-or-read-profile profile)))
 
+(defcustom opencode-shell-async-snapshot-fetch nil
+  "When non-nil, fetch large transcript snapshots in a subprocess.
+Keeps the multi-MB `GET /session/:id/message' receive off the main thread by
+running curl out of process and parsing only its finished output.  Off by
+default because it bypasses the `url-retrieve' path; enable it for very large
+sessions where the receive burst is felt."
+  :type 'boolean :group 'opencode-shell)
+
 (defun opencode-shell--async-fetch-available-p ()
   "Return non-nil when the subprocess snapshot fetch path can be used."
-  (executable-find "curl"))
+  (and opencode-shell-async-snapshot-fetch (executable-find "curl")))
+
+(defun opencode-shell--large-snapshot-path-p (path)
+  "Return non-nil when PATH is a large transcript snapshot worth offloading."
+  (and (stringp path) (string-match-p "/session/[^/]+/message\\'" path)))
 
 (defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params)
   "Fetch large JSON snapshot PATH in a subprocess and call CALLBACK with the
@@ -946,7 +996,7 @@ decoded value on completion, or ERROR-CALLBACK on failure. Falls back to
           (insert (format "%s: %s\n" (car auth) (cdr auth)))))
       (make-process
        :name "opencode-async-fetch" :buffer buffer :noquery t
-       :command (append (list "curl" "-sS" (opencode-shell--url path params))
+       :command (append (list "curl" "-fsS" (opencode-shell--url path params))
                         (and header-file (list "-H" (concat "@" header-file))))
        :sentinel
        (lambda (proc event)

@@ -1314,5 +1314,35 @@
       (opencode-shell--fetch-snapshot-async "/x" #'ignore)
       (should fallback))))
 
+(ert-deftest opencode-shell-request-direct-uses-async-fetch-when-enabled ()
+  "With async snapshot fetch enabled, a message GET uses the subprocess path."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell-base-url "http://127.0.0.1:4099")
+    (let ((opencode-shell-async-snapshot-fetch t) (async nil) (url nil))
+      (cl-letf (((symbol-function 'opencode-shell--auth-header) #'ignore)
+                ((symbol-function 'opencode-shell--fetch-snapshot-async)
+                 (lambda (&rest _) (setq async t)))
+                ((symbol-function 'opencode-shell--url-retrieve-no-query)
+                 (lambda (&rest _) (setq url t))))
+        (opencode-shell--request-direct "GET" "/session/x/message" #'ignore)
+        (should async)
+        (should-not url)))))
+
+(ert-deftest opencode-shell-request-direct-uses-url-retrieve-by-default ()
+  "By default a message GET stays on the url-retrieve path."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell-base-url "http://127.0.0.1:4099")
+    (let ((opencode-shell-async-snapshot-fetch nil) (async nil) (url nil))
+      (cl-letf (((symbol-function 'opencode-shell--auth-header) #'ignore)
+                ((symbol-function 'opencode-shell--fetch-snapshot-async)
+                 (lambda (&rest _) (setq async t)))
+                ((symbol-function 'opencode-shell--url-retrieve-no-query)
+                 (lambda (&rest _) (setq url t))))
+        (opencode-shell--request-direct "GET" "/session/x/message" #'ignore)
+        (should url)
+        (should-not async)))))
+
 (provide 'opencode-shell-transport-test)
 ;;; opencode-shell-transport-test.el ends here
