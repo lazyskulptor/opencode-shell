@@ -1004,13 +1004,10 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
              (when (timerp timer) (cancel-timer timer))
              (when (buffer-live-p buffer) (kill-buffer buffer))
              (when header-file (ignore-errors (delete-file header-file))))
-           (settle ()
+           (finalize (thunk)
              (unless settled
                (setq settled t)
-               (cleanup)))
-           (fail ()
-             (settle)
-             (when error-callback (funcall error-callback))))
+               (unwind-protect (funcall thunk) (cleanup)))))
         (condition-case _start-error
             (progn
               (when header-file
@@ -1020,9 +1017,11 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                     (run-at-time
                      opencode-shell--url-retrieve-timeout nil
                      (lambda ()
-                       (when (and proc (process-live-p proc))
-                         (ignore-errors (delete-process proc)))
-                       (fail))))
+                       (finalize
+                        (lambda ()
+                          (when (and proc (process-live-p proc))
+                            (ignore-errors (delete-process proc)))
+                          (when error-callback (funcall error-callback)))))))
               (setq proc
                     (make-process
                      :name "opencode-async-fetch" :buffer buffer :noquery t
@@ -1032,20 +1031,19 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                      :sentinel
                      (lambda (p _event)
                        (when (memq (process-status p) '(exit signal failed))
-                         (unless settled
-                           (setq settled t)
-                           (if (and (eq (process-status p) 'exit)
-                                    (zerop (process-exit-status p)))
-                               (condition-case _decode
-                                   (funcall callback
-                                            (opencode-shell--json-parse-body
-                                             (with-current-buffer (process-buffer p)
-                                               (buffer-string))))
-                                 (error (when error-callback
-                                          (funcall error-callback))))
-                             (when error-callback (funcall error-callback)))
-                           (cleanup)))))))
-          (error (fail)))
+                         (finalize
+                          (lambda ()
+                            (if (and (eq (process-status p) 'exit)
+                                     (zerop (process-exit-status p)))
+                                (condition-case _decode
+                                    (funcall callback
+                                             (opencode-shell--json-parse-body
+                                              (with-current-buffer (process-buffer p)
+                                                (buffer-string))))
+                                  (error (when error-callback
+                                           (funcall error-callback))))
+                              (when error-callback (funcall error-callback))))))))))
+          (error (finalize (lambda () (when error-callback (funcall error-callback))))))
         buffer))))
 
 (provide 'opencode-shell-transport)

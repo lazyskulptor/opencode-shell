@@ -102,11 +102,14 @@ Optionally (`opencode-shell-async-snapshot-fetch`, off by default), the full
 its multi-MB receive stays off the main thread; the finished body is then parsed
 and applied under the same generation, buffer-liveness, and SSH-epoch guards as
 the `url-retrieve' path (failures mirror its SSH/epoch handling), which remains
-the default and the stub-compatible fallback. The subprocess path settles exactly
-once on a terminal process status (not a raw event string), bounds the request
-with `opencode-shell--url-retrieve-timeout` (killing a hung process and cleaning
-its buffer and header temp file), and cleans up the same resources when the
-process cannot be started. The body parse itself still runs on the main thread
+the default and the stub-compatible fallback. The subprocess path claims its
+single terminal transition exactly once — whether from a terminal process status
+(not a raw event string) or the request deadline — and delivers its callback only
+to the first claimer, so a timeout plus a later sentinel cannot double-report.
+It bounds the request with `opencode-shell--url-retrieve-timeout` (killing a hung
+process and cleaning its buffer and header temp file), cleans up the same
+resources when the process cannot be started, and runs cleanup even if a terminal
+callback signals. The body parse itself still runs on the main thread
 (subprocess-side compaction is a further, optional optimization).
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
