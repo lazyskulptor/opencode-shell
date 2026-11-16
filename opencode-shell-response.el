@@ -28,6 +28,23 @@
     (setf (alist-get key copy) value)
     copy))
 
+(defconst opencode-shell-response--bulk-state-keys
+  '("input" "raw" "diff" "patch" "attachments")
+  "Tool state fields never rendered and dropped from cached parts.")
+
+(defun opencode-shell-response--compact-metadata (metadata)
+  "Return METADATA reduced to short scalar entries.
+Nested structures and long strings (e.g. a task's child `summary') are never
+rendered; dropping them bounds memory and every later scan of the part."
+  (if (not (listp metadata))
+      metadata
+    (seq-filter (lambda (entry)
+                  (and (consp entry)
+                       (let ((value (cdr entry)))
+                         (or (numberp value) (memq value '(t nil))
+                             (and (stringp value) (<= (length value) 200))))))
+                metadata)))
+
 (defun opencode-shell-response-compact-part (part)
   "Return PART with unrendered bulk tool and reasoning payloads compacted."
   (if (not (listp part))
@@ -46,30 +63,25 @@
              (or (member type '("tool" "tool_use" "tool-result" "tool-invocation"))
                  (opencode-shell-response--get part 'tool)))
         (let* ((output (opencode-shell-response--get state 'output))
-               (trimmed-output (if (and (stringp output) (> (length output) 500))
-                                   (substring output 0 500)
-                                 output))
-               (has-bloat (or (seq-some (lambda (entry)
-                                          (and (consp entry)
-                                               (member (format "%s" (car entry))
-                                                       '("input" "raw" "diff" "patch" "attachments"))))
-                                        state)
-                              (not (eq output trimmed-output)))))
-          (if (not has-bloat)
+               (metadata (opencode-shell-response--get state 'metadata))
+               (compact-metadata (opencode-shell-response--compact-metadata metadata))
+               (compact-state
+                (delq nil
+                      (mapcar
+                       (lambda (entry)
+                         (when (consp entry)
+                           (let ((k (format "%s" (car entry))))
+                             (cond
+                              ((member k opencode-shell-response--bulk-state-keys) nil)
+                              ((and (equal k "output") (stringp output)
+                                    (> (length output) 500))
+                               (cons (car entry) (substring output 0 500)))
+                              ((equal k "metadata") (cons (car entry) compact-metadata))
+                              (t entry)))))
+                       state))))
+          (if (equal compact-state state)
               part
-            (let ((compact-state
-                   (delq nil
-                         (mapcar (lambda (entry)
-                                   (when (consp entry)
-                                     (let ((k (format "%s" (car entry))))
-                                       (cond
-                                        ((member k '("input" "raw" "diff" "patch" "attachments"))
-                                         nil)
-                                        ((equal k "output")
-                                         (cons (car entry) trimmed-output))
-                                        (t entry)))))
-                                 state))))
-              (opencode-shell-response--replace-field part 'state compact-state)))))
+            (opencode-shell-response--replace-field part 'state compact-state))))
        (t part)))))
 
 (defun opencode-shell-response-compact-envelope (envelope)

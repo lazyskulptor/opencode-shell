@@ -5830,6 +5830,64 @@ against every turn's huge output, O(ids*turns*payload), which froze Emacs."
         (funcall ack nil)
         (should (= resyncs 1))))))
 
+(ert-deftest opencode-shell-periodic-reconcile-skips-messages-when-sse-connected ()
+  "Periodic reconciliation must not re-fetch the full message history while SSE
+is live; it reconciles only cheap resources. On SSE fallback it does the full
+authoritative resync."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "s"
+                opencode-shell--profile '(:name "t" :base-url "http://127.0.0.1:4099"))
+    (let ((connected t) (full-resyncs 0) (cheap 0) captured-cb)
+      (cl-letf (((symbol-function 'opencode-shell-async-subscribe-runtime)
+                 (lambda (_k _b _u _h _sse _pi callback &rest _)
+                   (setq captured-cb callback) nil))
+                ((symbol-function 'opencode-shell-async-subscribe-animation) #'ignore)
+                ((symbol-function 'opencode-shell-recovery-offline-p) #'ignore)
+                ((symbol-function 'opencode-shell--log-lifecycle) #'ignore)
+                ((symbol-function 'opencode-shell-async-sse-connected-p)
+                 (lambda (_k) connected))
+                ((symbol-function 'opencode-shell--initial-hydration-complete-p)
+                 (lambda () t))
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf full-resyncs)))
+                ((symbol-function 'opencode-shell--reconcile-cheap)
+                 (lambda () (cl-incf cheap))))
+        (opencode-shell--start-polling)
+        (should captured-cb)
+        (funcall captured-cb)
+        (should (= cheap 1))
+        (should (= full-resyncs 0))
+        (setq connected nil)
+        (funcall captured-cb)
+        (should (= full-resyncs 1))))))
+
+(ert-deftest opencode-shell-event-message-reconcile-uses-cheap-when-sse-connected ()
+  "A message-scoped event reconciliation relies on SSE deltas instead of a full
+message re-fetch while SSE is connected; it re-fetches when disconnected."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id "s"
+                opencode-shell--runtime-key "k"
+                opencode-shell--generation 1)
+    (let ((connected t) (full-resyncs 0) (cheap 0))
+      (cl-letf (((symbol-function 'opencode-shell-async-sse-connected-p)
+                 (lambda (_k) connected))
+                ((symbol-function 'opencode-shell--initial-hydration-complete-p)
+                 (lambda () t))
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf full-resyncs)))
+                ((symbol-function 'opencode-shell--reconcile-cheap)
+                 (lambda () (cl-incf cheap)))
+                ((symbol-function 'opencode-shell-async-enqueue)
+                 (lambda (_buf _key _gen fn &rest _) (funcall fn))))
+        (opencode-shell--schedule-event-reconciliation 'messages)
+        (should (= cheap 1))
+        (should (= full-resyncs 0))
+        (setq connected nil)
+        (opencode-shell--schedule-event-reconciliation 'messages)
+        (should (= full-resyncs 1))))))
+
 (ert-deftest opencode-shell-flush-render-without-dirty-turns-skips-completed-turns ()
   "Bringing a dirty hidden buffer forward without turn diffs skips completed turns."
   (with-temp-buffer

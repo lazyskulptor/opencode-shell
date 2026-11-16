@@ -1969,6 +1969,19 @@ polluting the user's undo history."
   (setq opencode-shell--runtime-key nil)
   (opencode-shell--log-lifecycle "poll-stop" t))
 
+(defun opencode-shell--reconcile-cheap ()
+  "Reconcile cheap polling resources without re-fetching the message history.
+Messages stay current through validated SSE deltas; the full history is fetched
+only on initial hydration, reconnect, SSE fallback, or an explicit resync.
+This is the periodic/event reconciliation path while SSE is live: fetching a
+large transcript snapshot every tick is the dominant freeze on big sessions."
+  (opencode-shell--guarded-request
+   'permissions "GET" "/permission"
+   (lambda (items) (opencode-shell--receive-permissions items t))
+   nil #'opencode-shell--consume-permission-refresh-pending)
+  (opencode-shell--refresh-questions)
+  (opencode-shell--refresh-descendant-status))
+
 (defun opencode-shell--start-polling ()
   "Start periodic network polling and UI animation if needed."
   (unless opencode-shell--runtime-key
@@ -1989,7 +2002,11 @@ polluting the user's undo history."
                 ;; authoritative fallback when SSE drops.
                 (opencode-shell--profile-sse-eligible-p profile)
                 opencode-shell-poll-interval
-                (lambda () (opencode-shell--resync nil))
+                (lambda ()
+                  (if (and (opencode-shell-async-sse-connected-p key)
+                           (opencode-shell--initial-hydration-complete-p))
+                      (opencode-shell--reconcile-cheap)
+                    (opencode-shell--resync nil)))
                 (lambda (event)
                   (when opencode-shell-log-requests
                     (opencode-shell--log "OpenCode async %s" event)))
@@ -2570,11 +2587,19 @@ Return a plist containing affected turns and whether a full render is required."
              (opencode-shell--turn-terminal-error turn))))
 
 (defun opencode-shell--schedule-event-reconciliation (&optional resource)
-  "Coalesce an authoritative snapshot reconciliation for RESOURCE."
-  (let ((resource (or resource 'all)))
+  "Coalesce an authoritative snapshot reconciliation for RESOURCE.
+When RESOURCE is messages and SSE is live, reconcile only cheap resources; the
+full message history is fetched on reconnect, fallback, or explicit resync."
+  (let* ((resource (or resource 'all))
+         (cheap (and (eq resource 'messages)
+                     (opencode-shell--initial-hydration-complete-p)
+                     (opencode-shell-async-sse-connected-p
+                      opencode-shell--runtime-key))))
     (opencode-shell-async-enqueue
      (current-buffer) (list 'event-reconcile resource) opencode-shell--generation
-     #'opencode-shell--resync nil resource)))
+     (if cheap
+         #'opencode-shell--reconcile-cheap
+       (lambda () (opencode-shell--resync nil resource))))))
 
 (defun opencode-shell--apply-message-event (event)
   "Apply validated message EVENT locally, returning non-nil on success."
@@ -2917,47 +2942,54 @@ Sessions already anchored keep their first-seen turn."
       (unless (assoc id opencode-shell--descendant-session-anchors)
         (push (cons id anchor) opencode-shell--descendant-session-anchors)))))
 
-(defun opencode-shell--value-mentions-string-p (value needle)
-  "Return non-nil when any string leaf in VALUE matches regexp NEEDLE."
+(defun opencode-shell--string-leaves (value)
+  "Return every string leaf in VALUE, a parsed JSON alist, list, or vector."
   (cond
-   ((stringp value)
-    (numberp (string-match-p needle value)))
+   ((stringp value) (list value))
    ((consp value)
-    (let (found)
-      (while (and (consp value) (not found))
-        (setq found (opencode-shell--value-mentions-string-p (car value) needle)
-              value (cdr value)))
-      (or found
-          (and value (opencode-shell--value-mentions-string-p value needle)))))
+    (nconc (opencode-shell--string-leaves (car value))
+           (opencode-shell--string-leaves (cdr value))))
    ((vectorp value)
-    (seq-some (lambda (item)
-                (opencode-shell--value-mentions-string-p item needle))
-              value))))
+    (mapcan #'opencode-shell--string-leaves (append value nil)))))
+
+(defvar-local opencode-shell--spawn-haystacks nil
+  "Weak `eq' cache of TURN to (PARTS . TEXT) used for subagent anchoring.")
+
+(defun opencode-shell--turn-spawn-haystack (turn)
+  "Return TURN's searchable task-tool text, cached until its parts change.
+The spawned child id lives in the small `metadata' sub-object (e.g.
+`sessionId') or the `<task id=...>' header at the start of `output'.  Only
+those bounded fields are collected, once per parts revision, so anchoring
+every subagent against every turn is a cheap `string-search' instead of a
+per-(id, turn) walk and regexp over the part payloads."
+  (unless (hash-table-p opencode-shell--spawn-haystacks)
+    (setq opencode-shell--spawn-haystacks
+          (make-hash-table :test #'eq :weakness 'key)))
+  (let ((parts (opencode-shell--turn-parts turn))
+        (cached (gethash turn opencode-shell--spawn-haystacks)))
+    (if (and cached (eq (car cached) parts))
+        (cdr cached)
+      (let (chunks)
+        (dolist (part parts)
+          (let ((model (opencode-shell-response-normalize-part part)))
+            (when (and (eq (plist-get model :kind) 'tool)
+                       (member (plist-get model :name) '("task" nil)))
+              (when-let ((state (opencode-shell-response--get part 'state)))
+                (let ((output (opencode-shell-response--get state 'output)))
+                  (setq chunks
+                        (nconc chunks
+                               (opencode-shell--string-leaves
+                                (opencode-shell-response--get state 'metadata))
+                               (and (stringp output)
+                                    (list (substring output 0
+                                                     (min 500 (length output))))))))))))
+        (let ((text (mapconcat #'identity chunks "\n")))
+          (puthash turn (cons parts text) opencode-shell--spawn-haystacks)
+          text)))))
 
 (defun opencode-shell--turn-spawned-session-p (turn session-id)
-  "Return non-nil when TURN holds a tool call referencing SESSION-ID.
-The spawning tool call carries the child id in its retained part state;
-substring-matching the opaque id is robust to the exact payload shape."
-  (let ((needle (regexp-quote session-id)))
-    (seq-some
-     (lambda (part)
-       (let ((model (opencode-shell-response-normalize-part part)))
-         (and (eq (plist-get model :kind) 'tool)
-              (member (plist-get model :name) '("task" nil))
-              (when-let ((state (opencode-shell-response--get part 'state)))
-                ;; The spawned child id lives in the small `metadata' sub-object
-                ;; (e.g. `sessionId') or the `<task id=...>' header at the very
-                ;; start of `output'.  Scanning the whole state would also walk
-                ;; the task's multi-KB `output'/`input' body for every
-                ;; (id, turn) pair -- O(ids*turns*payload) -- which hangs Emacs
-                ;; on large sessions with many subagents.  Bound both.
-                (let* ((metadata (opencode-shell-response--get state 'metadata))
-                       (output (opencode-shell-response--get state 'output))
-                       (head (and (stringp output)
-                                  (substring output 0 (min 500 (length output))))))
-                  (or (opencode-shell--value-mentions-string-p metadata needle)
-                      (and head (numberp (string-match-p needle head)))))))))
-     (opencode-shell--turn-parts turn))))
+  "Return non-nil when TURN holds a task tool call referencing SESSION-ID."
+  (and (string-search session-id (opencode-shell--turn-spawn-haystack turn)) t))
 
 (defun opencode-shell--compute-descendant-anchor-map ()
   "Return an alist of known subagent id to the turn id it renders under.

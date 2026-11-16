@@ -542,6 +542,46 @@
         (should (opencode-shell--turn-spawned-session-p turn "child-sess-1"))
         (should (<= (length (or (opencode-shell--get reasoning-part 'text) "")) 256))))))
 
+(ert-deftest opencode-shell-anchor-map-scans-each-turn-once-and-bounds-metadata ()
+  "Initial hydration with many subagents must not rescan parts per (id, turn).
+Regression: every full render re-normalized and regexp-walked every task part
+for every known subagent id, freezing Emacs for seconds on large sessions."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "s")
+    (let ((messages nil))
+      (dotimes (i 20)
+        (let ((uid (format "u%d" i)) (aid (format "a%d" i)))
+          (push `((info . ((id . ,uid) (sessionID . "s") (role . "user")))
+                  (parts . (((id . ,(concat uid "p")) (type . "text") (text . "go")))))
+                messages)
+          (push `((info . ((id . ,aid) (sessionID . "s") (role . "assistant")
+                           (parentID . ,uid)))
+                  (parts . (((id . ,(concat aid "t")) (type . "tool") (tool . "task")
+                             (state . ((status . "running")
+                                       (metadata . ((sessionId . ,(format "child-%d" i))
+                                                    (summary . ,(make-string 5000 ?s))))))))))
+                messages)))
+      (opencode-shell--render-messages (nreverse messages) 1)
+      (let* ((part (car (opencode-shell--get
+                         (gethash "a3" opencode-shell--message-envelopes) 'parts)))
+             (metadata (opencode-shell--get (opencode-shell--get part 'state) 'metadata)))
+        (should (equal (opencode-shell--get metadata 'sessionId) "child-3"))
+        (should-not (opencode-shell--get metadata 'summary)))
+      (setq opencode-shell--known-descendant-session-ids
+            (mapcar (lambda (i) (format "child-%d" i)) (number-sequence 0 19)))
+      (let ((normalized 0)
+            (original (symbol-function 'opencode-shell-response-normalize-part)))
+        (cl-letf (((symbol-function 'opencode-shell-response-normalize-part)
+                   (lambda (part) (cl-incf normalized) (funcall original part))))
+          (let ((map (opencode-shell--compute-descendant-anchor-map)))
+            (should (equal (cdr (assoc "child-7" map))
+                           (opencode-shell--turn-id (nth 7 opencode-shell--turns)))))
+          (should (<= normalized 20))
+          (setq normalized 0)
+          (opencode-shell--compute-descendant-anchor-map)
+          (should (zerop normalized)))))))
+
 (ert-deftest opencode-shell-event-resets-idle-flag-on-new-turn-and-attaches-early-assistant ()
   (with-temp-buffer
     (opencode-shell-mode)
