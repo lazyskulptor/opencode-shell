@@ -95,6 +95,13 @@ without a manual resync. Initial hydration, reconnect, fallback-with-changes, an
 explicit resync always fetch the full snapshot; unsupported events keep an
 immediate full recovery. Re-fetching a large transcript every tick is the freeze
 this avoids.
+Optionally (`opencode-shell-async-snapshot-fetch`, off by default), the full
+`GET /session/:id/message' fetch for a change is run in a `curl' subprocess so
+its multi-MB receive stays off the main thread; the finished body is then parsed
+and applied under the same generation, buffer-liveness, and SSH-epoch guards as
+the `url-retrieve' path, which remains the default and the stub-compatible
+fallback. The body parse itself still runs on the main thread (subprocess-side
+compaction is a further, optional optimization).
 The final unsubscribe,
 buffer cleanup, package reload, and server restart cancel pending idle jobs,
 timers, requests where possible, and stream processes.
