@@ -926,5 +926,40 @@ riskier, slower operation that only applies to profiles with
   (interactive (list (opencode-shell--resolve-or-read-profile opencode-shell--profile)))
   (opencode-shell--restart-service-process (opencode-shell--resolve-or-read-profile profile)))
 
+(defun opencode-shell--async-fetch-available-p ()
+  "Return non-nil when the subprocess snapshot fetch path can be used."
+  (executable-find "curl"))
+
+(defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params)
+  "Fetch large JSON snapshot PATH in a subprocess and call CALLBACK with the
+decoded value on completion, or ERROR-CALLBACK on failure. Falls back to
+`opencode-shell--request-direct' when the subprocess path is unavailable, so
+`url-retrieve' stubs and non-curl environments keep working unchanged."
+  (if (not (opencode-shell--async-fetch-available-p))
+      (opencode-shell--request-direct "GET" path callback nil params error-callback)
+    (let* ((profile (or opencode-shell--profile (opencode-shell--default-profile)))
+           (auth (opencode-shell--auth-header profile))
+           (header-file (and auth (make-temp-file "opencode-header-")))
+           (buffer (generate-new-buffer " *oc-async-fetch*")))
+      (when header-file
+        (with-temp-file header-file
+          (insert (format "%s: %s\n" (car auth) (cdr auth)))))
+      (make-process
+       :name "opencode-async-fetch" :buffer buffer :noquery t
+       :command (append (list "curl" "-sS" (opencode-shell--url path params))
+                        (and header-file (list "-H" (concat "@" header-file))))
+       :sentinel
+       (lambda (proc event)
+         (unwind-protect
+             (if (string-prefix-p "finished" event)
+                 (let ((body (with-current-buffer (process-buffer proc)
+                               (buffer-string))))
+                   (condition-case err
+                       (funcall callback (opencode-shell--json-parse-body body))
+                     (error (when error-callback (funcall error-callback)))))
+               (when error-callback (funcall error-callback)))
+           (kill-buffer (process-buffer proc))
+           (when header-file (ignore-errors (delete-file header-file)))))))))
+
 (provide 'opencode-shell-transport)
 ;;; opencode-shell-transport.el ends here

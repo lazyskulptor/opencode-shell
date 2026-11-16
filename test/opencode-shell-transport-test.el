@@ -1283,5 +1283,36 @@
         (should (equal decoded-value '(((id . "p1")))))))))
 
 
+(ert-deftest opencode-shell-async-fetch-calls-callback-on-finished ()
+  "The subprocess snapshot fetch decodes finished stdout and calls the callback."
+  (let (sentinel result buf)
+    (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+               (lambda () t))
+              ((symbol-function 'opencode-shell--url)
+               (lambda (&rest _) "http://x/message"))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq sentinel (plist-get args :sentinel)
+                       buf (plist-get args :buffer))
+                 (list 'proc)))
+              ((symbol-function 'process-buffer) (lambda (_p) buf)))
+      (opencode-shell--fetch-snapshot-async "/x"
+                                            (lambda (value) (setq result value))
+                                            #'ignore)
+      (should sentinel)
+      (with-current-buffer buf (insert "{\"a\":1}"))
+      (funcall sentinel 'proc "finished\n")
+      (should (equal result '((a . 1)))))))
+
+(ert-deftest opencode-shell-async-fetch-falls-back-when-unavailable ()
+  "Without curl, the async fetch defers to the synchronous request-direct path."
+  (let (fallback)
+    (cl-letf (((symbol-function 'opencode-shell--async-fetch-available-p)
+               (lambda () nil))
+              ((symbol-function 'opencode-shell--request-direct)
+               (lambda (&rest _) (setq fallback t))))
+      (opencode-shell--fetch-snapshot-async "/x" #'ignore)
+      (should fallback))))
+
 (provide 'opencode-shell-transport-test)
 ;;; opencode-shell-transport-test.el ends here
