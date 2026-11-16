@@ -31,6 +31,7 @@
 (require 'opencode-shell-state)
 (require 'opencode-shell-interaction)
 (require 'opencode-shell-response)
+(require 'opencode-shell-messages)
 (require 'opencode-shell-recovery)
 (require 'opencode-shell-transport)
 
@@ -2084,70 +2085,6 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                                (opencode-shell--get part 'text)))
                             (opencode-shell--get envelope 'parts))) ""))
 
-(defun opencode-shell--part-id (part)
-  "Return PART's stable identity, when available."
-  (or (opencode-shell--get part 'id)
-      (opencode-shell--get part 'callID)
-      (opencode-shell--get part 'callId)))
-
-(defun opencode-shell--copy-alist-spine (alist)
-  "Return a shallow copy of ALIST and its top-level cons cells."
-  (mapcar (lambda (entry)
-            (if (consp entry) (cons (car entry) (cdr entry)) entry))
-          alist))
-
-(defun opencode-shell--merge-alist (known incoming)
-  "Return KNOWN alist with fields present in INCOMING replaced."
-  (let ((result (opencode-shell--copy-alist-spine known)))
-    (dolist (field incoming result)
-      (setf (alist-get (car field) result) (cdr field)))))
-
-(defun opencode-shell--merge-parts (known incoming)
-  "Merge INCOMING message parts into KNOWN without dropping omitted parts."
-  (if (null incoming)
-      (copy-sequence known)
-    (let* ((result (copy-sequence known))
-           (tail (last result))
-           (cells-by-id (make-hash-table :test #'equal)))
-      (let ((cursor result))
-        (while cursor
-          (when-let ((id (opencode-shell--part-id (car cursor))))
-            (puthash id cursor cells-by-id))
-          (setq cursor (cdr cursor))))
-      (dolist (part incoming result)
-        (let* ((id (opencode-shell--part-id part))
-               (cell (and id (gethash id cells-by-id))))
-          (if cell
-              (setcar cell (opencode-shell--merge-alist (car cell) part))
-            (let ((new-cell (list part)))
-              (if tail
-                  (progn
-                    (setcdr tail new-cell)
-                    (setq tail new-cell))
-                (setq result new-cell
-                      tail new-cell))
-              (when id
-                (puthash id new-cell cells-by-id)))))))))
-
-(defun opencode-shell--merge-envelope (known incoming)
-  "Merge partial assistant envelope INCOMING into KNOWN."
-  (let* ((merged (opencode-shell--copy-alist-spine incoming))
-         (known-info (opencode-shell--get known 'info))
-         (incoming-info (opencode-shell--get incoming 'info))
-         (info (if (eq known-info incoming-info)
-                   known-info
-                 (opencode-shell--merge-alist known-info incoming-info))))
-    (when (and (not (eq known-info incoming-info))
-               (or (assq 'time known-info) (assq 'time incoming-info)))
-      (setf (alist-get 'time info)
-            (opencode-shell--merge-alist (opencode-shell--get known-info 'time)
-                                         (opencode-shell--get incoming-info 'time))))
-    (setf (alist-get 'info merged) info)
-    (setf (alist-get 'parts merged)
-          (opencode-shell--merge-parts (opencode-shell--get known 'parts)
-                                       (opencode-shell--get incoming 'parts)))
-    merged))
-
 (defun opencode-shell--message-error-label (info)
   "Return a bounded, single-line human-readable label for INFO's terminal
 error, or nil."
@@ -2433,10 +2370,6 @@ spawning tool call for the first time trigger one, without adding a
         (opencode-shell--settle-superseded-turns result)
         (setq opencode-shell--normalized-changed-turns (nreverse changed))
         result))))
-
-(defun opencode-shell--message-envelope-id (envelope)
-  "Return ENVELOPE's stable message ID."
-  (opencode-shell--get (opencode-shell--get envelope 'info) 'id))
 
 (defun opencode-shell--compact-part (part)
   "Drop unrendered bulk payloads from PART while preserving metadata."
