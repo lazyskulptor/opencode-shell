@@ -42,15 +42,6 @@
   "OpenCode server base URL."
   :type 'string :group 'opencode-shell)
 
-(defcustom opencode-shell-recent-locations-file
-  (locate-user-emacs-file "opencode-shell-locations.eld")
-  "File used to persist recently opened session browser locations."
-  :type 'file :group 'opencode-shell)
-
-(defcustom opencode-shell-session-directory-overrides-file
-  (locate-user-emacs-file "opencode-shell-session-directories.eld")
-  "File used to persist client-side session directory moves."
-  :type 'file :group 'opencode-shell)
 
 (defcustom opencode-shell-auth-function nil
   "Optional function returning an Authorization header value or nil.
@@ -652,50 +643,6 @@ web UI.  Nil (unknown) is conservative and keeps the original behavior.")
 (defvar-local opencode-shell--table-rerendering nil)
 (defvar-local opencode-shell--table-layout-timer nil)
 (defvar opencode-shell--generation-counter 0)
-(defun opencode-shell--load-recent-session-locations ()
-  "Read persisted session browser locations, returning nil on failure."
-  (condition-case nil
-      (when (file-readable-p opencode-shell-recent-locations-file)
-        (with-temp-buffer
-          (insert-file-contents opencode-shell-recent-locations-file)
-          (let ((value (read (current-buffer))))
-            (and (listp value) value))))
-    (error nil)))
-
-(defun opencode-shell--save-recent-session-locations ()
-  "Persist recently opened session browser locations."
-  (make-directory (file-name-directory opencode-shell-recent-locations-file) t)
-  (with-temp-file opencode-shell-recent-locations-file
-    (let ((print-length nil) (print-level nil))
-      (prin1 opencode-shell--recent-session-locations (current-buffer))
-      (insert "\n"))))
-
-(defvar opencode-shell--recent-session-locations
-  (opencode-shell--load-recent-session-locations)
-  "Persisted session browser locations opened by OpenCode Shell.")
-
-(defun opencode-shell--load-session-directory-overrides ()
-  "Read persisted session directory overrides, returning nil on failure."
-  (condition-case nil
-      (when (file-readable-p opencode-shell-session-directory-overrides-file)
-        (with-temp-buffer
-          (insert-file-contents opencode-shell-session-directory-overrides-file)
-          (let ((value (read (current-buffer))))
-            (and (listp value) value))))
-    (error nil)))
-
-(defun opencode-shell--save-session-directory-overrides ()
-  "Persist client-side session directory overrides."
-  (make-directory (file-name-directory
-                   opencode-shell-session-directory-overrides-file) t)
-  (with-temp-file opencode-shell-session-directory-overrides-file
-    (let ((print-length nil) (print-level nil))
-      (prin1 opencode-shell--session-directory-overrides (current-buffer))
-      (insert "\n"))))
-
-(defvar opencode-shell--session-directory-overrides
-  (opencode-shell--load-session-directory-overrides)
-  "Persisted directory overrides keyed by profile identity and session ID.")
 (defvar-local opencode-shell--filter "")
 
 (defface opencode-shell-user-face
