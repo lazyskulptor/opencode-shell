@@ -5910,6 +5910,24 @@ history is re-fetched at most every fallback-resync-interval."
         (should (= cheap 1))
         (should (= full-resyncs 1))))))
 
+(ert-deftest opencode-shell-turn-state-signature-caches-normalized-parts ()
+  "Repeated signatures for an unchanged turn must not re-normalize its parts."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let* ((turn (opencode-shell--make-turn :id "t" :user "q" :assistant "a"
+                                            :status 'complete))
+           (calls 0)
+           (orig (symbol-function 'opencode-shell-response-normalize-part)))
+      (setf (opencode-shell--turn-parts turn)
+            '(((id . "p1") (type . "text") (text . "hi"))))
+      (cl-letf (((symbol-function 'opencode-shell-response-normalize-part)
+                 (lambda (part) (cl-incf calls) (funcall orig part))))
+        (opencode-shell--turn-state-signature turn)
+        (let ((first calls))
+          (should (>= first 1))
+          (opencode-shell--turn-state-signature turn)
+          (should (= calls first)))))))
+
 (ert-deftest opencode-shell-flush-render-without-dirty-turns-skips-completed-turns ()
   "Bringing a dirty hidden buffer forward without turn diffs skips completed turns."
   (with-temp-buffer

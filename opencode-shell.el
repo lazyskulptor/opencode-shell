@@ -2574,6 +2574,25 @@ Return a plist containing affected turns and whether a full render is required."
       (opencode-shell--settle-superseded-turns opencode-shell--turns)
       turn)))
 
+(defvar-local opencode-shell--normalized-parts-cache nil
+  "Weak `eq' table: TURN -> (PARTS . normalized-parts), keyed by parts identity.")
+
+(defun opencode-shell--normalized-parts (turn)
+  "Return TURN's parts normalized, caching the projection by parts identity.
+`opencode-shell--aggregate-turn' replaces `opencode-shell--turn-parts' with a
+fresh list on each recompute, so an unchanged turn reuses its cached projection
+instead of re-normalizing every part on each signature/display-cache probe."
+  (unless (hash-table-p opencode-shell--normalized-parts-cache)
+    (setq opencode-shell--normalized-parts-cache
+          (make-hash-table :test 'eq :weakness 'key)))
+  (let* ((parts (opencode-shell--turn-parts turn))
+         (cached (gethash turn opencode-shell--normalized-parts-cache)))
+    (if (and cached (eq (car cached) parts))
+        (cdr cached)
+      (let ((normalized (mapcar #'opencode-shell-response-normalize-part parts)))
+        (puthash turn (cons parts normalized) opencode-shell--normalized-parts-cache)
+        normalized))))
+
 (defun opencode-shell--turn-state-signature (turn)
   "Return TURN state that can affect transcript presentation."
   (and turn
@@ -2581,8 +2600,7 @@ Return a plist containing affected turns and whether a full render is required."
              (opencode-shell--turn-server-user-id turn)
              (opencode-shell--turn-user turn)
              (opencode-shell--turn-assistant turn)
-             (mapcar #'opencode-shell-response-normalize-part
-                     (opencode-shell--turn-parts turn))
+             (opencode-shell--normalized-parts turn)
              (opencode-shell--turn-status turn)
              (opencode-shell--turn-acknowledged turn)
              (opencode-shell--turn-locally-settled turn)
