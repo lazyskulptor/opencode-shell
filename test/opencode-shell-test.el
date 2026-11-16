@@ -5879,6 +5879,20 @@ a full resync before hydration completes."
         (funcall captured-cb)
         (should (= full 1))))))
 
+(ert-deftest opencode-shell-reconcile-quiet-no-session-id-skips-probe ()
+  "Without a session id, quiet reconciliation must not probe `/session/<nil>'."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq-local opencode-shell--session-id nil)
+    (let ((session-probes 0))
+      (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (_key _method path _callback &rest _)
+                   (when (string-match-p "/session/" path) (cl-incf session-probes))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore))
+        (opencode-shell--reconcile-quiet)
+        (should (zerop session-probes))))))
+
 (ert-deftest opencode-shell-turn-state-signature-caches-normalized-parts ()
   "Repeated signatures for an unchanged turn must not re-normalize its parts."
   (with-temp-buffer

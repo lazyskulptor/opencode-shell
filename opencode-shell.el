@@ -1988,21 +1988,21 @@ missed are still recovered automatically without a manual resync."
    nil #'opencode-shell--consume-permission-refresh-pending)
   (opencode-shell--refresh-questions)
   (opencode-shell--refresh-descendant-status)
-  (opencode-shell--guarded-request
-   'session-updated "GET" (format "/session/%s" opencode-shell--session-id)
-   (lambda (session)
-     (let ((updated (opencode-shell--get
-                     (opencode-shell--get session 'time) 'updated)))
-       (when updated
-         (cond
-          ((null opencode-shell--reconciled-session-updated)
-           (setq opencode-shell--reconciled-session-updated updated))
-          ((equal updated opencode-shell--reconciled-session-updated) nil)
-          (t
-           (setq opencode-shell--reconciled-session-updated updated)
-           (unless (opencode-shell--sse-recently-delivered-p)
-             (opencode-shell--resync nil)))))))
-   nil nil))
+  (when opencode-shell--session-id
+    (opencode-shell--guarded-request
+     'session-updated "GET" (format "/session/%s" opencode-shell--session-id)
+     (lambda (session)
+       (let ((updated (opencode-shell--time session)))
+         (when (> updated 0)
+           (cond
+            ((null opencode-shell--reconciled-session-updated)
+             (setq opencode-shell--reconciled-session-updated updated))
+            ((= updated opencode-shell--reconciled-session-updated) nil)
+            (t
+             (setq opencode-shell--reconciled-session-updated updated)
+             (unless (opencode-shell--sse-recently-delivered-p)
+               (opencode-shell--resync nil)))))))
+     nil nil)))
 
 (defun opencode-shell--start-polling ()
   "Start periodic network polling and UI animation if needed."
