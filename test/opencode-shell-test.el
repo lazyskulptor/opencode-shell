@@ -6636,5 +6636,21 @@ migration paths issue no explicit viewport command and still do their work."
             (should (= start (window-start)))
             (should (= position (point)))))))))
 
+(ert-deftest opencode-shell-force-position-identical-card-updates-command-identity ()
+  "Retained characters must not retain a previous question's command payload."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--questions-pending
+          '(((id . "old") (questions . (((question . "same question")))))))
+    (opencode-shell--render-permissions)
+    (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+      (setq opencode-shell--questions-pending
+            '(((id . "new") (questions . (((question . "same question")))))))
+      (opencode-shell--render-permissions)
+      (should (equal before (buffer-substring-no-properties (point-min) (point-max))))
+      (let* ((position (text-property-not-all (point-min) (point-max) 'opencode-shell-question nil))
+             (question (and position (get-text-property position 'opencode-shell-question))))
+        (should (equal (opencode-shell--get question 'id) "new"))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

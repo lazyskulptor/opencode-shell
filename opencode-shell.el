@@ -3773,8 +3773,10 @@ coalesces repeated changes into a single off-hook render."
   "Replace only the changed middle of BEGIN..END with propertized DISPLAY.
 Leave unchanged prefix/suffix characters, and their native position markers,
 in place.  Return non-nil when text changed."
-  (let* ((old (buffer-substring begin end))
+  (let* ((begin (if (markerp begin) (marker-position begin) begin))
+         (old (buffer-substring begin end))
          (old-length (length old)) (new-length (length display))
+         (changed (not (equal-including-properties old display)))
          (prefix 0) (suffix 0))
     (unless (string= old display)
       (while (and (< prefix (min old-length new-length))
@@ -3786,8 +3788,17 @@ in place.  Return non-nil when text changed."
         (cl-incf suffix))
       (goto-char (+ begin prefix))
       (delete-region (point) (- end suffix))
-      (insert-before-markers (substring display prefix (- new-length suffix)))
-      t)))
+      (insert-before-markers (substring display prefix (- new-length suffix))))
+    ;; Equal characters can carry a different question/permission identity or
+    ;; keymap. Refresh properties in place without deleting retained text.
+    (when changed
+      (let ((position 0))
+        (while (< position new-length)
+          (let ((next (next-property-change position display new-length)))
+            (set-text-properties (+ begin position) (+ begin next)
+                                 (text-properties-at position display))
+            (setq position next)))))
+    changed))
 
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
@@ -3893,7 +3904,7 @@ See `opencode-shell-max-rendered-turns'."
                 (+ begin (length (or (opencode-shell--turn-user turn) "")) 1))
     (set-marker (opencode-shell--turn-response-begin turn) (+ begin (length display)))
     (add-text-properties begin (+ begin (length display))
-                         '(read-only t rear-nonsticky (read-only face)))
+                         '(read-only t fontified t rear-nonsticky (read-only face)))
     (opencode-shell--apply-turn-gutter
      turn :user begin (opencode-shell--turn-user-end turn)
      opencode-shell--gutter-glyph-user 'opencode-shell-user-face 'opencode-shell-user-gutter-face)))
