@@ -853,7 +853,8 @@ called after a transport, status, or decoding failure."
       (opencode-shell--url-retrieve-no-query
                  (opencode-shell--url path params)
                  (lambda (status)
-       (let ((response (current-buffer)))
+        (let ((response (current-buffer))
+              (http-status (or (bound-and-true-p url-http-response-status) 0)))
           (unwind-protect
               (unless (and ssh (not (= transport-epoch
                                        (opencode-shell-recovery-epoch key))))
@@ -861,14 +862,11 @@ called after a transport, status, or decoding failure."
                    (when (and (buffer-live-p origin)
                               (with-current-buffer origin
                                 (= request-generation opencode-shell--generation)))
-                    (with-current-buffer origin
+                     (with-current-buffer origin
+                        (when (memq http-status '(401 403))
+                          (opencode-shell--local-recovery-block profile))
                         (opencode-shell--transport-failed
-                         profile
-                         (not (and (not (bound-and-true-p url-http-response-status))
-                                   (or (memq 'connection-failed (and (listp err) err))
-                                       (memq 'connection-reset (and (listp err) err))
-                                       (and (stringp err)
-                                            (string-match-p "request timed out" err))))))
+                         profile (not (opencode-shell--local-transient-error-p err http-status)))
                        (when opencode-shell-log-requests
                           (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
                                               request-id (- (float-time) started) method path))
@@ -885,7 +883,9 @@ called after a transport, status, or decoding failure."
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
                            (when (and (buffer-live-p origin)
-                                      (with-current-buffer origin
+                             (with-current-buffer origin
+                               (when (memq code '(401 403))
+                                 (opencode-shell--local-recovery-block profile))
                                         (= request-generation opencode-shell--generation)))
                             (with-current-buffer origin
                               (when opencode-shell-log-requests
@@ -1002,7 +1002,27 @@ sessions where the receive burst is felt."
                                       opencode-shell-base-url))))
     (and (not (opencode-shell--profile-remote-p profile))
          (equal (url-type url) "http")
-         (member (url-host url) '("localhost" "127.0.0.1" "::1")))))
+         (member (downcase (or (url-host url) "")) '("localhost" "127.0.0.1" "::1" "[::1]")))))
+
+(defun opencode-shell--local-transient-error-p (error status)
+  "Classify transfer ERROR independently of successful response headers STATUS."
+  (and (not (memq status '(401 403)))
+       (or (and (listp error)
+                (seq-some (lambda (kind) (memq kind error))
+                          '(connection-failed connection-reset timeout timed-out)))
+           (and (stringp error) (string-match-p "request timed out" error)))))
+
+(defun opencode-shell--local-recovery-block (profile)
+  "Stop existing local recovery after a nonretryable HTTP result for PROFILE."
+  (when (opencode-shell--local-recovery-profile-p profile)
+    (let* ((key (opencode-shell--server-key profile))
+           (runtime (opencode-shell-async-runtime-get key)))
+      (when runtime
+        (when-let ((cleanup (plist-get runtime :recovery-cleanup))) (funcall cleanup))
+        (unless (plist-member runtime :local-recovery-blocked)
+          (nconc runtime (list :local-recovery-blocked nil)))
+        (setf (plist-get runtime :local-recovery-blocked) t)
+        (opencode-shell-async-pause-runtime key)))))
 
 (defun opencode-shell--transport-resumed (key)
   "Resume KEY, releasing any outstanding local health recovery."
@@ -1072,8 +1092,7 @@ sessions where the receive burst is felt."
                             (if (or (eq reason 'transport)
                                     (and (numberp reason) (<= 500 reason 599)))
                                 (failed)
-                              (setf (plist-get runtime :local-recovery-blocked) t)
-                              (stop))))))))))
+                              (opencode-shell--local-recovery-block profile))))))))))
         (setq cleanup #'stop)
         (setf (plist-get runtime :recovery-cleanup) cleanup)
         (opencode-shell-recovery-mark-offline recovery-key)

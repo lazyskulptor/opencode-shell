@@ -157,7 +157,7 @@ and lifecycle keys."
       (let* ((url (url-generic-parse-url
                    (or (plist-get profile :base-url) opencode-shell-base-url)))
              (host (downcase (or (url-host url) ""))))
-        (not (member host '("" "localhost" "127.0.0.1" "::1"))))))
+        (not (member host '("" "localhost" "127.0.0.1" "::1" "[::1]"))))))
 
 (defun opencode-shell--profile-sse-eligible-p (profile)
   "Return non-nil when PROFILE's /event SSE stream uses a local socket.
@@ -168,7 +168,7 @@ transcript on every poll, the dominant cost on a large session."
   (let* ((url (url-generic-parse-url
                (or (plist-get profile :base-url) opencode-shell-base-url)))
          (host (downcase (or (url-host url) ""))))
-    (and (member host '("" "localhost" "127.0.0.1" "::1")) t)))
+    (and (member host '("" "localhost" "127.0.0.1" "::1" "[::1]")) t)))
 
 (defun opencode-shell--canonical-directory (directory)
   "Return DIRECTORY in canonical directory form without remote I/O."
