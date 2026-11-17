@@ -54,3 +54,23 @@ an older `.elc` can still win when `load-prefer-newer` is nil.
 Every bug fix needs a failing regression. Every module move needs focused unit
 coverage plus existing characterization. Do not weaken assertions to accommodate
 timing or ordering changes.
+
+For local recovery plus stream positioning, run the
+`opencode-shell-acceptance-live-recovery-scroll-` selector. It uses fake transport
+and clock callbacks, but checks changed final text and each real window's native
+start/point against retained text markers. It covers health recovery without a
+manual resync, metadata-only SSE, force/layout, completion, and hidden-buffer
+delivery. In an interactive GUI Emacs the position checks also force redisplay
+before assertions. API-call spies and identical snapshots are not substitutes
+for this changed-stream test. Run the selector in a separate `emacs -Q` instance,
+not against user services or existing private transcript buffers.
+
+On native-comp builds, temporarily redefining primitives such as `make-process`
+can stall while Emacs generates subr trampolines. If that happens, rerun the full
+source/bytecode verification with the test-process-only override:
+
+    make verify EMACS="emacs --eval '(setq native-comp-enable-subr-trampolines nil)'"
+
+This disables only native trampoline generation in that process; it does not
+skip source execution, byte compilation, or compiled ERT. Do not change the
+user's Emacs settings to work around test infrastructure delays.

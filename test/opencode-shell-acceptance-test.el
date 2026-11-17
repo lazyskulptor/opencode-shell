@@ -572,5 +572,165 @@ buffers, and manual navigation still moves point."
       (when (window-live-p other) (delete-window other))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(defun opencode-shell-acceptance--reading-anchor (window)
+  "Capture actual native positions and a text token read in WINDOW."
+  (with-current-buffer (window-buffer window)
+    (let ((position (window-point window)))
+      (list window (copy-marker (window-start window)) (copy-marker position)
+            (buffer-substring-no-properties position (min (point-max) (+ position 10)))))))
+
+(defun opencode-shell-acceptance--check-reading-anchors (anchors selected)
+  "Check native positions and retained text, not merely absence of API calls."
+  (unless noninteractive (redisplay t))
+  (should (eq selected (selected-window)))
+  (dolist (anchor anchors)
+    (pcase-let ((`(,window ,start ,position ,text) anchor))
+      (should (window-live-p window))
+      (should (= start (window-start window)))
+      (should (= position (window-point window)))
+      (with-current-buffer (window-buffer window)
+        (should (equal text (buffer-substring-no-properties
+                             position (min (point-max) (+ position 10)))))))))
+
+(ert-deftest opencode-shell-acceptance-live-recovery-scroll-changed-stream ()
+  "SSE, local recovery, integrity resync and completion retain two reading views."
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *accept-live-recovery*"))
+          (opencode-shell-async--runtimes (make-hash-table :test #'equal))
+          (opencode-shell-recovery--states (make-hash-table :test #'equal))
+          (window (selected-window)) anchors)
+      (unwind-protect
+          (let ((other (split-window window nil 'right)))
+            (set-window-buffer window buffer)
+            (set-window-buffer other buffer)
+            (with-current-buffer buffer
+              (opencode-shell-mode)
+              (let* ((profile (list :name "fixture" :base-url opencode-shell-base-url))
+                     (key (opencode-shell--server-key profile))
+                     (subscribers (make-hash-table :test #'eq))
+                     (runtime (list :subscribers subscribers :paused nil :poll-interval 2))
+                     (snapshot (opencode-shell-acceptance--scroll-long-snapshot 4 t))
+                     (now 100.0) (snapshots 0) retry health)
+                (setq opencode-shell--session-id "fixture"
+                      opencode-shell--profile profile
+                      opencode-shell--runtime-key key)
+                (puthash buffer (list :callback #'ignore) subscribers)
+                (puthash key runtime opencode-shell-async--runtimes)
+                (goto-char opencode-shell--composer-start)
+                (insert "draft")
+                (opencode-shell--render-messages (copy-tree snapshot) 1)
+                ;; Initial hydration normally starts through resync's sequence allocator.
+                (setq opencode-shell--message-request-sequence opencode-shell--message-applied-sequence)
+                (goto-char (opencode-shell--turn-response-begin (car opencode-shell--turns)))
+                (forward-line 2)
+                (set-window-start window (point) t)
+                (forward-line 2)
+                (let ((first-point (point)))
+                  (goto-char (opencode-shell--turn-response-begin (car (last opencode-shell--turns))))
+                  (forward-line 2)
+                  (set-window-start other (point) t)
+                  (forward-line 2)
+                  (set-window-point other (point))
+                  (goto-char first-point))
+                (setq anchors (mapcar #'opencode-shell-acceptance--reading-anchor (list window other)))
+                (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+                          ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                          ((symbol-function 'run-at-time)
+                           (lambda (_delay _repeat callback &rest args)
+                             (setq retry (lambda () (apply callback args))) nil))
+                          ((symbol-function 'opencode-shell--server-ready)
+                           (lambda (_profile callback &rest _) (setq health callback) nil))
+                          ((symbol-function 'opencode-shell--request)
+                           (lambda (_method path callback &rest _)
+                             (cond
+                              ((string-suffix-p "/message" path)
+                               (cl-incf snapshots) (funcall callback (copy-tree snapshot)))
+                              ((equal path "/session/fixture")
+                               (funcall callback '((time . ((updated . 2))))))
+                              (t (funcall callback nil))))))
+                  (opencode-shell--receive-application-event
+                   '(:kind part-delta :type "message.part.delta" :session-id "fixture"
+                     :message-id "a4" :part-id "pa4" :field "text" :delta "\nstream-tail"))
+                  (should opencode-shell-async--queue)
+                  (opencode-shell-async-drain buffer)
+                  (should (string-match-p "stream-tail" (buffer-string)))
+                  (opencode-shell-acceptance--check-reading-anchors anchors window)
+                  ;; The server subsequently has content that was never sent as SSE.
+                  (let ((part (car (alist-get 'parts (car (last snapshot))))))
+                    (setf (alist-get 'text part) (concat (alist-get 'text part) "\nstream-tail\noffline-tail")))
+                  (let ((server-current
+                         (string-match-p "offline-tail"
+                          (alist-get 'text (car (alist-get 'parts (car (last snapshot))))))))
+                    (should server-current))
+                  (opencode-shell--transport-failed profile)
+                  (should (plist-get runtime :paused))
+                  (funcall retry)
+                  (funcall health t profile)
+                  (should opencode-shell-async--queue)
+                  (dotimes (_ 3) (opencode-shell-async-drain buffer))
+                  (should (= snapshots 1))
+                  (should-not (plist-get runtime :paused))
+                  (let ((model-current
+                         (string-match-p "offline-tail" (opencode-shell--turn-assistant
+                                                         (car (last opencode-shell--turns))))))
+                    (should model-current))
+                  (should (string-match-p "offline-tail" (buffer-string)))
+                  (setq opencode-shell--table-render-width 0
+                        opencode-shell--render-dirty t opencode-shell--render-force t)
+                  (opencode-shell--refresh-table-layout)
+                  (opencode-shell-acceptance--check-reading-anchors anchors window)
+                  ;; Metadata-only events must not postpone this newer body forever.
+                  (let ((part (car (alist-get 'parts (car (last snapshot))))))
+                    (setf (alist-get 'text part) (concat (alist-get 'text part) "\nintegrity-tail")))
+                  (dotimes (_ 4)
+                    (setq now (+ now 10))
+                    (opencode-shell--receive-application-event
+                     '(:kind session-updated :type "session.updated" :session-id "fixture"))
+                    (opencode-shell--reconcile-quiet)
+                    (opencode-shell-async-drain buffer))
+                  (should (= snapshots 2))
+                  (should (string-match-p "integrity-tail" (buffer-string)))
+                  (opencode-shell--render-turns t)
+                  (opencode-shell-acceptance--check-reading-anchors anchors window)
+                  (opencode-shell--receive-application-event
+                   '(:kind message-updated :type "message.updated" :session-id "fixture"
+                     :message-id "a4" :info ((id . "a4") (sessionID . "fixture")
+                     (role . "assistant") (parentID . "u4") (finish . "stop")
+                     (time . ((completed . 999))))))
+                  (dotimes (_ 2) (opencode-shell-async-drain buffer))
+                  (should (eq (opencode-shell--turn-status (car (last opencode-shell--turns))) 'complete))
+                  (should (opencode-shell--composer-visible-p))
+                  (should (equal (opencode-shell--composer-text) "draft"))
+                  (opencode-shell-acceptance--check-reading-anchors anchors window)))))
+        (dolist (anchor anchors) (set-marker (nth 1 anchor) nil) (set-marker (nth 2 anchor) nil))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest opencode-shell-acceptance-live-recovery-scroll-hidden-update ()
+  "A hidden transcript reconciles a changed stream without editing its text."
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *accept-hidden-stream*"))
+          (window (selected-window)) (previous (window-buffer)))
+      (unwind-protect
+          (progn
+            (set-window-buffer window buffer)
+            (with-current-buffer buffer
+              (opencode-shell-mode)
+              (setq opencode-shell--runtime-key 'fixture opencode-shell--session-id "fixture")
+              (opencode-shell--render-messages
+               (opencode-shell-acceptance--scroll-long-snapshot 4 t) 1)
+              (set-window-buffer window previous)
+              (let ((tick (buffer-chars-modified-tick)))
+                (opencode-shell--receive-application-event
+                 '(:kind part-delta :type "message.part.delta" :session-id "fixture"
+                   :message-id "a4" :part-id "pa4" :field "text" :delta "\nhidden-tail"))
+                (opencode-shell-async-drain buffer)
+                (should (= tick (buffer-chars-modified-tick)))
+                (should opencode-shell--render-dirty)
+                (set-window-buffer window buffer)
+                (opencode-shell--render-if-visible)
+                (opencode-shell-async-drain buffer)
+                (should (string-match-p "hidden-tail" (buffer-string))))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (provide 'opencode-shell-acceptance-test)
 ;;; opencode-shell-acceptance-test.el ends here
