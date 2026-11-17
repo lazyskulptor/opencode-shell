@@ -1692,7 +1692,12 @@
 (ert-deftest opencode-shell-local-auto-recovery-ipv6-loopback ()
   (let ((profile (copy-sequence opencode-shell-test--local-profile)))
     (setq profile (plist-put profile :base-url (format "http://[%s]:1" "::1")))
-    (should (opencode-shell--local-recovery-profile-p profile))))
+    (should (opencode-shell--local-recovery-profile-p profile))
+    (setq profile (plist-put profile :remote t))
+    (should-not (opencode-shell--local-recovery-profile-p profile))
+    (setq profile (plist-put profile :remote nil)
+          profile (plist-put profile :directory "/ssh:fixture:/"))
+    (should-not (opencode-shell--local-recovery-profile-p profile))))
 
 (ert-deftest opencode-shell-local-auto-recovery-partial-body-timeout ()
   "A timeout after successful headers is still a transient transport outage."
@@ -1757,6 +1762,40 @@
             (opencode-shell--local-recovery-start profile)
             (should (= before schedules)))
           (opencode-shell-async-unsubscribe-runtime key (current-buffer)))))))
+
+(ert-deftest opencode-shell-local-auto-recovery-stale-auth-cannot-block-current ()
+  (dolist (status '(401 403))
+    (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+          (opencode-shell-recovery--states (make-hash-table :test #'equal))
+          (profile opencode-shell-test--local-profile) receive response)
+      (with-temp-buffer
+        (opencode-shell-mode)
+        (setq opencode-shell--profile profile)
+        (let* ((key (opencode-shell--server-key profile))
+               (subscribers (make-hash-table :test #'eq))
+               (runtime (list :subscribers subscribers :paused t)))
+          (puthash (current-buffer) #'ignore subscribers)
+          (puthash key runtime opencode-shell-async--runtimes)
+          (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'opencode-shell--auth-header) #'ignore)
+                    ((symbol-function 'opencode-shell--note-request-error) #'ignore)
+                    ((symbol-function 'url-retrieve)
+                     (lambda (_url callback &rest _)
+                       (setq receive callback response (generate-new-buffer " *late-auth-fixture*")))))
+            (unwind-protect
+                (progn
+                  (opencode-shell--request-direct "GET" "/fixture" #'ignore)
+                  (cl-incf opencode-shell--generation)
+                  (opencode-shell--local-recovery-start profile)
+                  (let ((current (plist-get runtime :recovery-cleanup)))
+                    (should (functionp current))
+                    (with-current-buffer response
+                      (setq-local url-http-response-status status)
+                      (funcall receive nil))
+                    (should (eq current (plist-get runtime :recovery-cleanup)))
+                    (should-not (plist-get runtime :local-recovery-blocked))))
+              (opencode-shell-async-unsubscribe-runtime key (current-buffer))
+              (when (buffer-live-p response) (kill-buffer response)))))))))
 
 (provide 'opencode-shell-transport-test)
 ;;; opencode-shell-transport-test.el ends here

@@ -882,12 +882,12 @@ called after a transport, status, or decoding failure."
                (condition-case err
                     (let ((code (or (bound-and-true-p url-http-response-status) 0)))
                        (if (not (<= 200 code 299))
-                           (when (and (buffer-live-p origin)
+                            (when (and (buffer-live-p origin)
+                                       (with-current-buffer origin
+                                         (= request-generation opencode-shell--generation)))
                              (with-current-buffer origin
                                (when (memq code '(401 403))
                                  (opencode-shell--local-recovery-block profile))
-                                        (= request-generation opencode-shell--generation)))
-                            (with-current-buffer origin
                               (when opencode-shell-log-requests
                                  (opencode-shell--log "OpenCode API #%d ← HTTP %s %.2fs [%s %s]"
                                                      request-id code (- (float-time) started) method path))
