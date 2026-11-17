@@ -3675,31 +3675,13 @@ coalesces repeated changes into a single off-hook render."
                   (seq-uniq (append opencode-shell--render-dirty-turns
                                     table-turns)
                             #'eq))
-            (let* ((opencode-shell--table-rerendering t)
-                   (windows (get-buffer-window-list (current-buffer) nil t))
-                   (starts (mapcar (lambda (item)
-                                     (cons item (copy-marker (window-start item))))
-                                   windows)))
-              (unwind-protect
-                  (opencode-shell--flush-render)
-                (dolist (entry starts)
-                  (when (window-live-p (car entry))
-                    (set-window-start (car entry) (cdr entry) t))
-                  (set-marker (cdr entry) nil)))))
+            (let ((opencode-shell--table-rerendering t))
+              (opencode-shell--flush-render)))
            ((or table-turns
                 (< (length opencode-shell--rendered-turns)
                    (length opencode-shell--turns)))
-            (let* ((opencode-shell--table-rerendering t)
-                   (windows (get-buffer-window-list (current-buffer) nil t))
-                   (starts (mapcar (lambda (item)
-                                     (cons item (copy-marker (window-start item))))
-                                   windows)))
-              (unwind-protect
-                  (opencode-shell--render-turns nil (or table-turns 'none))
-                (dolist (entry starts)
-                  (when (window-live-p (car entry))
-                    (set-window-start (car entry) (cdr entry) t))
-                  (set-marker (cdr entry) nil)))))))))))
+            (let ((opencode-shell--table-rerendering t))
+              (opencode-shell--render-turns nil (or table-turns 'none))))))))))
 
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
@@ -3795,26 +3777,6 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
           ;; Only the most-recent window of turns is drawn (see
           ;; `opencode-shell--rendered-turn-window'); state keeps every turn.
           (rlist (opencode-shell--rendered-turn-window))
-          ;; Preserve each window's scroll position across the render.  Anchor it
-          ;; to the turn the window starts in, by turn identity + offset, so the
-          ;; view survives even a full rebuild (which deletes the whole transcript
-          ;; and would collapse a plain marker to the buffer top).  A
-          ;; reconcile/completion render is frequent with SSE; without this the
-          ;; view snaps to the top when a turn finishes.
-          (window-anchors
-           (mapcar
-            (lambda (w)
-              (let* ((ws (window-start w))
-                     (turn (seq-find
-                            (lambda (tn)
-                              (let ((ub (opencode-shell--turn-user-begin tn)))
-                                (and (markerp ub) (marker-position ub)
-                                     (<= (marker-position ub) ws))))
-                            (reverse rlist))))
-                (list w turn
-                      (and turn (- ws (marker-position
-                                       (opencode-shell--turn-user-begin turn)))))))
-            (get-buffer-window-list (current-buffer) nil t)))
           fontify-turns)
     (when (and (not force)
                opencode-shell--rendered-turns
@@ -3928,19 +3890,8 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
     (opencode-shell--fontify-transcript fontify-turns)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
-      (goto-char (min old-point opencode-shell--transcript-end)))
-    (dolist (entry window-anchors)
-      (let ((w (nth 0 entry)) (turn (nth 1 entry)) (off (nth 2 entry)))
-        (when (and (window-live-p w) turn off
-                   (markerp (opencode-shell--turn-user-begin turn))
-                   (marker-position (opencode-shell--turn-user-begin turn)))
-          (set-window-start
-           w (max (point-min)
-                  (min (point-max)
-                       (+ (marker-position (opencode-shell--turn-user-begin turn))
-                          off)))
-           t))))))
-   (opencode-shell--sync-input-policy))
+      (goto-char (min old-point opencode-shell--transcript-end))))
+   (opencode-shell--sync-input-policy)))
 
 (defun opencode-shell--fontify-transcript (&optional turns)
   "Apply Markdown font-lock faces to assistant response bodies in TURNS.

@@ -2577,19 +2577,19 @@ under [mouse-1]."
       (goto-char (1- (point-max)))
       (insert "작성 중")
       (let ((offset (- (point) opencode-shell--composer-start))
-            restored-start)
+            viewport-moved)
         (cl-letf (((symbol-function 'opencode-shell--transcript-window)
                    (lambda () (selected-window)))
                   ((symbol-function 'window-body-width) (lambda (&rest _) 36))
                   ((symbol-function 'get-buffer-window-list)
                    (lambda (&rest _) (list (selected-window))))
-                  ((symbol-function 'window-start) (lambda (&rest _) (point-min)))
                   ((symbol-function 'set-window-start)
-                   (lambda (_window position &rest _)
-                     (setq restored-start (marker-position position)))))
+                   (lambda (&rest _) (setq viewport-moved t)))
+                  ((symbol-function 'set-window-point)
+                   (lambda (&rest _) (setq viewport-moved t))))
           (opencode-shell--refresh-table-layout))
         (should (= opencode-shell--table-render-width 36))
-        (should (= restored-start (point-min)))
+        (should-not viewport-moved)
         (should (equal (opencode-shell--composer-text) "작성 중"))
         (should (= (- (point) opencode-shell--composer-start) offset))
         (should (equal (opencode-shell--turn-assistant turn) raw))
@@ -6324,6 +6324,81 @@ a full resync before hydration completes."
               (should-not (memq deadline timer-list))
               (should (= failures 0)))
           (when (timerp deadline) (cancel-timer deadline)))))))
+
+(defun opencode-shell-test--scroll-viewport-watch (buffer window body)
+  "Run BODY in BUFFER shown in WINDOW, counting viewport-moving calls.
+Returns the number of `set-window-start'/`recenter'/`scroll-*' invocations."
+  (let ((previous (window-buffer window))
+        (moves 0))
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (cl-letf (((symbol-function 'set-window-start)
+                       (lambda (&rest _) (cl-incf moves)))
+                      ((symbol-function 'set-window-point)
+                       (lambda (&rest _) (cl-incf moves)))
+                      ((symbol-function 'recenter)
+                       (lambda (&rest _) (cl-incf moves)))
+                      ((symbol-function 'recenter-top-bottom)
+                       (lambda (&rest _) (cl-incf moves)))
+                      ((symbol-function 'scroll-up)
+                       (lambda (&rest _) (cl-incf moves)))
+                      ((symbol-function 'scroll-down)
+                       (lambda (&rest _) (cl-incf moves))))
+              (funcall body))))
+      (set-window-buffer window previous))
+    moves))
+
+(defun opencode-shell-test--scroll-two-turn-messages ()
+  "Return a minimal complete two-turn transcript snapshot."
+  '(((info . ((id . "u1") (role . "user")))
+     (parts . (((id . "pu1") (type . "text") (text . "질문")))))
+    ((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+              (finish . "stop") (time . ((completed . 1)))))
+     (parts . (((id . "pa1") (type . "text") (text . "응답")))))))
+
+(ert-deftest opencode-shell-receiving-scroll-render-turns-leaves-viewport ()
+  "An automatic turn render must not commandeer any window viewport."
+  (let ((buffer (generate-new-buffer " *scroll-render*"))
+        (window (selected-window))
+        moves)
+    (unwind-protect
+        (setq moves
+              (opencode-shell-test--scroll-viewport-watch
+               buffer window
+               (lambda ()
+                 (opencode-shell-mode)
+                 (setq opencode-shell--session-id "scroll-render")
+                 (opencode-shell--render-messages
+                  (opencode-shell-test--scroll-two-turn-messages) 1)
+                 (opencode-shell--render-turns t)
+                 (opencode-shell--render-turns nil 'none))))
+      (kill-buffer buffer))
+    (should (zerop moves))))
+
+(ert-deftest opencode-shell-receiving-scroll-table-layout-leaves-viewport ()
+  "A width-driven table relayout must not commandeer any window viewport."
+  (let ((buffer (generate-new-buffer " *scroll-table*"))
+        (window (selected-window))
+        moves)
+    (unwind-protect
+        (setq moves
+              (opencode-shell-test--scroll-viewport-watch
+               buffer window
+               (lambda ()
+                 (opencode-shell-mode)
+                 (setq opencode-shell--session-id "scroll-table")
+                 (opencode-shell--render-messages
+                  (opencode-shell-test--scroll-two-turn-messages) 1)
+                 (setq opencode-shell--table-render-width nil
+                       opencode-shell--render-dirty t
+                       opencode-shell--render-event "scroll-table"
+                       opencode-shell--render-force nil
+                       opencode-shell--render-dirty-turns nil)
+                 (opencode-shell--refresh-table-layout))))
+      (kill-buffer buffer))
+    (should (zerop moves))))
 
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

@@ -75,6 +75,13 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
   The bounded right-growing spinner is an overlay driven by its own animation
   timer and reset by current-session transcript progress, not polling. Composer
   text, point, markers, and undo history remain stable.
+  Automatic renders (periodic, SSE, completion, width-driven table relayout, and
+  load/reload migration) never issue explicit viewport commands such as
+  `set-window-start`, `set-window-point`, `recenter`, or `scroll-*`; redrawing must
+  not commandeer the window scroll position. They may still move point for text
+  edits, and Emacs's native redisplay can adjust the view to keep point visible,
+  so the guarantee is "no explicit scroll command from background updates", not
+  "the screen never moves". User scrolling and turn navigation stay authoritative.
 
 ## Lifecycle
 
