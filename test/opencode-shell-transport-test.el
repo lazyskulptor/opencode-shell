@@ -1649,11 +1649,45 @@
             (let ((before schedules))
               (funcall reject reason)
               (if (memq reason '(401 403))
-                  (should (= schedules before))
+                  (progn
+                    (should (= schedules before))
+                    ;; Late failures from the same outage must not restart an
+                    ;; authentication/configuration failure loop.
+                    (opencode-shell--local-recovery-start profile)
+                    (should (= schedules before)))
                 (should (= schedules (1+ before)))))
             (funcall stale t profile)
             (should (plist-get runtime :paused))
             (opencode-shell-async-unsubscribe-runtime key (current-buffer))))))))
+
+(ert-deftest opencode-shell-local-auto-recovery-cancel-probe-deadlines ()
+  "Final unsubscribe cancels the health HTTP backstop as well as retry deadlines."
+  (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+        (opencode-shell-recovery--states (make-hash-table :test #'equal))
+        (profile opencode-shell-test--local-profile) timers cancelled response)
+    (with-temp-buffer
+      (let* ((key (opencode-shell--server-key profile))
+             (subscribers (make-hash-table :test #'eq))
+             (runtime (list :subscribers subscribers :paused t)))
+        (puthash (current-buffer) #'ignore subscribers)
+        (puthash key runtime opencode-shell-async--runtimes)
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat callback &rest args)
+                     (let ((timer (list 'timer callback args))) (push timer timers) timer)))
+                  ((symbol-function 'timerp) (lambda (x) (eq (car-safe x) 'timer)))
+                  ((symbol-function 'cancel-timer) (lambda (x) (push x cancelled)))
+                  ((symbol-function 'opencode-shell--auth-header) #'ignore)
+                  ((symbol-function 'url-retrieve)
+                   (lambda (&rest _) (setq response (generate-new-buffer " *health-fixture*")))))
+          (unwind-protect
+              (progn
+                (opencode-shell--local-recovery-start profile)
+                (apply (nth 1 (car timers)) (nth 2 (car timers)))
+                (let ((backstop (car timers)))
+                  (opencode-shell-async-unsubscribe-runtime key (current-buffer))
+                  (should-not (buffer-live-p response))
+                  (should (memq backstop cancelled))))
+            (when (buffer-live-p response) (kill-buffer response))))))))
 
 (provide 'opencode-shell-transport-test)
 ;;; opencode-shell-transport-test.el ends here

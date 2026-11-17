@@ -763,6 +763,13 @@ that guard."
                  (apply callback status args)))
              cbargs silent inhibit-cookies)))
     (opencode-shell--silence-url-buffer-process response-buffer)
+    (when (buffer-live-p response-buffer)
+      (with-current-buffer response-buffer
+        (add-hook 'kill-buffer-hook
+                  (lambda ()
+                    (setq settled t)
+                    (when (timerp timer) (cancel-timer timer)))
+                  nil t)))
     response-buffer))
 
 (defun opencode-shell--request-direct-async
@@ -1000,6 +1007,8 @@ sessions where the receive burst is felt."
 (defun opencode-shell--transport-resumed (key)
   "Resume KEY, releasing any outstanding local health recovery."
   (when-let ((runtime (opencode-shell-async-runtime-get key)))
+    (when (plist-member runtime :local-recovery-blocked)
+      (setf (plist-get runtime :local-recovery-blocked) nil))
     (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
       (funcall cleanup)
       (maphash
@@ -1020,10 +1029,13 @@ sessions where the receive burst is felt."
          response cleanup)
     (when (and runtime (opencode-shell--local-recovery-profile-p profile)
                (not (plist-get runtime :recovery-cleanup))
+               (not (plist-get runtime :local-recovery-blocked))
                (not (opencode-shell-recovery-exhausted-p recovery-key)))
       ;; Keep runtime identity stable even for a minimally constructed runtime.
       (unless (plist-member runtime :recovery-cleanup)
         (nconc runtime (list :recovery-cleanup nil)))
+      (unless (plist-member runtime :local-recovery-blocked)
+        (nconc runtime (list :local-recovery-blocked nil)))
       (cl-labels
           ((needed ()
              (and (eq runtime (opencode-shell-async-runtime-get key))
@@ -1060,6 +1072,7 @@ sessions where the receive burst is felt."
                             (if (or (eq reason 'transport)
                                     (and (numberp reason) (<= 500 reason 599)))
                                 (failed)
+                              (setf (plist-get runtime :local-recovery-blocked) t)
                               (stop))))))))))
         (setq cleanup #'stop)
         (setf (plist-get runtime :recovery-cleanup) cleanup)
