@@ -562,6 +562,11 @@ quiet the next probe performs the authoritative resync to confirm it.")
 
 (defconst opencode-shell--sse-delivery-window 5
   "Seconds within which a received SSE event counts as live incremental delivery.")
+(defvar-local opencode-shell--pending-session-updated-since nil)
+(defvar-local opencode-shell--last-message-recovery-attempt-at nil)
+(defvar-local opencode-shell--last-authoritative-message-sync-at nil)
+(defconst opencode-shell--message-recovery-delay 30)
+(defconst opencode-shell--message-integrity-interval 120)
 (defvar-local opencode-shell--animation-frame 0)
 (defvar-local opencode-shell--spinner-overlays nil)
 (defvar-local opencode-shell--composer-overlay nil)
@@ -1808,13 +1813,28 @@ polluting the user's undo history."
 (defun opencode-shell--confirm-session-updated (marker)
   "Confirm request-local MARKER after its authoritative snapshot applied.
 Newer pending markers remain outstanding for a subsequent snapshot."
+  (setq opencode-shell--last-authoritative-message-sync-at (float-time))
   (when marker
     (setq opencode-shell--reconciled-session-updated
           (max marker (or opencode-shell--reconciled-session-updated 0)))
     (when (and opencode-shell--pending-session-updated
                (<= opencode-shell--pending-session-updated
                    opencode-shell--reconciled-session-updated))
-      (setq opencode-shell--pending-session-updated nil))))
+      (setq opencode-shell--pending-session-updated nil
+            opencode-shell--pending-session-updated-since nil))))
+
+(defun opencode-shell--message-integrity-due-p (now)
+  "Whether an active or fallback transcript needs an integrity snapshot at NOW."
+  (and opencode-shell--last-authoritative-message-sync-at
+       (>= (- now opencode-shell--last-authoritative-message-sync-at)
+           opencode-shell--message-integrity-interval)
+       (or (seq-some (lambda (turn)
+                       (not (eq (opencode-shell--turn-status turn) 'complete)))
+                     opencode-shell--turns)
+           (when-let ((runtime (and opencode-shell--runtime-key
+                                   (opencode-shell-async-runtime-get opencode-shell--runtime-key))))
+             (and (not (plist-get runtime :paused))
+                  (not (opencode-shell-async-sse-connected-p opencode-shell--runtime-key)))))))
 
 (defun opencode-shell--reconcile-quiet ()
   "Reconcile cheap resources and fetch full history only when it changed.
@@ -1835,7 +1855,8 @@ missed are still recovered automatically without a manual resync."
       (lambda (session)
         (let ((updated (opencode-shell--time session)))
           (when (> updated 0)
-            (cond
+            (let ((now (float-time)))
+             (cond
              ;; Unknown baseline or an advance: schedule recovery.  While SSE is
              ;; delivering we only DEFER; the marker is confirmed later by the
              ;; authoritative snapshot callback, never from this probe, so a
@@ -1843,12 +1864,23 @@ missed are still recovered automatically without a manual resync."
              ((or (null opencode-shell--reconciled-session-updated)
                   (> updated opencode-shell--reconciled-session-updated))
               (setq opencode-shell--pending-session-updated updated)
-              (unless (opencode-shell--sse-recently-delivered-p)
-                (opencode-shell--resync nil)))
+              (unless opencode-shell--pending-session-updated-since
+                (setq opencode-shell--pending-session-updated-since now)))
              ;; The applied snapshot already covers the marker: clear any stale
              ;; deferral.
              (opencode-shell--pending-session-updated
-              (setq opencode-shell--pending-session-updated nil))))))
+              (setq opencode-shell--pending-session-updated nil
+                    opencode-shell--pending-session-updated-since nil)))
+             (when (and (not (alist-get 'messages opencode-shell--in-flight))
+                        (or (null opencode-shell--last-message-recovery-attempt-at)
+                            (>= (- now opencode-shell--last-message-recovery-attempt-at)
+                                opencode-shell--message-recovery-delay))
+                        (or (opencode-shell--message-integrity-due-p now)
+                            (and opencode-shell--pending-session-updated
+                                 (or (not (opencode-shell--sse-recently-delivered-p))
+                                     (>= (- now opencode-shell--pending-session-updated-since)
+                                         opencode-shell--message-recovery-delay)))))
+               (opencode-shell--resync nil))))))
      nil nil)))
 
 (defun opencode-shell--start-polling ()
@@ -4224,6 +4256,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
       (let ((sequence (cl-incf opencode-shell--message-request-sequence))
             (revision opencode-shell--message-state-revision)
             (marker opencode-shell--pending-session-updated))
+        (setq opencode-shell--last-message-recovery-attempt-at (float-time))
         (opencode-shell--guarded-request
          'messages
          "GET" (format "/session/%s/message" opencode-shell--session-id)

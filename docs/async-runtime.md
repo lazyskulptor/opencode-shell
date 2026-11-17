@@ -117,6 +117,16 @@ recovery, and a superseded sequence or application exception leaves it pending. 
 change SSE missed (e.g. only a `session.status` event arrived) is therefore still
 confirmed once SSE goes quiet, and no observed advance is silently dropped. Idle
 or SSE-covered ticks never re-download a large transcript.
+Pending changes have a 30-second maximum SSE deferral measured from their first
+observation, not the latest event or marker advance. The first reconciliation
+after expiry attempts recovery even if metadata events keep arriving. Actual
+message requests are at least 30 seconds apart on this periodic path, including
+failures and revision races; skipped in-flight requests do not reset the clock.
+Active transcripts and running fallback runtimes also check integrity after 120
+seconds without an authoritative message application, even with an unchanged
+metadata marker. Settled idle sessions are not awakened for this check. These
+bounds use the existing poll/idle cadence, not a new high-frequency timer; manual
+resync and initial/reconnect hydration keep their immediate fetch semantics.
 Initial hydration, reconnect, fallback-with-changes, and explicit resync always
 fetch the full snapshot; unsupported events keep an immediate full recovery.
 Re-fetching a large transcript every tick is the freeze this avoids.

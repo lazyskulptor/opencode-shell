@@ -6441,5 +6441,76 @@ migration paths issue no explicit viewport command and still do their work."
     (should rendered-p)
     (should (equal width-after 40))))
 
+(ert-deftest opencode-shell-reconcile-deadline-metadata-cannot-postpone-forever ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture"
+          opencode-shell--reconciled-session-updated 1)
+    (let ((now 100.0) (marker 2) (requests 0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+                ((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path cb &rest _)
+                   (when (eq key 'session-updated)
+                     (funcall cb `((time . ((updated . ,marker))))))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore)
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf requests))))
+        (dotimes (_ 4)
+          (setq opencode-shell--last-event-time now)
+          (opencode-shell--reconcile-quiet)
+          (setq now (+ now 10) marker (1+ marker)))
+        (should (= requests 1))
+        (should (= opencode-shell--pending-session-updated-since 100.0))))))
+
+(ert-deftest opencode-shell-reconcile-deadline-unchanged-marker-integrity ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture"
+          opencode-shell--reconciled-session-updated 1
+          opencode-shell--last-authoritative-message-sync-at 100.0
+          opencode-shell--turns (list (opencode-shell--make-turn :status 'receiving)))
+    (let ((now 221.0) (requests 0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+                ((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path cb &rest _)
+                   (when (eq key 'session-updated)
+                     (funcall cb '((time . ((updated . 1))))))))
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore)
+                ((symbol-function 'opencode-shell--resync)
+                 (lambda (&rest _) (cl-incf requests))))
+        (opencode-shell--reconcile-quiet)
+        (should (= requests 1))
+        (setf (opencode-shell--turn-status (car opencode-shell--turns)) 'complete)
+        (opencode-shell--reconcile-quiet)
+        (should (= requests 1))))))
+
+(ert-deftest opencode-shell-reconcile-deadline-failed-attempt-is-throttled ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture"
+          opencode-shell--reconciled-session-updated 1)
+    (let ((now 100.0) (requests 0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+                ((symbol-function 'opencode-shell--guarded-request)
+                 (lambda (key _method _path success &optional _body failure &rest _)
+                   (pcase key
+                     ('session-updated (funcall success '((time . ((updated . 2))))))
+                     ('messages (cl-incf requests) (when failure (funcall failure))))))
+                ((symbol-function 'opencode-shell--retry-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--settle-hydration) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-questions) #'ignore)
+                ((symbol-function 'opencode-shell--refresh-descendant-status) #'ignore))
+        (opencode-shell--reconcile-quiet)
+        (setq now 101.0)
+        (opencode-shell--reconcile-quiet)
+        (should (= requests 1))
+        (should (= opencode-shell--reconciled-session-updated 1))
+        (should (= opencode-shell--pending-session-updated 2))
+        (setq now 131.0)
+        (opencode-shell--reconcile-quiet)
+        (should (= requests 2))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here
