@@ -6350,7 +6350,7 @@ Returns the number of `set-window-start'/`recenter'/`scroll-*' invocations."
       (set-window-buffer window previous))
     moves))
 
-(defun opencode-shell-test--scroll-two-turn-messages ()
+(defun opencode-shell-test--scroll-single-turn-messages ()
   "Return a minimal complete two-turn transcript snapshot."
   '(((info . ((id . "u1") (role . "user")))
      (parts . (((id . "pu1") (type . "text") (text . "질문")))))
@@ -6371,7 +6371,7 @@ Returns the number of `set-window-start'/`recenter'/`scroll-*' invocations."
                  (opencode-shell-mode)
                  (setq opencode-shell--session-id "scroll-render")
                  (opencode-shell--render-messages
-                  (opencode-shell-test--scroll-two-turn-messages) 1)
+                  (opencode-shell-test--scroll-single-turn-messages) 1)
                  (opencode-shell--render-turns t)
                  (opencode-shell--render-turns nil 'none))))
       (kill-buffer buffer))
@@ -6390,7 +6390,7 @@ Returns the number of `set-window-start'/`recenter'/`scroll-*' invocations."
                  (opencode-shell-mode)
                  (setq opencode-shell--session-id "scroll-table")
                  (opencode-shell--render-messages
-                  (opencode-shell-test--scroll-two-turn-messages) 1)
+                  (opencode-shell-test--scroll-single-turn-messages) 1)
                  (setq opencode-shell--table-render-width nil
                        opencode-shell--render-dirty t
                        opencode-shell--render-event "scroll-table"
@@ -6399,6 +6399,47 @@ Returns the number of `set-window-start'/`recenter'/`scroll-*' invocations."
                  (opencode-shell--refresh-table-layout))))
       (kill-buffer buffer))
     (should (zerop moves))))
+
+(ert-deftest opencode-shell-receiving-scroll-hook-paths-issue-no-viewport ()
+  "The window-configuration hook, table scheduler, post-command repair, and
+migration paths issue no explicit viewport command and still do their work."
+  (let ((buffer (generate-new-buffer " *scroll-paths*"))
+        (window (selected-window))
+        moves rendered-p width-after)
+    (unwind-protect
+        (setq moves
+              (opencode-shell-test--scroll-viewport-watch
+               buffer window
+               (lambda ()
+                 (opencode-shell-mode)
+                 (setq opencode-shell--session-id "scroll-paths")
+                 (opencode-shell--render-messages
+                  (opencode-shell-test--scroll-single-turn-messages) 1)
+                 ;; window-configuration-change-hook → render-if-visible → drain.
+                 (setq opencode-shell--render-dirty t
+                       opencode-shell--render-event "scroll-paths")
+                 (opencode-shell--render-if-visible)
+                 (opencode-shell-async-drain buffer)
+                 (setq rendered-p (not opencode-shell--render-dirty))
+                 ;; window-configuration-change-hook → schedule-table-layout.
+                 (let (scheduled)
+                   (cl-letf (((symbol-function 'opencode-shell--transcript-window)
+                              (lambda () (selected-window)))
+                             ((symbol-function 'window-body-width)
+                              (lambda (&rest _) 40))
+                             ((symbol-function 'run-with-idle-timer)
+                              (lambda (_d _r fn &rest _) (setq scheduled fn) 'timer)))
+                     (setq opencode-shell--table-render-width nil)
+                     (opencode-shell--schedule-table-layout)
+                     (when scheduled (funcall scheduled))))
+                 (setq width-after opencode-shell--table-render-width)
+                 ;; post-command label/sentinel repair and load migration.
+                 (opencode-shell--ensure-composer-sentinel)
+                 (opencode-shell--migrate-live-buffer))))
+      (kill-buffer buffer))
+    (should (zerop moves))
+    (should rendered-p)
+    (should (equal width-after 40))))
 
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

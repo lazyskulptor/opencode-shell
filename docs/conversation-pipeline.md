@@ -85,8 +85,11 @@ as normal `require` loading.
   pending human interaction, or incomplete initial hydration blocks it.
 - Rendered history is read-only.  A blocked Composer is protected regionally,
   while Evil mutating commands are inert outside the writable Composer;
-  rerenders preserve Composer draft, point, markers, undo history, and window
-  state.
+  rerenders preserve Composer draft, point, markers, and undo history. They do
+  not issue explicit viewport commands, so they never commandeer the window
+  scroll position; a full rebuild does not restore a previous transcript read
+  position, and Emacs's native redisplay may still adjust the view to keep point
+  visible.
 - Evil Backspace at an empty Composer boundary is a no-op; it never deletes or
   recreates the structural prompt line.
 

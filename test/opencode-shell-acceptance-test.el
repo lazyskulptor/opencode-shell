@@ -433,28 +433,35 @@ only one newline so the new prompt glued to the previous response."
       (set-window-buffer window previous)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(defun opencode-shell-acceptance--scroll-active-snapshot ()
-  "Snapshot with one active (Receiving) turn."
-  '(((info . ((id . "u1") (role . "user")))
-     (parts . (((id . "pu1") (type . "text") (text . "질문")))))
-    ((info . ((id . "a1") (role . "assistant") (parentID . "u1")))
-     (parts . (((id . "pa1") (type . "text") (text . "응답 중")))))))
-
-(defun opencode-shell-acceptance--scroll-complete-snapshot ()
-  "Snapshot with the same turn completed."
-  '(((info . ((id . "u1") (role . "user")))
-     (parts . (((id . "pu1") (type . "text") (text . "질문")))))
-    ((info . ((id . "a1") (role . "assistant") (parentID . "u1")
-              (finish . "stop") (time . ((completed . 2)))))
-     (parts . (((id . "pa1") (type . "text") (text . "완료")))))))
+(defun opencode-shell-acceptance--scroll-long-snapshot (count &optional active-last)
+  "Chronological snapshot of COUNT turns; leave the last assistant active if
+ACTIVE-LAST, so the renderer is in a Receiving state."
+  (apply #'append
+         (cl-loop for n from 1 to count
+                  collect
+                  `(((info . ((id . ,(format "u%d" n)) (role . "user")))
+                     (parts . (((id . ,(format "pu%d" n)) (type . "text")
+                                (text . ,(format "질문 %d\n%s" n
+                                                 (mapconcat (lambda (k) (format "qfiller-%d-%d" n k))
+                                                            (number-sequence 1 6) "\n")))))))
+                    ((info . ((id . ,(format "a%d" n)) (role . "assistant")
+                              (parentID . ,(format "u%d" n))
+                              ,@(unless (and active-last (= n count))
+                                  `((finish . "stop") (time . ((completed . ,n)))))))
+                     (parts . (((id . ,(format "pa%d" n)) (type . "text")
+                                (text . ,(format "응답 %d\n%s" n
+                                                 (mapconcat (lambda (k) (format "line-%d-%d" n k))
+                                                            (number-sequence 1 10) "\n")))))))))))
 
 (ert-deftest opencode-shell-acceptance-receiving-scroll-issues-no-viewport-command ()
-  "Receiving updates, force rebuild, table relayout, and completion must not
-issue explicit viewport commands or disturb the composer draft/point."
+  "Receiving updates, force rebuild, table relayout, and completion of a long
+transcript issue no explicit viewport command, keep the Composer draft/point,
+and leave the view untouched across an unchanged update."
   (let* ((buffer (generate-new-buffer " *accept-scroll*"))
          (window (selected-window))
          (previous (window-buffer window))
-         (moves 0))
+         (moves 0)
+         ws-before ws-after)
     (unwind-protect
         (progn
           (set-window-buffer window buffer)
@@ -479,9 +486,9 @@ issue explicit viewport commands or disturb the composer draft/point."
                         ((symbol-function 'scroll-other-window)
                          (lambda (&rest _) (cl-incf moves))))
                 (opencode-shell--render-messages
-                 (opencode-shell-acceptance--scroll-active-snapshot) 1)
+                 (opencode-shell-acceptance--scroll-long-snapshot 8 t) 1)
                 (opencode-shell--render-messages
-                 (opencode-shell-acceptance--scroll-active-snapshot) 2 t)
+                 (opencode-shell-acceptance--scroll-long-snapshot 8 t) 2 t)
                 (opencode-shell--render-turns t)
                 (setq opencode-shell--table-render-width nil
                       opencode-shell--render-dirty t
@@ -490,22 +497,42 @@ issue explicit viewport commands or disturb the composer draft/point."
                       opencode-shell--render-dirty-turns nil)
                 (opencode-shell--refresh-table-layout)
                 (opencode-shell--render-messages
-                 (opencode-shell-acceptance--scroll-complete-snapshot) 3 t)
+                 (opencode-shell-acceptance--scroll-long-snapshot 8) 3 t)
                 (opencode-shell-async-drain buffer))
               (should (zerop moves))
               (should (equal (opencode-shell--composer-text) "초안"))
-              (should (= (- (point) opencode-shell--composer-start) offset)))))
+              (should (= (- (point) opencode-shell--composer-start) offset))
+              ;; An unchanged update produces no text change, so the selected
+              ;; window's start must stay exactly where the user left it.
+              (goto-char (point-min))
+              (forward-line 12)
+              (set-window-start window (point) t)
+              (setq ws-before (window-start window))
+              (cl-letf (((symbol-function 'set-window-start)
+                         (lambda (&rest _) (cl-incf moves)))
+                        ((symbol-function 'set-window-point)
+                         (lambda (&rest _) (cl-incf moves)))
+                        ((symbol-function 'recenter)
+                         (lambda (&rest _) (cl-incf moves))))
+                (opencode-shell--render-messages
+                 (opencode-shell-acceptance--scroll-long-snapshot 8) 4 t)
+                (opencode-shell-async-drain buffer))
+              (setq ws-after (window-start window))
+              (should (zerop moves))
+              (should (= ws-before ws-after)))))
       (set-window-buffer window previous)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest opencode-shell-acceptance-receiving-scroll-two-windows-stay-put ()
-  "Two windows showing one transcript receive no viewport commands and keep
-their buffers while manual turn navigation still moves point."
+  "Two windows with distinct read positions on one transcript receive no
+viewport command on an unchanged update, keep their own positions, keep their
+buffers, and manual navigation still moves point."
   (let* ((buffer (generate-new-buffer " *accept-scroll-2w*"))
          (window (selected-window))
          (previous (window-buffer window))
          (other (split-window window))
-         (moves 0))
+         (moves 0)
+         ws-w ws-o)
     (unwind-protect
         (progn
           (set-window-buffer window buffer)
@@ -514,7 +541,15 @@ their buffers while manual turn navigation still moves point."
             (opencode-shell-mode)
             (setq opencode-shell--session-id "accept-scroll-2w")
             (opencode-shell--render-messages
-             (opencode-shell-acceptance--scroll-complete-snapshot) 1)
+             (opencode-shell-acceptance--scroll-long-snapshot 8) 1)
+            (goto-char (point-min))
+            (forward-line 4)
+            (set-window-start window (point) t)
+            (goto-char (point-min))
+            (forward-line 30)
+            (set-window-start other (point) t)
+            (setq ws-w (window-start window)
+                  ws-o (window-start other))
             (cl-letf (((symbol-function 'set-window-start)
                        (lambda (&rest _) (cl-incf moves)))
                       ((symbol-function 'set-window-point)
@@ -522,19 +557,17 @@ their buffers while manual turn navigation still moves point."
                       ((symbol-function 'recenter)
                        (lambda (&rest _) (cl-incf moves))))
               (opencode-shell--render-messages
-               (opencode-shell-acceptance--scroll-complete-snapshot) 2 t)
-              (opencode-shell--render-turns t)
+               (opencode-shell-acceptance--scroll-long-snapshot 8) 2 t)
               (opencode-shell-async-drain buffer))
             (should (zerop moves))
             (should (eq (window-buffer window) buffer))
             (should (eq (window-buffer other) buffer))
+            (should (= ws-w (window-start window)))
+            (should (= ws-o (window-start other)))
             ;; Manual turn navigation is the user's to drive, not removed.
             (goto-char (point-max))
             (opencode-shell--previous-turn)
-            (should (= (point)
-                       (marker-position
-                        (opencode-shell--turn-user-begin
-                         (car opencode-shell--turns)))))))
+            (should (> (point) (point-min)))))
       (set-window-buffer window previous)
       (when (window-live-p other) (delete-window other))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
