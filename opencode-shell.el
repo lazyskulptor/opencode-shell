@@ -587,6 +587,8 @@ quiet the next probe performs the authoritative resync to confirm it.")
   "Internal cache of the last normalized models pair (RESPONSE . NORMALIZED).")
 (defvar-local opencode-shell--turns nil)
 (defvar-local opencode-shell--rendered-turns nil)
+(defvar-local opencode-shell--rendered-anchor-signature nil)
+(defvar-local opencode-shell--rendered-anchor-map nil)
 (defvar-local opencode-shell--turn-counter 0)
 (defvar-local opencode-shell--transcript-end nil)
 (defvar-local opencode-shell--composer-start nil)
@@ -3163,6 +3165,58 @@ the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
        id (opencode-shell--descendant-session-running-p id anchor)))))
 
 (defun opencode-shell--render-permissions ()
+  "Apply only changed interaction text, retaining unchanged native markers."
+  (let* ((draft (opencode-shell--composer-text))
+         (offset (and (opencode-shell--point-in-composer-p)
+                      (- (point) opencode-shell--composer-start)))
+         (permissions opencode-shell--permissions)
+         (questions opencode-shell--questions-pending)
+         (ready (opencode-shell--composer-visible-p))
+         (status (opencode-shell--permission-status-display))
+         (context (when permissions
+                    (opencode-shell--permission-context
+                     (car (opencode-shell--deduplicate-permissions permissions)))))
+         (projection
+          (with-temp-buffer
+            (opencode-shell--insert-composer-sentinel)
+            (setq-local opencode-shell--composer-start (copy-marker (point-min))
+                        opencode-shell--permission-begin (copy-marker (point-min))
+                        opencode-shell--permission-end (copy-marker (point-min))
+                        opencode-shell--permission-status-begin (copy-marker (point-min))
+                        opencode-shell--permission-status-end (copy-marker (point-min))
+                        opencode-shell--permissions permissions
+                        opencode-shell--questions-pending questions)
+            (cl-letf (((symbol-function 'opencode-shell--composer-visible-p) (lambda () ready))
+                      ((symbol-function 'opencode-shell--permission-status-display) (lambda () status))
+                      ((symbol-function 'opencode-shell--permission-context) (lambda (_) context)))
+              (opencode-shell--insert-interaction-region))
+            (list (buffer-substring (point-min) opencode-shell--composer-start)
+                  (1- opencode-shell--permission-status-begin)
+                  (1- opencode-shell--permission-status-end))))
+         (begin (marker-position opencode-shell--permission-begin))
+         (inhibit-read-only t))
+    (opencode-shell--without-user-undo
+      (save-excursion
+        ;; The response's final blank line and Composer label share a newline.
+        (when (and (> begin (point-min)) (eq (char-before begin) ?\n))
+          (cl-decf begin))
+        (opencode-shell--replace-display-region begin opencode-shell--composer-start (car projection))
+        (set-marker opencode-shell--transcript-end begin)
+        (set-marker opencode-shell--permission-begin begin)
+        (when-let ((last (car (last opencode-shell--rendered-turns))))
+          (set-marker (opencode-shell--turn-response-end last) begin))
+        (set-marker opencode-shell--permission-status-begin (+ begin (nth 1 projection)))
+        (set-marker opencode-shell--permission-status-end (+ begin (nth 2 projection)))
+        (set-marker opencode-shell--permission-end (+ begin (length (car projection))))
+        (set-marker opencode-shell--composer-start opencode-shell--permission-end)
+        (setq opencode-shell--composer-label-visible ready))
+      (when offset (goto-char (+ opencode-shell--composer-start offset))))
+    (unless (equal draft (opencode-shell--composer-text))
+      (error "Interaction rendering changed composer text"))
+    (opencode-shell--refresh-composer-overlay)
+    (opencode-shell--refresh-spinner-overlays)))
+
+(defun opencode-shell--insert-interaction-region ()
   "Render pending permissions as one boxed read-only region before composer."
   (opencode-shell--without-user-undo
    (let* ((draft (opencode-shell--composer-text))
@@ -3810,15 +3864,111 @@ See `opencode-shell-max-rendered-turns'."
         (last turns cap)
       turns)))
 
+(defun opencode-shell--turn-prefix-display (turn)
+  "Project TURN's prompt and anchored lines using the canonical inserters."
+  (let ((turns opencode-shell--turns)
+        (resolved opencode-shell--resolved-permissions)
+        (ids opencode-shell--known-descendant-session-ids)
+        (anchors opencode-shell--descendant-anchor-map)
+        (statuses opencode-shell--descendant-session-status))
+    (with-temp-buffer
+      (let ((opencode-shell--turns turns)
+            (opencode-shell--resolved-permissions resolved)
+            (opencode-shell--known-descendant-session-ids ids)
+            (opencode-shell--descendant-anchor-map anchors)
+            (opencode-shell--descendant-session-status statuses))
+        (opencode-shell--insert-user-prompt (copy-opencode-shell--turn turn))
+        (opencode-shell--insert-permission-results (opencode-shell--turn-id turn))
+        (opencode-shell--insert-descendant-sessions-for-turn (opencode-shell--turn-id turn))
+        (buffer-string)))))
+
+(defun opencode-shell--update-turn-prefix (turn)
+  "Minimally update TURN's prompt/anchors without replacing its response."
+  (let* ((begin (marker-position (opencode-shell--turn-user-begin turn)))
+         (display (opencode-shell--turn-prefix-display turn)))
+    (opencode-shell--replace-display-region
+     begin (opencode-shell--turn-response-begin turn) display)
+    (set-marker (opencode-shell--turn-user-begin turn) begin)
+    (set-marker (opencode-shell--turn-user-end turn)
+                (+ begin (length (or (opencode-shell--turn-user turn) "")) 1))
+    (set-marker (opencode-shell--turn-response-begin turn) (+ begin (length display)))
+    (add-text-properties begin (+ begin (length display))
+                         '(read-only t rear-nonsticky (read-only face)))
+    (opencode-shell--apply-turn-gutter
+     turn :user begin (opencode-shell--turn-user-end turn)
+     opencode-shell--gutter-glyph-user 'opencode-shell-user-face 'opencode-shell-user-gutter-face)))
+
+(defun opencode-shell--reconcile-turn-blocks (turns force changed-turns)
+  "Reconcile TURN order, retaining live blocks and editing only changed ranges."
+  (let ((old opencode-shell--rendered-turns)
+        (updates (if force turns (opencode-shell--turns-to-update changed-turns)))
+        fontify)
+    (unless (seq-every-p #'opencode-shell--turn-rendered-p old)
+      (dolist (turn (seq-uniq (append old turns) #'eq))
+        (opencode-shell--discard-turn-markers turn))
+      (opencode-shell--clear-all-turn-gutters)
+      (delete-region (point-min) opencode-shell--transcript-end)
+      (setq old nil))
+    ;; Leading resolved results are independent of turn blocks.
+    (let ((resolved opencode-shell--resolved-permissions)
+          (all-turns opencode-shell--turns))
+      (opencode-shell--replace-display-region
+       (point-min) (if old (opencode-shell--turn-user-begin (car old))
+                     opencode-shell--transcript-end)
+       (with-temp-buffer
+         (let ((opencode-shell--resolved-permissions resolved)
+               (opencode-shell--turns all-turns))
+           (opencode-shell--insert-permission-results nil)
+           (opencode-shell--insert-unanchored-permission-results)
+           (buffer-string)))))
+    (let ((cursor (if old (marker-position (opencode-shell--turn-user-begin (car old)))
+                    (marker-position opencode-shell--transcript-end))))
+      (dolist (turn turns)
+        (when (memq turn old)
+          (unless (eq turn (car old))
+            (let ((end (marker-position (opencode-shell--turn-user-begin turn))))
+              (while (not (eq turn (car old)))
+                (opencode-shell--discard-turn-markers (pop old)))
+              (delete-region cursor end)))
+          (save-excursion
+            (opencode-shell--update-turn-prefix turn)
+            (when (memq turn updates)
+              (opencode-shell--update-turn-response turn)
+              (push turn fontify))
+            (when force
+              (opencode-shell--apply-response-gutter
+               turn (opencode-shell--turn-response-begin turn)
+               (opencode-shell--turn-response-end turn))))
+          (pop old)
+          (setq cursor (if old (marker-position (opencode-shell--turn-user-begin (car old)))
+                         (marker-position (opencode-shell--turn-response-end turn)))))
+        (unless (opencode-shell--turn-rendered-p turn)
+          (goto-char cursor)
+          (when (and (null old) (> (point) (point-min))
+                     (eq (char-before) ?\n)
+                     (not (eq (char-before (1- (point))) ?\n)))
+            (insert (propertize "\n" 'read-only t 'rear-nonsticky '(read-only))))
+          (opencode-shell--insert-turn-blocks turn)
+          (setq cursor (point))
+          ;; A following block's opening marker must follow the inserted block.
+          (when old (set-marker (opencode-shell--turn-user-begin (car old)) cursor))
+          (push turn fontify)))
+      (when old
+        (let ((end (marker-position opencode-shell--transcript-end)))
+          (dolist (turn old) (opencode-shell--discard-turn-markers turn))
+          (delete-region cursor end)))
+      (set-marker opencode-shell--transcript-end cursor))
+    (or (nreverse fontify) 'none)))
+
 (defun opencode-shell--render-turns (&optional force changed-turns)
   "Render immutable turn blocks without changing composer bytes or point.
-When FORCE is non-nil, rebuild every turn so anchored event positions settle.
+When FORCE is non-nil, refresh every turn's projection and gutter overlays.
 Otherwise update only CHANGED-TURNS when that list is non-nil."
   (opencode-shell--without-user-undo
    (let* ((composer-offset (and (opencode-shell--point-in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
-         (composer-text (opencode-shell--composer-text))
          (old-point (copy-marker (point)))
+         (composer-boundary (copy-marker opencode-shell--composer-start t))
           (inhibit-read-only t)
           ;; Only the most-recent window of turns is drawn (see
           ;; `opencode-shell--rendered-turn-window'); state keeps every turn.
@@ -3826,120 +3976,35 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
           fontify-turns)
      (unwind-protect
       (progn
-    (when (and (not force)
-               opencode-shell--rendered-turns
-               rlist
-               (null opencode-shell--resolved-permissions)
-               (seq-every-p #'opencode-shell--turn-rendered-p
-                            opencode-shell--rendered-turns))
-      (let ((surviving (memq (car rlist) opencode-shell--rendered-turns)))
-        (when (and surviving
-                   (not (eq surviving opencode-shell--rendered-turns))
-                   (<= (length surviving) (length rlist))
-                   (cl-every #'eq surviving (seq-take rlist (length surviving))))
-          (let* ((evicted (cl-ldiff opencode-shell--rendered-turns surviving))
-                 (evict-begin (marker-position
-                               (opencode-shell--turn-user-begin (car evicted))))
-                 (evict-end (marker-position
-                             (opencode-shell--turn-user-begin (car surviving)))))
-            (when (and evict-begin evict-end (<= evict-begin evict-end))
-              (dolist (turn evicted)
-                (opencode-shell--discard-turn-markers turn))
-              (delete-region evict-begin evict-end)
-              (setq opencode-shell--rendered-turns surviving))))))
-    (let* ((known-count (length opencode-shell--rendered-turns))
-           (rendered-valid
-            (seq-every-p #'opencode-shell--turn-rendered-p
-                         opencode-shell--rendered-turns))
-           (append-only
-            (and (not force)
-                 rendered-valid
-                 (<= known-count (length rlist))
-                 (cl-every #'eq opencode-shell--rendered-turns
-                           (seq-take rlist known-count))))
-           (update-turns
-            (and append-only
-                 (opencode-shell--turns-to-update changed-turns)))
-           ;; Bound so the descendant inserters place each subagent line under
-           ;; its spawning turn without re-scanning per turn.
+    (let* ((signature
+            (list opencode-shell--known-descendant-session-ids
+                  (mapcar (lambda (turn)
+                            (list turn
+                                  (seq-filter (lambda (part)
+                                                (equal (opencode-shell--get part 'tool) "task"))
+                                              (opencode-shell--turn-parts turn))))
+                          rlist)))
            (opencode-shell--descendant-anchor-map
-            (and opencode-shell--known-descendant-session-ids
-                 (or (not append-only)
-                     (< known-count (length rlist)))
-                 (opencode-shell--compute-descendant-anchor-map))))
-      (delete-region opencode-shell--permission-begin opencode-shell--composer-start)
-      (set-marker opencode-shell--permission-end opencode-shell--permission-begin)
-      (set-marker opencode-shell--composer-start opencode-shell--permission-begin)
-      (when append-only
-        (dolist (turn update-turns)
-          (save-excursion (opencode-shell--update-turn-response turn))))
-      (if append-only
-          (let ((new-turns (nthcdr known-count rlist)))
-            (save-excursion
-              (when new-turns
-                (goto-char opencode-shell--transcript-end)
-                ;; A rendered response's trailing blank line shares its second
-                ;; newline with the composer label, which the delete-region above
-                ;; removes.  When appending after an existing turn, restore that
-                ;; blank line so the new prompt does not glue to the previous
-                ;; response (the full-render path keeps turns contiguous and adds
-                ;; the label once, so it is unaffected).
-                (when (and (> known-count 0)
-                           (not (bobp))
-                           (eq (char-before) ?\n)
-                           (let ((prev (1- (point))))
-                             (or (<= prev (point-min))
-                                 (not (eq (char-before prev) ?\n)))))
-                  (insert (propertize "\n" 'read-only t
-                                      'rear-nonsticky '(read-only))))
-                (dolist (turn new-turns)
-                  (opencode-shell--insert-turn-blocks turn))))
-            (setq fontify-turns (or (append update-turns new-turns) 'none)))
-        (dolist (turn opencode-shell--turns) (opencode-shell--discard-turn-markers turn))
-        ;; Drop gutters of turns no longer in the transcript before rebuilding.
-        (opencode-shell--clear-all-turn-gutters)
-        (delete-region opencode-shell--transcript-end opencode-shell--composer-start)
-        (delete-region (point-min) opencode-shell--transcript-end)
-        (goto-char (point-min))
-        (opencode-shell--insert-permission-results nil)
-        (opencode-shell--insert-unanchored-permission-results)
-        ;; Subagent lines render only under the turn that spawned them (via
-        ;; `--insert-turn-blocks'); ones whose turn cannot be resolved are not
-        ;; bunched at the top.
-        (dolist (turn rlist)
-          (opencode-shell--insert-turn-blocks turn))
-        (setq opencode-shell--composer-label-visible nil
-              fontify-turns (or rlist 'none)))
+            (if (and (not force) (equal signature opencode-shell--rendered-anchor-signature))
+                opencode-shell--rendered-anchor-map
+              (setq opencode-shell--rendered-anchor-signature signature
+                    opencode-shell--rendered-anchor-map
+                    (and opencode-shell--known-descendant-session-ids
+                         (opencode-shell--compute-descendant-anchor-map))))))
+      (setq fontify-turns
+            (opencode-shell--reconcile-turn-blocks rlist force changed-turns))
       (setq opencode-shell--relocated-turn
             (opencode-shell--permission-status-turn))
-      (when (and append-only
-                 (not (opencode-shell--composer-visible-p))
-                 opencode-shell--composer-label-visible)
-        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
-        (setq opencode-shell--composer-label-visible nil))
-      (when (and append-only
-                 (opencode-shell--composer-visible-p)
-                 (not opencode-shell--composer-label-visible)
-                 (or opencode-shell--submit-in-flight
-                     opencode-shell--rendered-turns))
-        (opencode-shell--remove-composer-labels opencode-shell--composer-start)
-        (goto-char opencode-shell--composer-start)
-        (opencode-shell--insert-composer-label)
-        (setq opencode-shell--composer-label-visible t))
       (setq opencode-shell--rendered-turns (copy-sequence rlist))
-      (save-excursion
-        (goto-char (max (point-min)
-                        (- (point-max) 1 (length composer-text))))
-        (set-marker opencode-shell--transcript-end (point))
-        (set-marker opencode-shell--permission-begin (point))
-         (set-marker opencode-shell--permission-end (point))
-         (set-marker opencode-shell--composer-start (point))))
+      (set-marker opencode-shell--permission-begin opencode-shell--transcript-end)
+      (set-marker opencode-shell--composer-start composer-boundary))
     (opencode-shell--render-permissions)
     (opencode-shell--fontify-transcript fontify-turns)
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
-      (goto-char (min old-point opencode-shell--transcript-end))))
-      (set-marker old-point nil)))
+      (goto-char (min old-point (point-max)))))
+      (set-marker old-point nil)
+      (set-marker composer-boundary nil)))
    (opencode-shell--sync-input-policy)))
 
 (defun opencode-shell--fontify-transcript (&optional turns)

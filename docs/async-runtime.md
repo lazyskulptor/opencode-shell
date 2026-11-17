@@ -95,6 +95,11 @@ explicit successful request or manual recovery.
   projection, keeping unchanged prefix/suffix text and native position markers.
   Transcript point follows its existing text marker rather than a stale numeric
   buffer offset; Composer offset and undo protection retain their own contract.
+  Force/layout reconciliation retains live turn blocks, replacing only changed
+  prompt/anchor and response intervals. Only inserted/removed/reordered blocks
+  are rebuilt; invalid legacy markers require rebuilding their invalid region.
+  Interaction cards use their existing canonical inserter to project a small
+  region, then the same minimal replacement rule applies it to the transcript.
 
 ## Lifecycle
 

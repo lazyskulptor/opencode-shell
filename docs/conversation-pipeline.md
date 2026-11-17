@@ -87,9 +87,9 @@ as normal `require` loading.
   while Evil mutating commands are inert outside the writable Composer;
   rerenders preserve Composer draft, point, markers, and undo history. They do
   not issue explicit viewport commands, so they never commandeer the window
-  scroll position; a full rebuild does not restore a previous transcript read
-  position, and Emacs's native redisplay may still adjust the view to keep point
-  visible.
+  scroll position. Force reconciliation reuses retained turn blocks rather than
+  deleting the transcript; removed text cannot retain its old reading position.
+  Emacs's native redisplay may still adjust the view to keep point visible.
   Response updates retain unchanged text rather than deleting the whole response;
   a reader's point stays attached to retained text when earlier content grows.
 - Evil Backspace at an empty Composer boundary is a no-op; it never deletes or

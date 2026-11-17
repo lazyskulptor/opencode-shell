@@ -6569,5 +6569,72 @@ migration paths issue no explicit viewport command and still do their work."
               (set-marker start nil)
               (set-marker position nil))))))))
 
+(ert-deftest opencode-shell-force-position-retains-existing-turns ()
+  (dolist (change '(force prepend remove-first))
+    (save-window-excursion
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (opencode-shell-mode)
+        (let* ((first (opencode-shell--make-turn :id "first" :user "first" :assistant "old" :status 'complete))
+               (reader (opencode-shell--make-turn :id "reader" :user "reader"
+                         :assistant (mapconcat (lambda (n) (format "reader-%03d" n))
+                                               (number-sequence 1 100) "\n") :status 'receiving)))
+          (setq opencode-shell--turns (list first reader))
+          (opencode-shell--render-turns t)
+          (goto-char (opencode-shell--turn-response-begin reader))
+          (forward-line 12)
+          (set-window-start (selected-window) (point) t)
+          (let ((start (copy-marker (window-start))))
+            (forward-line 3)
+            (let ((position (copy-marker (point))))
+              (unwind-protect
+                  (progn
+                    (pcase change
+                      ('prepend (push (opencode-shell--make-turn :id "new" :user "new" :assistant "inserted" :status 'complete)
+                                      opencode-shell--turns))
+                      ('remove-first (setq opencode-shell--turns (list reader))))
+                    (opencode-shell--render-turns t)
+                    (should (= start (window-start)))
+                    (should (= position (point)))
+                    (should (looking-at "reader-016")))
+                (set-marker start nil) (set-marker position nil)))))))))
+
+(ert-deftest opencode-shell-force-position-migration-and-label-repair ()
+  (save-window-excursion
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (opencode-shell-mode)
+      (let* ((turn (opencode-shell--make-turn :id "fixture" :user "question"
+                    :assistant (mapconcat (lambda (n) (format "body-%03d" n))
+                                          (number-sequence 1 100) "\n") :status 'complete))
+             (original (symbol-function 'opencode-shell--render-turns))
+             (rebuilds 0))
+        (cl-letf (((symbol-function 'opencode-shell--composer-visible-p) (lambda () t)))
+          (setq opencode-shell--turns (list turn))
+          (opencode-shell--render-turns t)
+          (goto-char (opencode-shell--turn-response-begin turn))
+          (forward-line 12)
+          (set-window-start (selected-window) (point) t)
+          (forward-line 3)
+          (let ((start (window-start)) (position (point)))
+            (let ((entry (gethash turn opencode-shell--turn-gutters)))
+              (setf (plist-get entry :user)
+                    (append (plist-get entry :user)
+                            (cl-loop repeat 3 collect (make-overlay 1 2)))))
+            (cl-letf (((symbol-function 'opencode-shell--render-turns)
+                       (lambda (&rest args)
+                         (when (car args) (cl-incf rebuilds))
+                         (apply original args))))
+              (opencode-shell--migrate-live-buffer))
+            (should (= rebuilds 1))
+            (should (= start (window-start)))
+            (should (= position (point)))
+            (let ((inhibit-read-only t) (opencode-shell--internal-edit t))
+              (delete-region (1- opencode-shell--composer-start) opencode-shell--composer-start))
+            (opencode-shell--ensure-composer-sentinel)
+            (should (get-text-property (1- opencode-shell--composer-start) 'opencode-shell-composer-label))
+            (should (= start (window-start)))
+            (should (= position (point)))))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here
