@@ -43,12 +43,21 @@ ownership and [testing.md](testing.md) for deterministic callback tests.
    buffers disable `url-http' keep-alive retries (`url-http-no-retry') and
    neutralize process sentinels and exit-query flags before buffer teardown so
    dropped or timed-out connections never trigger interactive kill prompts.
-   Reconnection happens only on explicit user action (`opencode-shell--resync'
+   For remote/SSH profiles reconnection happens only on explicit user action (`opencode-shell--resync'
    via `g r' / `C-c C-r', or `opencode-shell-restart' via `g R' / `C-c C-k').
 10. Once SSH forwarding and endpoint health return, subscribed remote transcripts
     reuse the existing full authoritative resync in their original buffers.
     Idle unsubscribed buffers resync when displayed or explicitly requested;
-    connection recovery never resets server-owned turn progress or Composer drafts.
+     connection recovery never resets server-owned turn progress or Composer drafts.
+
+Ordinary non-remote loopback HTTP services recover transient connection failures
+using the existing bounded recovery scheduler under a separate local key. There
+is one health attempt per shared runtime, never an automatic service restart.
+Successful health resumes polling and queues authoritative resync for subscribers;
+it does not itself settle hydration. Authentication/configuration/decoding errors
+are not retryable. Final unsubscribe and reset cancel health deadlines and probes;
+stale health callbacks cannot revive a replaced runtime. Exhaustion requires an
+explicit successful request or manual recovery.
 
 ## Runtime layers
 

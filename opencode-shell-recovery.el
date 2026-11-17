@@ -1,11 +1,12 @@
-;;; opencode-shell-recovery.el --- Bounded SSH retry policy -*- lexical-binding: t; -*-
+;;; opencode-shell-recovery.el --- Bounded transport retry policy -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026
 ;; Author: opencode-shell contributors
 ;; SPDX-License-Identifier: MIT
 
 ;;; Commentary:
-;; Server-keyed retry decisions.  The caller owns SSH processes and HTTP.
+;; Server-keyed retry decisions.  The caller owns processes and HTTP.
+;; Local HTTP recovery uses a namespaced key, independently of SSH policy.
 
 ;;; Code:
 

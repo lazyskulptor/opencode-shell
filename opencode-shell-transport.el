@@ -80,7 +80,7 @@ already binds `url-request-method' and friends around `url-retrieve'.")
 (defun opencode-shell--server-key (profile)
   "Return the lifecycle identity for PROFILE's server."
   (opencode-shell--server-base-url profile))
-(defun opencode-shell--server-health-callback (profile callback status)
+(defun opencode-shell--server-health-callback (profile callback status &optional failure)
   "Handle a health response for PROFILE and report readiness to CALLBACK.
 The url response buffer is killed off-stack: calling `kill-buffer' directly in
 this `url-retrieve' sentinel synchronously pumps other pending health
@@ -92,7 +92,10 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
                     (<= 200 (or (bound-and-true-p url-http-response-status) 0)
                         299))))
     (unwind-protect
-        (funcall callback ready profile)
+        (if (and (not ready) failure)
+            (funcall failure (if (plist-get status :error) 'transport
+                               (or (bound-and-true-p url-http-response-status) 0)))
+          (funcall callback ready profile))
       (when (buffer-live-p response)
         (opencode-shell--terminate-url-buffer-process response)
         (run-at-time 0 nil #'opencode-shell--kill-url-buffer response)))))
@@ -105,7 +108,7 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
                         (funcall opencode-shell-auth-source-function profile))))
       (cons (or (plist-get profile :auth-header) "Authorization") token))))
 
-(defun opencode-shell--server-ready (profile callback)
+(defun opencode-shell--server-ready (profile callback &optional failure)
   "Invoke CALLBACK with PROFILE when its health endpoint is ready."
   (let (;; `opencode-shell-recovery-watch-attempt' already bounds how long a
         ;; health check may run (`opencode-shell-recovery--attempt-timeout');
@@ -122,7 +125,7 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
      (concat (string-remove-suffix "/" (or (plist-get profile :base-url)
                                              opencode-shell-base-url))
              (or (plist-get profile :health-path) "/health"))
-     (lambda (status) (opencode-shell--server-health-callback profile callback status))
+      (lambda (status) (opencode-shell--server-health-callback profile callback status failure))
      nil t t)))
 
 (defun opencode-shell--attempt-current-p (key attempt)
@@ -528,8 +531,8 @@ just this client's local transport to it."
       (opencode-shell--start-server
        profile
        (lambda (_ready)
-         (opencode-shell-recovery-success key)
-         (opencode-shell-async-resume-runtime key)
+          (opencode-shell-recovery-success key)
+          (opencode-shell-async-resume-runtime key)
          (opencode-shell--ssh-reconcile key)
          (when on-ready (funcall on-ready)))
        (lambda ()
@@ -776,8 +779,8 @@ the deferred keyed application of the parsed value."
                 (buffer-live-p origin)
                 (with-current-buffer origin
                   (= generation opencode-shell--generation)))
-       (with-current-buffer origin
-         (opencode-shell-async-resume-runtime key)
+        (with-current-buffer origin
+          (opencode-shell--transport-resumed key)
          (opencode-shell-async-enqueue
           origin (list 'request request-id) generation
           (lambda ()
@@ -790,14 +793,19 @@ the deferred keyed application of the parsed value."
                 (with-current-buffer origin
                   (= generation opencode-shell--generation)))
        (with-current-buffer origin
-         (if ssh
-             (opencode-shell--ssh-disconnected
-              (or opencode-shell--profile (opencode-shell--default-profile)))
-           (opencode-shell-async-pause-runtime key))
+          (when ssh
+              (opencode-shell--ssh-disconnected
+               (or opencode-shell--profile (opencode-shell--default-profile))))
          (when error-callback
            (opencode-shell-async-enqueue
             origin (list 'request-error request-id) generation error-callback)))))
-   params))
+   params
+   (lambda ()
+     (when (and (not ssh) (buffer-live-p origin)
+                (with-current-buffer origin (= generation opencode-shell--generation)))
+       (with-current-buffer origin
+         (opencode-shell--transport-failed
+          (or opencode-shell--profile (opencode-shell--default-profile))))))))
 
 (defun opencode-shell--request-direct (method path callback &optional body params error-callback)
   "Send METHOD request to PATH and call CALLBACK with decoded JSON.
@@ -847,13 +855,13 @@ called after a transport, status, or decoding failure."
                               (with-current-buffer origin
                                 (= request-generation opencode-shell--generation)))
                     (with-current-buffer origin
-                       (if (opencode-shell--ssh-forwarded-profile-p
-                            (or opencode-shell--profile
-                                (opencode-shell--default-profile)))
-                           (opencode-shell--ssh-disconnected
-                            (or opencode-shell--profile
-                                (opencode-shell--default-profile)))
-                         (opencode-shell-async-pause-runtime key))
+                        (opencode-shell--transport-failed
+                         profile
+                         (not (and (not (bound-and-true-p url-http-response-status))
+                                   (or (memq 'connection-failed (and (listp err) err))
+                                       (memq 'connection-reset (and (listp err) err))
+                                       (and (stringp err)
+                                            (string-match-p "request timed out" err))))))
                        (when opencode-shell-log-requests
                           (opencode-shell--log "OpenCode API #%d ← transport-error %.2fs [%s %s]"
                                               request-id (- (float-time) started) method path))
@@ -888,7 +896,7 @@ called after a transport, status, or decoding failure."
                           (let ((raw-body (unless (= code 204)
                                             (opencode-shell--http-response-body))))
                             (with-current-buffer origin
-                              (opencode-shell-async-resume-runtime key)
+                              (opencode-shell--transport-resumed key)
                               (opencode-shell-async-enqueue
                                origin (list 'request request-id)
                                request-generation
@@ -981,11 +989,95 @@ sessions where the receive burst is felt."
   "Return non-nil when the subprocess snapshot fetch path can be used."
   (and opencode-shell-async-snapshot-fetch (executable-find "curl")))
 
+(defun opencode-shell--local-recovery-profile-p (profile)
+  "Whether PROFILE is an ordinary local loopback HTTP service."
+  (let ((url (url-generic-parse-url (or (plist-get profile :base-url)
+                                      opencode-shell-base-url))))
+    (and (not (opencode-shell--profile-remote-p profile))
+         (equal (url-type url) "http")
+         (member (url-host url) '("localhost" "127.0.0.1" "::1")))))
+
+(defun opencode-shell--transport-resumed (key)
+  "Resume KEY, releasing any outstanding local health recovery."
+  (when-let ((runtime (opencode-shell-async-runtime-get key)))
+    (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+      (funcall cleanup)
+      (maphash
+       (lambda (buffer _subscription)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (opencode-shell-async-enqueue
+              buffer 'local-recovered opencode-shell--generation
+              (lambda () (opencode-shell--resync nil))))))
+       (plist-get runtime :subscribers))))
+  (opencode-shell-async-resume-runtime key))
+
+(defun opencode-shell--local-recovery-start (profile)
+  "Coalesce bounded health recovery for local PROFILE's subscribed runtime."
+  (let* ((key (opencode-shell--server-key profile))
+         (recovery-key (list 'local-http key))
+         (runtime (opencode-shell-async-runtime-get key))
+         response cleanup)
+    (when (and runtime (opencode-shell--local-recovery-profile-p profile)
+               (not (plist-get runtime :recovery-cleanup))
+               (not (opencode-shell-recovery-exhausted-p recovery-key)))
+      ;; Keep runtime identity stable even for a minimally constructed runtime.
+      (unless (plist-member runtime :recovery-cleanup)
+        (nconc runtime (list :recovery-cleanup nil)))
+      (cl-labels
+          ((needed ()
+             (and (eq runtime (opencode-shell-async-runtime-get key))
+                  (> (hash-table-count (plist-get runtime :subscribers)) 0)
+                  (eq cleanup (plist-get runtime :recovery-cleanup))))
+           (release-response ()
+             (opencode-shell--kill-url-buffer response)
+             (setq response nil))
+           (stop ()
+             (setf (plist-get runtime :recovery-cleanup) nil)
+             (opencode-shell-recovery-cancel recovery-key)
+             (release-response))
+           (failed ()
+             (when (needed)
+               (opencode-shell-recovery-failed recovery-key #'probe #'needed)))
+           (probe ()
+             (when (needed)
+               (let ((attempt
+                      (opencode-shell-recovery-watch-attempt
+                       recovery-key (lambda () (release-response) (failed)))))
+                 (setq response
+                       (opencode-shell--server-ready
+                        profile
+                        (lambda (ready _profile)
+                          (when (and (needed)
+                                     (eq attempt (plist-get (gethash recovery-key opencode-shell-recovery--states) :attempt)))
+                            ;; Health callback itself owns off-stack buffer cleanup.
+                            (setq response nil)
+                            (if ready (opencode-shell--transport-resumed key) (failed))))
+                        (lambda (reason)
+                          (when (and (needed)
+                                     (eq attempt (plist-get (gethash recovery-key opencode-shell-recovery--states) :attempt)))
+                            (setq response nil)
+                            (if (or (eq reason 'transport)
+                                    (and (numberp reason) (<= 500 reason 599)))
+                                (failed)
+                              (stop))))))))))
+        (setq cleanup #'stop)
+        (setf (plist-get runtime :recovery-cleanup) cleanup)
+        (opencode-shell-recovery-mark-offline recovery-key)
+        (failed)))))
+
+(defun opencode-shell--transport-failed (profile &optional nonretryable)
+  "Pause PROFILE and schedule bounded recovery only for a local service."
+  (if (opencode-shell--ssh-forwarded-profile-p profile)
+      (opencode-shell--ssh-disconnected profile)
+    (opencode-shell-async-pause-runtime (opencode-shell--server-key profile))
+    (unless nonretryable (opencode-shell--local-recovery-start profile))))
+
 (defun opencode-shell--large-snapshot-path-p (path)
   "Return non-nil when PATH is a large transcript snapshot worth offloading."
   (and (stringp path) (string-match-p "/session/[^/]+/message\\'" path)))
 
-(defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params)
+(defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params transport-error)
   "Fetch large JSON snapshot PATH in a subprocess and call CALLBACK with the
 decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
 `opencode-shell--request-direct' when the subprocess path is unavailable, so
@@ -1014,7 +1106,8 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
              (unless settled
                (setq settled t)
                (unwind-protect (funcall thunk) (cleanup))))
-           (fail ()
+           (fail (&optional transient)
+             (when (and transient transport-error) (funcall transport-error))
              (when error-callback (funcall error-callback)))
            (cancel ()
              ;; Claim settlement before process deletion can re-enter the sentinel.
@@ -1031,7 +1124,7 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                      (error nil))
                    ;; Application exceptions are not transport/decode failures.
                    (if decoded (funcall callback value) (fail)))
-               (fail))))
+               (fail (memq (process-exit-status process) '(5 6 7 18 28 52 55 56))))))
         (condition-case _start-error
             (progn
               (setq cancel-request #'cancel
@@ -1047,7 +1140,7 @@ decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
                     (run-at-time
                      opencode-shell--url-retrieve-timeout nil
                      (lambda ()
-                       (finalize #'fail))))
+                       (finalize (lambda () (fail t))))))
               (setq proc
                     (make-process
                      :name "opencode-async-fetch" :buffer buffer :noquery t

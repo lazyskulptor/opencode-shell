@@ -313,6 +313,8 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (remhash buffer (plist-get runtime :subscribers))
     (when (zerop (hash-table-count (plist-get runtime :subscribers)))
+      (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+        (funcall cleanup))
       (dolist (timer (list (plist-get runtime :poll-timer)
                            (plist-get runtime :reconnect-timer)))
         (when (timerp timer) (cancel-timer timer)))
@@ -455,6 +457,8 @@ Only the latest pending value for KEY and GENERATION is retained."
         opencode-shell-async--animation-interval nil)
   (maphash
    (lambda (_key runtime)
+     (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+       (funcall cleanup))
      (dolist (timer (list (plist-get runtime :poll-timer)
                           (plist-get runtime :reconnect-timer)))
        (when (timerp timer) (cancel-timer timer)))
