@@ -6512,5 +6512,62 @@ migration paths issue no explicit viewport command and still do their work."
         (opencode-shell--reconcile-quiet)
         (should (= requests 2))))))
 
+(ert-deftest opencode-shell-stream-position-preserves-unchanged-reading-prefix ()
+  (dolist (change '(append shorten complete))
+    (save-window-excursion
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (opencode-shell-mode)
+        (let* ((lines (mapcar (lambda (n) (format "fixture-line-%03d" n))
+                              (number-sequence 1 120)))
+               (body (mapconcat #'identity lines "\n"))
+               (turn (opencode-shell--make-turn :id "fixture" :user "question"
+                                               :assistant body :status 'receiving)))
+          (setq opencode-shell--turns (list turn))
+          (opencode-shell--render-turns t)
+          (goto-char (opencode-shell--turn-response-begin turn))
+          (forward-line 12)
+          (set-window-start (selected-window) (point) t)
+          (forward-line 3)
+          (let ((start (window-start)) (position (point))
+                (text (buffer-substring-no-properties (point) (+ (point) 16))))
+            (pcase change
+              ('append (setf (opencode-shell--turn-assistant turn) (concat body "\nnew tail")))
+              ('shorten (setf (opencode-shell--turn-assistant turn)
+                              (mapconcat #'identity (seq-take lines 80) "\n")))
+              ('complete (setf (opencode-shell--turn-status turn) 'complete)))
+            (opencode-shell--render-turns nil (list turn))
+            (should (= start (window-start)))
+            (should (= position (point)))
+            (should (equal text (buffer-substring-no-properties (point) (+ (point) 16))))))))))
+
+(ert-deftest opencode-shell-stream-position-earlier-growth-keeps-logical-point ()
+  (save-window-excursion
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (opencode-shell-mode)
+      (let* ((first (opencode-shell--make-turn :id "one" :user "one" :assistant "first" :status 'complete))
+             (second (opencode-shell--make-turn :id "two" :user "two"
+                      :assistant (mapconcat (lambda (n) (format "second-%03d" n))
+                                            (number-sequence 1 80) "\n") :status 'receiving)))
+        (setq opencode-shell--turns (list first second))
+        (opencode-shell--render-turns t)
+        (goto-char (opencode-shell--turn-response-begin second))
+        (forward-line 12)
+        (set-window-start (selected-window) (point) t)
+        (let ((start (copy-marker (window-start))))
+          (forward-line 3)
+          (let ((position (copy-marker (point)))
+                (text (buffer-substring-no-properties (point) (+ (point) 10))))
+            (unwind-protect
+                (progn
+                  (setf (opencode-shell--turn-assistant first) "first\nadditional\nlines")
+                  (opencode-shell--render-turns nil (list first))
+                  (should (= start (window-start)))
+                  (should (= position (point)))
+                  (should (equal text (buffer-substring-no-properties (point) (+ (point) 10)))))
+              (set-marker start nil)
+              (set-marker position nil))))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

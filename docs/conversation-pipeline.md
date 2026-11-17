@@ -90,6 +90,8 @@ as normal `require` loading.
   scroll position; a full rebuild does not restore a previous transcript read
   position, and Emacs's native redisplay may still adjust the view to keep point
   visible.
+  Response updates retain unchanged text rather than deleting the whole response;
+  a reader's point stays attached to retained text when earlier content grows.
 - Evil Backspace at an empty Composer boundary is a no-op; it never deletes or
   recreates the structural prompt line.
 

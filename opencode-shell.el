@@ -3715,6 +3715,26 @@ coalesces repeated changes into a single off-hook render."
             (let ((opencode-shell--table-rerendering t))
               (opencode-shell--render-turns nil (or table-turns 'none))))))))))
 
+(defun opencode-shell--replace-display-region (begin end display)
+  "Replace only the changed middle of BEGIN..END with propertized DISPLAY.
+Leave unchanged prefix/suffix characters, and their native position markers,
+in place.  Return non-nil when text changed."
+  (let* ((old (buffer-substring begin end))
+         (old-length (length old)) (new-length (length display))
+         (prefix 0) (suffix 0))
+    (unless (string= old display)
+      (while (and (< prefix (min old-length new-length))
+                  (= (aref old prefix) (aref display prefix)))
+        (cl-incf prefix))
+      (while (and (< suffix (- (min old-length new-length) prefix))
+                  (= (aref old (- old-length suffix 1))
+                     (aref display (- new-length suffix 1))))
+        (cl-incf suffix))
+      (goto-char (+ begin prefix))
+      (delete-region (point) (- end suffix))
+      (insert-before-markers (substring display prefix (- new-length suffix)))
+      t)))
+
 (defun opencode-shell--update-turn-response (turn)
   "Update only TURN's immutable response block."
   (let ((begin (opencode-shell--turn-response-begin turn))
@@ -3723,19 +3743,13 @@ coalesces repeated changes into a single off-hook render."
          (marker-position (opencode-shell--turn-user-end turn)))
         (display (opencode-shell--cached-response-display turn))
         (inhibit-read-only t))
-    (unless (string= display (buffer-substring begin end))
-      (let ((position (marker-position begin)))
-        (delete-region begin end)
-        (goto-char position)
-        ;; Advance every downstream transcript/composer marker past the
-        ;; replacement, then restore this region's opening marker explicitly.
-        (insert-before-markers display)
+    (let ((position (marker-position begin)))
+      (when (opencode-shell--replace-display-region begin end display)
         (set-marker (opencode-shell--turn-user-end turn) user-end-position)
         (set-marker begin position)
-        (add-text-properties begin (point)
-                           '(read-only t rear-nonsticky (read-only face)))
-        (set-marker end (point))
-        (opencode-shell--apply-response-gutter turn position (point))))))
+        (add-text-properties begin end
+                            '(read-only t rear-nonsticky (read-only face)))
+        (opencode-shell--apply-response-gutter turn position end)))))
 
 (defun opencode-shell--render-status-animation ()
   "Update transient spinner presentation without modifying buffer text."
@@ -3804,12 +3818,14 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
    (let* ((composer-offset (and (opencode-shell--point-in-composer-p)
                                 (- (point) opencode-shell--composer-start)))
          (composer-text (opencode-shell--composer-text))
-         (old-point (point))
+         (old-point (copy-marker (point)))
           (inhibit-read-only t)
           ;; Only the most-recent window of turns is drawn (see
           ;; `opencode-shell--rendered-turn-window'); state keeps every turn.
           (rlist (opencode-shell--rendered-turn-window))
           fontify-turns)
+     (unwind-protect
+      (progn
     (when (and (not force)
                opencode-shell--rendered-turns
                rlist
@@ -3923,6 +3939,7 @@ Otherwise update only CHANGED-TURNS when that list is non-nil."
     (if composer-offset
         (goto-char (min (point-max) (+ opencode-shell--composer-start composer-offset)))
       (goto-char (min old-point opencode-shell--transcript-end))))
+      (set-marker old-point nil)))
    (opencode-shell--sync-input-policy)))
 
 (defun opencode-shell--fontify-transcript (&optional turns)

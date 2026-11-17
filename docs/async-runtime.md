@@ -91,6 +91,10 @@ explicit successful request or manual recovery.
   edits, and Emacs's native redisplay can adjust the view to keep point visible,
   so the guarantee is "no explicit scroll command from background updates", not
   "the screen never moves". User scrolling and turn navigation stay authoritative.
+  Streaming response edits replace only the changed middle of the canonical
+  projection, keeping unchanged prefix/suffix text and native position markers.
+  Transcript point follows its existing text marker rather than a stale numeric
+  buffer offset; Composer offset and undo protection retain their own contract.
 
 ## Lifecycle
 
