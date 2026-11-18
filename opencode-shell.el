@@ -334,7 +334,7 @@ profiles make the result ambiguous."
        nil nil (lambda () (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (defun opencode-shell--start-server-for-command (profile callback)
-  "Start PROFILE for a one-shot browser or session command."
+  "Start PROFILE for a one-shot command and call CALLBACK when ready."
   (if (opencode-shell--ssh-forwarded-profile-p profile)
       (opencode-shell--start-server
        profile callback (lambda () (opencode-shell--ssh-disconnected profile)))
@@ -538,8 +538,8 @@ Move the associated API log buffer so its name stays in sync."
   "Non-nil when the current session itself belongs to a parent session.
 A subagent session is driven by its parent's `task' tool call rather than
 direct user input, so its composer stays hidden and `opencode-shell--submit'
-refuses to send a prompt into it.  Set from `opencode-shell--refresh-session-metadata'
-once the owning `/session' snapshot is known; nil (permit editing) until then.")
+refuses to send a prompt into it.  Set when the owning `/session' snapshot
+is known; nil (permit editing) until then.")
 (defvar-local opencode-shell--models nil)
 (defvar-local opencode-shell--agents nil)
 (defvar-local opencode-shell--configured-model nil)
@@ -815,7 +815,7 @@ web UI.  Nil (unknown) is conservative and keeps the original behavior.")
         (push (cadar entry) result)))))
 
 (defun opencode-shell--fetch-relocated-sessions (sessions callback)
-  "Add sessions relocated to the current directory, then call CALLBACK."
+  "Add relocated entries to SESSIONS, then call CALLBACK."
   (let* ((present (mapcar (lambda (session) (opencode-shell--get session 'id)) sessions))
          (missing (seq-remove (lambda (id) (member id present))
                               (opencode-shell--relocated-session-ids
@@ -932,7 +932,7 @@ not permanently block later re-escalation."
                 opencode-shell--refresh-escalation-cooldown))
     (setq opencode-shell--last-refresh-escalation (float-time))
     (opencode-shell--note-request-error
-     "OpenCode: session refresh failed; re-establishing connection...")
+      "OpenCode: session refresh failed; re-establishing connection")
     (let ((origin (current-buffer))
           (profile opencode-shell--profile))
       (cl-flet ((retry ()
@@ -1501,7 +1501,7 @@ start, keeping the transcript protected across follow-up edits."
       opencode-shell--composer-start)))
 
 (defun opencode-shell--protect-transcript (begin end)
-  "Reject user edits outside or crossing the visible composer boundary."
+  "Reject user edits from BEGIN to END outside the writable Composer."
   (when (and (not opencode-shell--internal-edit)
              (markerp opencode-shell--composer-start)
              (marker-position opencode-shell--composer-start)
@@ -1983,8 +1983,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
                             (opencode-shell--get envelope 'parts))) ""))
 
 (defun opencode-shell--message-error-label (info)
-  "Return a bounded, single-line human-readable label for INFO's terminal
-error, or nil."
+  "Return a bounded single-line label for INFO's terminal error, or nil."
   (when-let* ((err (opencode-shell--get info 'error)))
     (let* ((name (format "%s" (or (opencode-shell--get err 'name) "Error")))
            (message (opencode-shell--get (opencode-shell--get err 'data) 'message)))
@@ -2071,7 +2070,7 @@ When FORCE is non-nil, emit the state even when its signature is unchanged."
                              (if event (format "[%s]" event) "") summary)))))
 
 (defun opencode-shell--turn-by-id (id turns)
-  "Find the turn whose stable client or server ID equals ID."
+  "Find the turn in TURNS whose stable client or server ID equals ID."
   (let ((cached (and (consp opencode-shell--recent-turn-cache)
                      (eq (car opencode-shell--recent-turn-cache) turns)
                      (cdr opencode-shell--recent-turn-cache))))
@@ -2160,7 +2159,7 @@ spawning tool call for the first time trigger one, without adding a
 (defun opencode-shell--normalize-turns (messages &optional authoritative)
   "Reconcile server MESSAGES into stable buffer-local turn records.
 AUTHORITATIVE replaces assistant state and restores observed user order; partial
-events merge instead. Unacknowledged local prompts retain their draft text."
+events merge instead.  Unacknowledged local prompts retain their draft text."
   (let ((old opencode-shell--turns) observed current changed
         (touched (make-hash-table :test #'eq))
         (turn-index (make-hash-table :test #'equal))
@@ -3081,11 +3080,11 @@ When DEFER-RENDER is non-nil, coalesce presentation at idle time."
     (cons begin (point))))
 
 (defun opencode-shell--activate-button (span command)
-  "Make buffer SPAN clickable, invoking COMMAND on a mouse-1 click.
+  "Make buffer SPAN clickable, invoking COMMAND on activation.
 SPAN is a (BEGIN . END) pair, as returned by
 `opencode-shell--insert-button-text'.  With `follow-link' set to `mouse-face',
-Emacs translates a plain mouse-1 click on SPAN into a mouse-2 event (see
-`mouse-on-link-p'), so COMMAND must be bound under [mouse-2], not [mouse-1].
+Emacs translates a primary click on SPAN into a link activation event;
+see `mouse-on-link-p'.
 Other keys fall back to whichever keymap already covers SPAN, so bare
 keyboard shortcuts keep working."
   (let ((map (make-sparse-keymap)))
@@ -3122,7 +3121,7 @@ the sole known descendant session directly, or prompt among several."
 (defun opencode-shell--insert-descendant-session-line (id &optional running)
   "Insert one clickable line referencing subagent session ID at point.
 When RUNNING is non-nil, append a spinner cell driven by the existing
-status-spinner overlay/animation (see `opencode-shell--refresh-spinner-overlays')."
+status-spinner overlays."
   (let ((begin (point)) label)
     (insert "◇ subagent ")
     (setq label (opencode-shell--insert-button-text id))
@@ -3197,8 +3196,9 @@ Only runs while subagents are known; a status change schedules a rebuild."
      nil nil)))
 
 (defun opencode-shell--insert-descendant-sessions-for-turn (anchor)
-  "Insert subagent lines anchored to turn id ANCHOR, each with a spinner if
-the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
+  "Insert subagent lines anchored to turn ID ANCHOR.
+Show a spinner for each running subagent.  Read the anchor mapping from
+`opencode-shell--descendant-anchor-map'."
   (dolist (id opencode-shell--known-descendant-session-ids)
     (when (equal anchor (alist-get id opencode-shell--descendant-anchor-map
                                    nil nil #'equal))
@@ -3567,7 +3567,8 @@ renders last, below every subagent line rather than above it."
          (apply #'<= (mapcar #'marker-position markers)))))
 
 (defun opencode-shell--response-display (turn &optional relocated)
-  "Return the propertized response display for TURN."
+  "Return the propertized response display for TURN.
+Show the response even in the interaction region when RELOCATED is non-nil."
   (if (and (not relocated)
            (eq turn (opencode-shell--permission-status-turn)))
       ""
@@ -3964,7 +3965,8 @@ See `opencode-shell-max-rendered-turns'."
      opencode-shell--gutter-glyph-user 'opencode-shell-user-face 'opencode-shell-user-gutter-face)))
 
 (defun opencode-shell--reconcile-turn-blocks (turns force changed-turns)
-  "Reconcile TURN order, retaining live blocks and editing only changed ranges."
+  "Reconcile the order of TURNS, retaining live blocks where possible.
+If FORCE is non-nil, update all projections; otherwise use CHANGED-TURNS."
   (let ((old opencode-shell--rendered-turns)
         (updates (if force turns (opencode-shell--turns-to-update changed-turns)))
         fontify)
@@ -4208,6 +4210,7 @@ CHANGED-TURNS into the response blocks pending incremental update."
 (defun opencode-shell--render-messages
     (messages &optional sequence defer-render authoritative)
   "Reconcile chronological message envelopes from MESSAGES.
+Ignore a non-nil SEQUENCE that is no newer than the applied sequence.
 Render immediately unless DEFER-RENDER is non-nil.  When AUTHORITATIVE is
 non-nil, remove cached server messages absent from the snapshot."
   (when (or (null sequence) (> sequence opencode-shell--message-applied-sequence))
@@ -4259,7 +4262,7 @@ non-nil, remove cached server messages absent from the snapshot."
                     opencode-shell--render-dirty-turns nil))))))))
 
 (defun opencode-shell--guarded-request (key method path callback &optional body error-callback params)
-  "Request PATH once per generation under KEY.
+  "Request PATH with METHOD once per generation under KEY.
 PARAMS, when non-nil, are query parameters forwarded to the underlying request."
   (unless (alist-get key opencode-shell--in-flight)
     (let ((origin (current-buffer))
@@ -4395,7 +4398,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
     (opencode-shell--resync-snapshots full resource)))
 
 (defun opencode-shell--resync-snapshots (&optional full resource)
-  "Fetch the existing authoritative session snapshots."
+  "Fetch authoritative snapshots for RESOURCE, including metadata if FULL."
   (opencode-shell--retry-hydration
    (if (memq resource '(nil all))
        '(messages permissions questions)
@@ -4662,7 +4665,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
 
 (defun opencode-shell--interaction-request (kind id method path success
                                                     &optional body failure)
-  "Send a KIND request for ID and settle only its matching callback."
+  "Send a KIND request for ID using METHOD and PATH.
+Send BODY and settle only the matching request, calling SUCCESS or FAILURE."
   (setq opencode-shell--interaction-state
         (opencode-shell-interaction-begin
          opencode-shell--interaction-state kind id))
@@ -4743,7 +4747,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
   (when (opencode-shell-interaction-active-p
          opencode-shell--interaction-state 'question)
     (user-error "Question reply already in progress"))
-  (if (and confirm (not (yes-or-no-p "Answer this question? (No rejects) ")))
+  (if (and confirm (not (yes-or-no-p "Answer this question (no rejects)? ")))
       (opencode-shell--question-reject item)
     (let* ((id (opencode-shell--question-id item))
            (answers (vconcat
@@ -5195,7 +5199,7 @@ ACTIVE means that their session browser is already live."
                       emulation-mode-map-alists))))
 
 (defun opencode-shell--session-location-candidate (text candidates)
-  "Return the uniquely matching location candidate for minibuffer TEXT."
+  "Return the unique match for minibuffer TEXT in CANDIDATES."
   (or (seq-find (lambda (item) (string= text (car item))) candidates)
       (let ((matches
              (seq-filter (lambda (item)

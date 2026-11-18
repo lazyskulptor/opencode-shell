@@ -65,7 +65,7 @@ Each retained session keeps its server-reported directory unchanged."
     (nreverse result)))
 
 (defun opencode-shell--model-value (model &optional provider-id)
-  "Normalize MODEL to a providerID/modelID object."
+  "Normalize MODEL to a providerID/modelID object using PROVIDER-ID."
   (cond
    ((stringp model)
     (let ((parts (split-string model "/")))
@@ -80,7 +80,7 @@ Each retained session keeps its server-reported directory unchanged."
              (modelID . ,model-id)))))))
 
 (defun opencode-shell--model-name (model &optional provider-id)
-  "Return display name for normalized MODEL."
+  "Return the display name for MODEL, using PROVIDER-ID as a fallback."
   (let* ((value (opencode-shell--model-value model provider-id))
          (provider (opencode-shell-sessions--get value 'providerID))
          (id (opencode-shell-sessions--get value 'modelID)))

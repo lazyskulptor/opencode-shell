@@ -82,7 +82,7 @@ already binds `url-request-method' and friends around `url-retrieve'.")
   "Return the lifecycle identity for PROFILE's server."
   (opencode-shell--server-base-url profile))
 (defun opencode-shell--server-health-callback (profile callback status &optional failure)
-  "Handle a health response for PROFILE and report readiness to CALLBACK.
+  "Handle health response STATUS for PROFILE and call CALLBACK.
 The url response buffer is killed off-stack: calling `kill-buffer' directly in
 this `url-retrieve' sentinel synchronously pumps other pending health
 connections' sentinels, which re-enter this callback and can recurse until the
@@ -240,7 +240,7 @@ not exact."
                          (- (point-max) opencode-shell--process-tail-limit)))))))
 
 (defun opencode-shell--process-sentinel (key attempt process _event)
-  "Handle an owned PROCESS exiting during startup for KEY."
+  "Handle PROCESS exit for KEY during startup ATTEMPT."
   (let ((state (gethash key opencode-shell--servers)))
     (when (and state
                (memq (process-status process) '(exit signal failed))
@@ -275,7 +275,7 @@ not exact."
                 (opencode-shell--ssh-disconnected profile)))))))))
 
 (defun opencode-shell--spawn-server (profile attempt)
-  "Start PROFILE exactly once and begin bounded health polling."
+  "Start PROFILE once for ATTEMPT and begin bounded health polling."
   (let* ((key (opencode-shell--server-key profile))
          (state (gethash key opencode-shell--servers))
          (command (plist-get profile :start-command)))
@@ -313,6 +313,7 @@ not exact."
 (defun opencode-shell--start-server
     (&optional profile callback failure-callback retry-callback)
   "Start PROFILE's configured process and invoke CALLBACK when healthy.
+Call FAILURE-CALLBACK on failure and RETRY-CALLBACK after recovery.
 Concurrent starts for one server are coalesced.  A remote profile may use
 `:start-command' to establish its transport, such as an SSH tunnel."
   (let* ((profile (or profile opencode-shell--profile (opencode-shell--read-profile)))
@@ -518,7 +519,7 @@ just this client's local transport to it."
          (member (url-host url) '("localhost" "127.0.0.1" "::1")))))
 
 (defun opencode-shell--ssh-retry (profile &optional on-ready _needed)
-  "Retry PROFILE's SSH transport once through the existing start flow."
+  "Retry PROFILE's SSH transport, calling ON-READY on success."
   (let ((key (opencode-shell--server-key profile)))
     (unless (opencode-shell-recovery-exhausted-p key)
       (opencode-shell-recovery-watch-attempt
@@ -584,7 +585,9 @@ just this client's local transport to it."
 (defun opencode-shell--ssh-wait-request
     (profile key origin generation method path callback body params error-callback
              &optional timeout)
-  "Defer a read-only request until KEY's existing SSH start succeeds.
+  "Defer PROFILE's read-only request until KEY's SSH start succeeds.
+Deliver the result to ORIGIN only for GENERATION.  Forward METHOD, PATH,
+CALLBACK, BODY, PARAMS, and ERROR-CALLBACK when dispatching the request.
 TIMEOUT, when given, is the caller's `opencode-shell--url-retrieve-timeout'
 captured before deferring, re-applied once the deferred request actually
 dispatches so it survives outliving that dynamic extent."
@@ -632,7 +635,8 @@ dispatches so it survives outliving that dynamic extent."
                                         "SSH readiness timed out")))))))
 
 (defun opencode-shell--request (method path callback &optional body params error-callback)
-  "Send request after an SSH-backed PROFILE has verified its forwarding.
+  "Send METHOD request to PATH after verifying SSH forwarding when needed.
+Forward CALLBACK, BODY, PARAMS, and ERROR-CALLBACK to the transport.
 Captures the caller's current `opencode-shell--url-retrieve-timeout' as a
 lexical value up front so a caller that `let'-binds a longer timeout (e.g.
 `opencode-shell-rename-session') keeps it even when the actual request is
@@ -732,15 +736,14 @@ produces a single notice instead of a flood.  A successful request resets
       (kill-buffer buffer))))
 
 (defun opencode-shell--url-retrieve-no-query (url callback &optional cbargs silent inhibit-cookies)
-  "Call `url-retrieve' guarded against query-on-exit and a silent hang.
+  "Retrieve URL without exit prompts or indefinite waits.
+Forward CBARGS, SILENT, and INHIBIT-COOKIES to `url-retrieve'.
 Disables query-on-exit for the response process (see
 `opencode-shell--request-direct') and, if CALLBACK has not fired within
 `opencode-shell--url-retrieve-timeout' seconds, invokes it once with a
 synthesized `:error' status so a hang surfaces the same way an explicit
 connection error would, instead of leaking its buffer and process forever.
-SETTLED guards against both firing: `run-at-time' is not guaranteed non-nil
-(tests commonly stub it to return nil), so TIMER itself cannot double as
-that guard."
+SETTLED guards against both firing, even if no TIMER was returned."
   (let (settled response-buffer timer)
     (setq timer
           (run-at-time
@@ -751,7 +754,7 @@ that guard."
                (when (buffer-live-p response-buffer)
                  (opencode-shell--terminate-url-buffer-process response-buffer)
                  (with-current-buffer response-buffer
-                   (funcall callback '(:error "opencode-shell: request timed out"))))))))
+                    (funcall callback '(:error "OpenCode Shell: request timed out"))))))))
     (setq response-buffer
           (let ((default-directory temporary-file-directory)
                 (file-name-handler-alist nil))
@@ -776,9 +779,11 @@ that guard."
 (defun opencode-shell--request-direct-async
     (path origin generation request-id key ssh transport-epoch
           callback error-callback params)
-  "Fetch PATH in a subprocess and apply CALLBACK under the same guards as
-`opencode-shell--request-direct': generation, buffer liveness, SSH epoch, and
-the deferred keyed application of the parsed value."
+  "Fetch PATH in a subprocess for buffer ORIGIN.
+Apply CALLBACK through the keyed queue after checking buffer lifetime,
+GENERATION, and TRANSPORT-EPOCH for SSH.  Use KEY for recovery and
+REQUEST-ID for keyed delivery.  Pass PARAMS as query parameters and call
+ERROR-CALLBACK on failure."
   (opencode-shell--fetch-snapshot-async
    path
    (lambda (value)
@@ -979,7 +984,7 @@ service -- only this client's connection to it.  Use
   "Restart the service behind PROFILE via its configured :restart-command.
 Unlike `opencode-shell-restart', which only ever reconnects this client's
 existing transport, this actually restarts the service on the other end
-(e.g. killing and relaunching a remote opencode process over SSH) -- a
+such as killing and relaunching a remote OpenCode process over SSH -- a
 riskier, slower operation that only applies to profiles with
 :restart-command configured; errors otherwise."
   (interactive (list (opencode-shell--resolve-or-read-profile opencode-shell--profile)))
@@ -1100,7 +1105,7 @@ sessions where the receive burst is felt."
         (failed)))))
 
 (defun opencode-shell--transport-failed (profile &optional nonretryable)
-  "Pause PROFILE and schedule bounded recovery only for a local service."
+  "Pause PROFILE and schedule local recovery unless NONRETRYABLE."
   (if (opencode-shell--ssh-forwarded-profile-p profile)
       (opencode-shell--ssh-disconnected profile)
     (opencode-shell-async-pause-runtime (opencode-shell--server-key profile))
@@ -1111,8 +1116,9 @@ sessions where the receive burst is felt."
   (and (stringp path) (string-match-p "/session/[^/]+/message\\'" path)))
 
 (defun opencode-shell--fetch-snapshot-async (path callback &optional error-callback params transport-error)
-  "Fetch large JSON snapshot PATH in a subprocess and call CALLBACK with the
-decoded value on completion, or ERROR-CALLBACK on failure.  Falls back to
+  "Fetch a large JSON snapshot from PATH with query PARAMS.
+Call CALLBACK with the decoded value, or ERROR-CALLBACK on failure.
+Call TRANSPORT-ERROR on a transient subprocess failure.  Fall back to
 `opencode-shell--request-direct' when the subprocess path is unavailable, so
 `url-retrieve' stubs and non-curl environments keep working unchanged."
   (if (not (opencode-shell--async-fetch-available-p))

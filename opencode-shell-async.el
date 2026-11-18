@@ -64,7 +64,8 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
             (delq cancel opencode-shell-async--request-cancellations)))))
 
 (defun opencode-shell-async-cancel-requests (&optional buffer)
-  "Cancel requests owned by BUFFER, or the current buffer, without delivering results."
+  "Cancel requests owned by BUFFER, or the current buffer.
+Do not deliver results for the cancelled requests."
   (with-current-buffer (or buffer (current-buffer))
     (let ((cancellations opencode-shell-async--request-cancellations))
       ;; Detach before invocation: a cancellation may re-enter cleanup.
@@ -127,7 +128,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
      (plist-get runtime :subscribers))))
 
 (defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)
-  "Emit a privacy-safe runtime message for RUNTIME."
+  "Log a privacy-safe message for RUNTIME using FORMAT-STRING and ARGUMENTS."
   (when-let* ((logger (plist-get runtime :logger)))
     (funcall logger (apply #'format format-string arguments))))
 
@@ -190,7 +191,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
               (run-at-time delay nil #'opencode-shell-async--connect key))))))
 
 (defun opencode-shell-async--transport-event (key attempt event)
-  "Wake KEY runtime for an SSE event from ATTEMPT."
+  "Wake KEY runtime for SSE EVENT from ATTEMPT."
   (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1

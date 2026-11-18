@@ -506,7 +506,8 @@ not mutated; the returned parser is the next state."
     (url headers on-event on-error &key (header-timeout 10) on-open)
   "Open URL as an SSE stream and return its connection object.
 HEADERS is an alist of additional HTTP headers.  ON-EVENT receives parsed
-event plists; ON-ERROR receives typed error plists."
+event plists; ON-ERROR receives typed error plists.  HEADER-TIMEOUT limits
+the wait for headers.  Call ON-OPEN after accepting the headers."
   (unless (and (functionp on-event) (functionp on-error))
     (error "SSE callbacks must be functions"))
   (unless (or (null on-open) (functionp on-open))

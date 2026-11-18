@@ -17,9 +17,8 @@
 (defconst opencode-shell-recovery--max-failures 10)
 (defconst opencode-shell-recovery--attempt-timeout 10)
 (defconst opencode-shell-recovery--blips-tolerated-before-kill 1
-  "Consecutive failures a live-but-unhealthy owned process is given before
-the caller should force-kill it so the next retry spawns a fresh one, rather
-than re-probing the same process that will never pass a health check again.
+  "Number of failures to tolerate before replacing an unhealthy process.
+Replace the owned process rather than probing it again.
 0 kills on the very first failure; the default of 1 tolerates one transient
 blip first.")
 
@@ -73,7 +72,7 @@ blip first.")
          (plist-get state :attempt) nil))
 
 (defun opencode-shell-recovery--schedule (key state retry needed)
-  "Schedule KEY's next bounded attempt using its existing failure count."
+  "Schedule RETRY for KEY if NEEDED, using STATE's failure count."
   (let ((token (make-symbol "ssh-retry")))
     (setf (plist-get state :retry-token) token
           (plist-get state :retry-timer)
@@ -105,7 +104,8 @@ blip first.")
           (opencode-shell-recovery--schedule key state retry needed))))))
 
 (defun opencode-shell-recovery-resume (key retry needed)
-  "Resume KEY's paused retry timer for new demand without resetting its budget."
+  "Resume KEY's paused retry timer without resetting its budget.
+Run RETRY if NEEDED when the timer fires."
   (when-let* ((state (gethash key opencode-shell-recovery--states)))
     (when (and (plist-get state :offline)
                (not (plist-get state :exhausted))

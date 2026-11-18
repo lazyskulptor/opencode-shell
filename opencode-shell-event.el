@@ -35,6 +35,7 @@
 
 (defun opencode-shell-event--snapshot (type reason &optional session-id resource)
   "Return a bounded snapshot hint for TYPE and REASON.
+Use RESOURCE to override the inferred snapshot resource.
 When SESSION-ID is non-nil, scope the hint to that session."
   (let ((resource
          (or resource
