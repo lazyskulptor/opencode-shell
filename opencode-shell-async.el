@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'seq)
 (require 'opencode-shell-sse)
 (require 'opencode-shell-event)
@@ -127,12 +128,12 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--runtime-log (runtime format-string &rest arguments)
   "Emit a privacy-safe runtime message for RUNTIME."
-  (when-let ((logger (plist-get runtime :logger)))
+  (when-let* ((logger (plist-get runtime :logger)))
     (funcall logger (apply #'format format-string arguments))))
 
 (defun opencode-shell-async--poll-runtime (key)
   "Poll subscribers for KEY at fallback or reconciliation cadence."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (unless (plist-get runtime :paused)
       (let* ((connected (opencode-shell-sse-connected-p
                          (plist-get runtime :connection)))
@@ -150,12 +151,12 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async-pause-runtime (key)
   "Suspend KEY's HTTP poll timer without dropping its subscribers."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (dolist (timer (list (plist-get runtime :poll-timer)
                          (plist-get runtime :reconnect-timer)))
       (when (timerp timer)
         (cancel-timer timer)))
-    (when-let ((connection (plist-get runtime :connection)))
+    (when-let* ((connection (plist-get runtime :connection)))
       (opencode-shell-sse-stop connection))
     (setf (plist-get runtime :poll-timer) nil
           (plist-get runtime :reconnect-timer) nil
@@ -165,7 +166,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async-resume-runtime (key)
   "Resume KEY's existing polling cadence after transport recovery."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (plist-get runtime :paused)
       (setf (plist-get runtime :paused) nil)
       (when (and (> (hash-table-count (plist-get runtime :subscribers)) 0)
@@ -178,7 +179,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--schedule-reconnect (key)
   "Schedule a bounded asynchronous reconnect for runtime KEY."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (unless (or (plist-get runtime :paused)
                 (zerop (hash-table-count (plist-get runtime :subscribers)))
                 (timerp (plist-get runtime :reconnect-timer)))
@@ -190,7 +191,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--transport-event (key attempt event)
   "Wake KEY runtime for an SSE event from ATTEMPT."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
             (plist-get runtime :failures) 0)
@@ -211,7 +212,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--transport-open (key attempt)
   "Record a successful SSE handshake for KEY and ATTEMPT."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
             (plist-get runtime :failures) 0
@@ -220,7 +221,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--transport-error (key attempt error)
   "Apply typed transport ERROR to KEY runtime's current ATTEMPT."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (let* ((type (plist-get error :type))
              (reason (plist-get error :reason))
@@ -239,7 +240,7 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
 
 (defun opencode-shell-async--connect (key)
   "Open KEY's independent SSE transport."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (setf (plist-get runtime :reconnect-timer) nil)
     (when (and (not (plist-get runtime :paused))
                (plist-get runtime :sse-enabled)
@@ -309,17 +310,17 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
 
 (defun opencode-shell-async-sse-connected-p (key)
   "Return non-nil when runtime KEY has a live streaming SSE connection."
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (and (not (plist-get runtime :paused))
          (opencode-shell-sse-connected-p (plist-get runtime :connection)))))
 
 (defun opencode-shell-async-unsubscribe-runtime (key buffer)
   "Unsubscribe BUFFER and stop KEY runtime when it has no subscribers."
   (opencode-shell-async-cancel-requests buffer)
-  (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
+  (when-let* ((runtime (gethash key opencode-shell-async--runtimes)))
     (remhash buffer (plist-get runtime :subscribers))
     (when (zerop (hash-table-count (plist-get runtime :subscribers)))
-      (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+      (when-let* ((cleanup (plist-get runtime :recovery-cleanup)))
         (funcall cleanup))
       (dolist (timer (list (plist-get runtime :poll-timer)
                            (plist-get runtime :reconnect-timer)))
@@ -353,7 +354,7 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
                              (and (boundp 'opencode-shell--generation)
                                   (= generation opencode-shell--generation))))
                 (apply function arguments)))))
-        (when-let ((render (and (buffer-live-p buffer)
+        (when-let* ((render (and (buffer-live-p buffer)
                                (= epoch opencode-shell-async--cancel-epoch)
                                (assoc 'render opencode-shell-async--queue))))
           (setq opencode-shell-async--queue
@@ -469,7 +470,7 @@ Only the latest pending value for KEY and GENERATION is retained."
         opencode-shell-async--animation-interval nil)
   (maphash
    (lambda (_key runtime)
-     (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+     (when-let* ((cleanup (plist-get runtime :recovery-cleanup)))
        (funcall cleanup))
      (dolist (timer (list (plist-get runtime :poll-timer)
                           (plist-get runtime :reconnect-timer)))

@@ -232,13 +232,13 @@ Return nil on success or a protocol error plist."
             (next-start (match-end 0)))
         (if (> (length frame) (opencode-shell-sse-parser-max-frame-bytes parser))
             (setq error (opencode-shell-sse--error parser 'frame-too-large))
-          (if-let ((decoded (opencode-shell-sse--decode-utf8 frame)))
+          (if-let* ((decoded (opencode-shell-sse--decode-utf8 frame)))
               (progn
                 (unless (opencode-shell-sse-parser-sse-started parser)
                   (setf (opencode-shell-sse-parser-sse-started parser) t)
                   (when (string-prefix-p "\ufeff" decoded)
                     (setq decoded (substring decoded 1))))
-                (when-let ((event (opencode-shell-sse--frame-event decoded)))
+                (when-let* ((event (opencode-shell-sse--frame-event decoded)))
                   (push event events))
                 (setq start next-start))
             (setq error (opencode-shell-sse--error parser 'invalid-utf8))))))
@@ -259,7 +259,7 @@ Return nil on success or a protocol error plist."
       (setq progress nil)
       (pcase (opencode-shell-sse-parser-chunk-state parser)
         ('size
-         (if-let ((end (string-match "\r\n" input)))
+         (if-let* ((end (string-match "\r\n" input)))
              (let* ((line (substring input 0 end))
                     (size-text (opencode-shell-sse--chunk-size line)))
                (cond

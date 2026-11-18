@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 
 (defvar opencode-shell-recovery--states (make-hash-table :test #'equal))
 (defconst opencode-shell-recovery--max-failures 10)
@@ -105,7 +106,7 @@ blip first.")
 
 (defun opencode-shell-recovery-resume (key retry needed)
   "Resume KEY's paused retry timer for new demand without resetting its budget."
-  (when-let ((state (gethash key opencode-shell-recovery--states)))
+  (when-let* ((state (gethash key opencode-shell-recovery--states)))
     (when (and (plist-get state :offline)
                (not (plist-get state :exhausted))
                (not (plist-get state :retry-token))
@@ -155,13 +156,13 @@ blip first.")
 
 (defun opencode-shell-recovery-cancel (key)
   "Forget KEY and cancel its remaining recovery timers."
-  (when-let ((state (gethash key opencode-shell-recovery--states)))
+  (when-let* ((state (gethash key opencode-shell-recovery--states)))
     (opencode-shell-recovery--clear-timers state)
     (remhash key opencode-shell-recovery--states)))
 
 (defun opencode-shell-recovery-suspend (key)
   "Stop KEY's retry timers without losing its offline/exhausted state."
-  (when-let ((state (gethash key opencode-shell-recovery--states)))
+  (when-let* ((state (gethash key opencode-shell-recovery--states)))
     (opencode-shell-recovery--clear-timers state)))
 
 (provide 'opencode-shell-recovery)

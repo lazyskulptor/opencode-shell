@@ -725,12 +725,12 @@ full-transcript re-parse per poll; a genuinely remote host stays poll-only."
   (let ((opencode-shell-log-buffer-name " *opencode-shell-test-log*"))
     (unwind-protect
         (progn
-          (when-let ((buffer (get-buffer opencode-shell-log-buffer-name)))
+          (when-let* ((buffer (get-buffer opencode-shell-log-buffer-name)))
             (kill-buffer buffer))
           (should-not (default-value 'opencode-shell-log-requests))
           (opencode-shell--log "must not create a buffer")
           (should-not (get-buffer opencode-shell-log-buffer-name)))
-      (when-let ((buffer (get-buffer opencode-shell-log-buffer-name)))
+      (when-let* ((buffer (get-buffer opencode-shell-log-buffer-name)))
         (kill-buffer buffer)))))
 
 (ert-deftest opencode-shell-api-log-uses-dedicated-read-only-buffer ()
@@ -756,7 +756,7 @@ full-transcript re-parse per poll; a genuinely remote host stays poll-only."
             (opencode-shell--log "session request")
             (should (get-buffer "*Opencode project shell*-log"))
             (should-not (get-buffer opencode-shell-log-buffer-name)))
-        (when-let ((buffer (get-buffer "*Opencode project shell*-log")))
+        (when-let* ((buffer (get-buffer "*Opencode project shell*-log")))
           (kill-buffer buffer))))))
 
 (ert-deftest opencode-shell-killing-session-buffer-kills-its-log ()
@@ -2754,7 +2754,7 @@ under [mouse-1]."
 
 (defun opencode-shell-test--gutter-text-at (position)
   "Return the gutter line-prefix text at POSITION, or nil."
-  (when-let ((overlay (opencode-shell-test--gutter-overlay-at position)))
+  (when-let* ((overlay (opencode-shell-test--gutter-overlay-at position)))
     (substring-no-properties (overlay-get overlay 'line-prefix))))
 
 (defun opencode-shell-test--gutter-overlay-count ()
@@ -4834,9 +4834,9 @@ under [mouse-1]."
           (should (equal (buffer-name) "*oc-sh➜ Fix login — project*"))
           (should (get-buffer "*oc-sh➜ Fix login — project*-log"))
           (should-not (get-buffer "*oc-sh➜ project*-log")))
-      (when-let ((buffer (get-buffer "*oc-sh➜ Fix login — project*")))
+      (when-let* ((buffer (get-buffer "*oc-sh➜ Fix login — project*")))
         (kill-buffer buffer))
-      (when-let ((buffer (get-buffer "*oc-sh➜ Fix login — project*-log")))
+      (when-let* ((buffer (get-buffer "*oc-sh➜ Fix login — project*-log")))
         (kill-buffer buffer))
       (when (buffer-live-p transcript) (kill-buffer transcript)))))
 

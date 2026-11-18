@@ -178,7 +178,7 @@ longer block turn completion."
   "Return tool names from PARTS in first-observed order without duplicates."
   (let (names)
     (dolist (part parts (nreverse names))
-      (when-let ((name (plist-get (opencode-shell-response-normalize-part part)
+      (when-let* ((name (plist-get (opencode-shell-response-normalize-part part)
                                   :name)))
         (unless (member name names) (push name names))))))
 
@@ -189,7 +189,7 @@ longer block turn completion."
       (let* ((model (opencode-shell-response-normalize-part part))
              (name (plist-get model :name)))
         (when name
-          (if-let ((known (assoc name progress)))
+          (if-let* ((known (assoc name progress)))
               (setcdr known (or (plist-get model :status) "pending"))
             (push (cons name (or (plist-get model :status) "pending"))
                   progress)))))))

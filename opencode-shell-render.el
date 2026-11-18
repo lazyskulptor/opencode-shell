@@ -163,7 +163,7 @@
           (when (= end 0) (setq end 1))
           (let ((next end))
             (when (< end (length rest))
-              (when-let ((space (cl-position-if
+              (when-let* ((space (cl-position-if
                                  (lambda (char) (memq char '(?\s ?\t)))
                                  rest :end end :from-end t)))
                 (when (> space 0)
@@ -178,7 +178,7 @@
 
 (defun opencode-shell-render--layout-table (rows width)
   "Lay out parsed table ROWS within WIDTH, wrapping cell contents."
-  (when-let ((widths (opencode-shell-render--fit-column-widths rows width)))
+  (when-let* ((widths (opencode-shell-render--fit-column-widths rows width)))
     (let (lines)
       (cl-loop for row in rows
                for row-number from 0

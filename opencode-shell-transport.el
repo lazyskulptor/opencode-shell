@@ -103,7 +103,7 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
 (defun opencode-shell--auth-header (profile)
   "Return PROFILE's authorization header pair, or nil."
   (when (or opencode-shell-auth-function opencode-shell-auth-source-function)
-    (when-let ((token (if opencode-shell-auth-function
+    (when-let* ((token (if opencode-shell-auth-function
                           (funcall opencode-shell-auth-function)
                         (funcall opencode-shell-auth-source-function profile))))
       (cons (or (plist-get profile :auth-header) "Authorization") token))))
@@ -119,7 +119,7 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
         (url-request-method "GET")
         (url-request-extra-headers
          (append '(("Accept" . "application/json"))
-                 (when-let ((header (opencode-shell--auth-header profile)))
+                 (when-let* ((header (opencode-shell--auth-header profile)))
                    (list header)))))
     (opencode-shell--url-retrieve-no-query
      (concat (string-remove-suffix "/" (or (plist-get profile :base-url)
@@ -196,7 +196,7 @@ tunnel refusing every probe).  Deferring the kill breaks that chain."
 
 (defun opencode-shell--process-tail (process)
   "Return PROCESS's bounded output tail, or nil when empty."
-  (when-let ((buffer (process-buffer process)))
+  (when-let* ((buffer (process-buffer process)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (unless (= (point-min) (point-max))
@@ -230,7 +230,7 @@ not exact."
 
 (defun opencode-shell--process-filter (process output)
   "Append OUTPUT to PROCESS buffer, retaining only a bounded tail."
-  (when-let ((buffer (process-buffer process)))
+  (when-let* ((buffer (process-buffer process)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (goto-char (point-max)) (insert output)
@@ -246,7 +246,7 @@ not exact."
                (eq process (plist-get state :process)))
       (if (plist-get state :stopping)
           (remhash key opencode-shell--servers)
-        (if-let ((restart-profile (plist-get state :restart-profile)))
+        (if-let* ((restart-profile (plist-get state :restart-profile)))
           (let ((callbacks (plist-get state :callbacks)))
             (remhash key opencode-shell--servers)
             (opencode-shell--start-server
@@ -269,7 +269,7 @@ not exact."
                  state (plist-put state :exit-error message-text))
            (puthash key state opencode-shell--servers))
            (remhash key opencode-shell--servers)
-           (when-let ((profile (plist-get state :profile)))
+           (when-let* ((profile (plist-get state :profile)))
              (when (opencode-shell--ssh-forwarded-profile-p profile)
                 (opencode-shell--ssh-disconnected profile)))))))))
 
@@ -523,7 +523,7 @@ just this client's local transport to it."
       (opencode-shell-recovery-watch-attempt
        key
        (lambda ()
-         (when-let ((state (gethash key opencode-shell--servers)))
+         (when-let* ((state (gethash key opencode-shell--servers)))
             (when (or (plist-get state :checking)
                       (plist-get state :starting))
              (opencode-shell--fail-start key (plist-get state :attempt)
@@ -550,7 +550,7 @@ just this client's local transport to it."
 
 (defun opencode-shell--ssh-prune-waiters (key)
   "Drop KEY's pending GET callbacks whose original buffer is no longer current."
-  (when-let ((state (gethash key opencode-shell--servers)))
+  (when-let* ((state (gethash key opencode-shell--servers)))
     (setf (plist-get state :callbacks)
           (seq-filter
            (lambda (entry)
@@ -625,7 +625,7 @@ dispatches so it survives outliving that dynamic extent."
     (opencode-shell-recovery-watch-attempt
      key
      (lambda ()
-       (when-let ((state (gethash key opencode-shell--servers)))
+       (when-let* ((state (gethash key opencode-shell--servers)))
          (when (or (plist-get state :checking) (plist-get state :starting))
            (opencode-shell--fail-start key (plist-get state :attempt)
                                         "SSH readiness timed out")))))))
@@ -697,7 +697,7 @@ produces a single notice instead of a flood.  A successful request resets
     (with-current-buffer buffer
       (setq-local url-http-no-retry t
                   buffer-undo-list t))
-    (when-let ((process (get-buffer-process buffer)))
+    (when-let* ((process (get-buffer-process buffer)))
       (set-process-query-on-exit-flag process nil)
       (let ((sentinel (process-sentinel process)))
         (when (and sentinel
@@ -831,7 +831,7 @@ called after a transport, status, or decoding failure."
          (url-request-extra-headers
           (append '(("Accept" . "application/json"))
                   (and body '(("Content-Type" . "application/json")))
-                  (when-let ((header
+                  (when-let* ((header
                               (opencode-shell--auth-header
                                (or opencode-shell--profile
                                    (opencode-shell--default-profile)))))
@@ -858,7 +858,7 @@ called after a transport, status, or decoding failure."
           (unwind-protect
               (unless (and ssh (not (= transport-epoch
                                        (opencode-shell-recovery-epoch key))))
-               (if-let ((err (plist-get status :error)))
+               (if-let* ((err (plist-get status :error)))
                    (when (and (buffer-live-p origin)
                               (with-current-buffer origin
                                 (= request-generation opencode-shell--generation)))
@@ -1018,7 +1018,7 @@ sessions where the receive burst is felt."
     (let* ((key (opencode-shell--server-key profile))
            (runtime (opencode-shell-async-runtime-get key)))
       (when runtime
-        (when-let ((cleanup (plist-get runtime :recovery-cleanup))) (funcall cleanup))
+        (when-let* ((cleanup (plist-get runtime :recovery-cleanup))) (funcall cleanup))
         (unless (plist-member runtime :local-recovery-blocked)
           (nconc runtime (list :local-recovery-blocked nil)))
         (setf (plist-get runtime :local-recovery-blocked) t)
@@ -1026,10 +1026,10 @@ sessions where the receive burst is felt."
 
 (defun opencode-shell--transport-resumed (key)
   "Resume KEY, releasing any outstanding local health recovery."
-  (when-let ((runtime (opencode-shell-async-runtime-get key)))
+  (when-let* ((runtime (opencode-shell-async-runtime-get key)))
     (when (plist-member runtime :local-recovery-blocked)
       (setf (plist-get runtime :local-recovery-blocked) nil))
-    (when-let ((cleanup (plist-get runtime :recovery-cleanup)))
+    (when-let* ((cleanup (plist-get runtime :recovery-cleanup)))
       (funcall cleanup)
       (maphash
        (lambda (buffer _subscription)

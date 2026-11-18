@@ -145,7 +145,7 @@ and lifecycle keys."
           (user-error "OpenCode profile names must be non-empty and unique: %s" name))
         (when (gethash key keys)
           (user-error "OpenCode profile identities must be unique: %s" key))
-        (when-let ((config (gethash server-key servers)))
+        (when-let* ((config (gethash server-key servers)))
           (opencode-shell--validate-server-profile profile (list :config config)))
         (puthash server-key (opencode-shell--server-lifecycle-config profile) servers)
         (puthash name t names) (puthash key t keys))))))
@@ -223,7 +223,7 @@ profiles make the result ambiguous."
          (remote (file-remote-p directory))
          best best-length ambiguous local-defaults)
     (dolist (profile opencode-shell-profiles)
-      (when-let ((root (opencode-shell--canonical-directory
+      (when-let* ((root (opencode-shell--canonical-directory
                         (plist-get profile :directory))))
         (when (and (equal remote (file-remote-p root))
                    (string-prefix-p root
@@ -278,7 +278,7 @@ profiles make the result ambiguous."
           (or (when (and (boundp 'projectile-mode) projectile-mode
                          (fboundp 'projectile-project-root))
                 (ignore-errors (projectile-project-root)))
-              (when-let ((project (ignore-errors (project-current nil))))
+              (when-let* ((project (ignore-errors (project-current nil))))
                 (ignore-errors (project-root project)))
               (locate-dominating-file default-directory ".git")
               default-directory)))
@@ -716,7 +716,7 @@ web UI.  Nil (unknown) is conservative and keeps the original behavior.")
     (when (opencode-shell-recovery-mark-offline key)
       (opencode-shell-recovery-suspend key)
       (opencode-shell-async-pause-runtime key)
-      (when-let ((state (gethash key opencode-shell--servers)))
+      (when-let* ((state (gethash key opencode-shell--servers)))
         (let ((process (plist-get state :process)))
           (setf (plist-get state :process) nil
                 (plist-get state :owned) nil)
@@ -737,7 +737,7 @@ web UI.  Nil (unknown) is conservative and keeps the original behavior.")
 
 (defun opencode-shell--ssh-reconcile (key)
   "Full-resync KEY's subscribed transcripts after SSH recovery."
-  (when-let ((runtime (opencode-shell-async-runtime-get key)))
+  (when-let* ((runtime (opencode-shell-async-runtime-get key)))
     (maphash
      (lambda (buffer _subscription)
        (when (buffer-live-p buffer)
@@ -995,7 +995,7 @@ not permanently block later re-escalation."
 (defun opencode-shell--open-at-point ()
   "Open the session at point."
   (interactive)
-  (if-let ((id (tabulated-list-get-id)))
+  (if-let* ((id (tabulated-list-get-id)))
       (let* ((session (seq-find
                        (lambda (item) (equal id (opencode-shell--get item 'id)))
                        opencode-shell--sessions))
@@ -1147,7 +1147,7 @@ affect the fork's correctness."
   "Return chronological minibuffer candidates for the current session."
   (let ((index 0) candidates)
     (dolist (turn opencode-shell--turns)
-      (when-let ((id (opencode-shell--turn-server-user-id turn)))
+      (when-let* ((id (opencode-shell--turn-server-user-id turn)))
         (cl-incf index)
         (let ((text (truncate-string-to-width
                      (replace-regexp-in-string
@@ -1279,8 +1279,8 @@ and deletes the throwaway messages server-side."
 
 (defun opencode-shell--available-model (model)
   "Return MODEL normalized to a connected server-advertised model, or nil."
-  (when-let ((value (opencode-shell--model-value model)))
-    (when-let ((entry (seq-find (lambda (item) (equal (cdr item) value))
+  (when-let* ((value (opencode-shell--model-value model)))
+    (when-let* ((entry (seq-find (lambda (item) (equal (cdr item) value))
                                 opencode-shell--models)))
       (cdr entry))))
 
@@ -1310,9 +1310,9 @@ When USER-CHOSEN is non-nil, later history hydration does not replace it."
     (dolist (envelope messages)
       (let ((info (opencode-shell--get envelope 'info)))
         (when (equal (format "%s" (opencode-shell--get info 'role)) "user")
-          (when-let ((agent (opencode-shell--get info 'agent)))
+          (when-let* ((agent (opencode-shell--get info 'agent)))
             (setq last-agent agent)
-            (when-let ((model (opencode-shell--model-value
+            (when-let* ((model (opencode-shell--model-value
                                (opencode-shell--get info 'model))))
               (setf (alist-get agent history nil nil #'equal) model))))))
     (setq opencode-shell--agent-model-history history
@@ -1444,7 +1444,7 @@ Return non-nil when cached capabilities were applied."
   "Return the nearest live turn prompt position in DIRECTION from point."
   (let ((position (point)) candidates)
     (dolist (turn opencode-shell--turns)
-      (when-let ((marker (opencode-shell--turn-user-begin turn)))
+      (when-let* ((marker (opencode-shell--turn-user-begin turn)))
         (when (and (marker-position marker)
                    (eq (marker-buffer marker) (current-buffer)))
           (let ((candidate (marker-position marker)))
@@ -1464,7 +1464,7 @@ Return non-nil when cached capabilities were applied."
 
 (defun opencode-shell--move-turn (direction)
   "Move to the nearest rendered user prompt in DIRECTION."
-  (if-let ((target (opencode-shell--turn-navigation-target direction)))
+  (if-let* ((target (opencode-shell--turn-navigation-target direction)))
       (progn
         (when (and (/= target opencode-shell--composer-start)
                    (bound-and-true-p evil-local-mode)
@@ -1797,7 +1797,7 @@ polluting the user's undo history."
   (setq opencode-shell--in-flight nil
         opencode-shell--capabilities-loading nil)
   (when opencode-shell--session-id
-    (when-let ((log-buffer (get-buffer (opencode-shell--log-buffer-name))))
+    (when-let* ((log-buffer (get-buffer (opencode-shell--log-buffer-name))))
       (kill-buffer log-buffer)))
   (cl-incf opencode-shell--generation))
 
@@ -1840,7 +1840,7 @@ Newer pending markers remain outstanding for a subsequent snapshot."
        (or (seq-some (lambda (turn)
                        (not (eq (opencode-shell--turn-status turn) 'complete)))
                      opencode-shell--turns)
-           (when-let ((runtime (and opencode-shell--runtime-key
+           (when-let* ((runtime (and opencode-shell--runtime-key
                                    (opencode-shell-async-runtime-get opencode-shell--runtime-key))))
              (and (not (plist-get runtime :paused))
                   (not (opencode-shell-async-sse-connected-p opencode-shell--runtime-key)))))))
@@ -1984,7 +1984,7 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
 (defun opencode-shell--message-error-label (info)
   "Return a bounded, single-line human-readable label for INFO's terminal
 error, or nil."
-  (when-let ((err (opencode-shell--get info 'error)))
+  (when-let* ((err (opencode-shell--get info 'error)))
     (let* ((name (format "%s" (or (opencode-shell--get err 'name) "Error")))
            (message (opencode-shell--get (opencode-shell--get err 'data) 'message)))
       (truncate-string-to-width
@@ -2104,7 +2104,7 @@ A quiet subagent only ever surfaces on a full resync; this makes seeing its
 spawning tool call for the first time trigger one, without adding a
 `/session' call to the lean periodic poll cycle."
   (dolist (part parts)
-    (when-let ((id (opencode-shell--part-id part)))
+    (when-let* ((id (opencode-shell--part-id part)))
       (unless (gethash id opencode-shell--task-parts-seen)
         (let ((type (opencode-shell--get part 'type)))
           (when (or (equal type "tool")
@@ -2175,9 +2175,9 @@ events merge instead. Unacknowledged local prompts retain their draft text."
           (puthash turn t touched))))
     (dolist (turn old)
       (puthash turn t old-set)
-      (when-let ((id (opencode-shell--turn-id turn)))
+      (when-let* ((id (opencode-shell--turn-id turn)))
         (puthash id turn turn-index))
-      (when-let ((id (opencode-shell--turn-server-user-id turn)))
+      (when-let* ((id (opencode-shell--turn-server-user-id turn)))
         (puthash id turn turn-index))
       (unless (opencode-shell--turn-server-user-id turn)
         (push turn (gethash (opencode-shell--turn-user turn) local-turns-by-text))))
@@ -2413,7 +2413,7 @@ Return a plist containing affected turns and whether a full render is required."
 
 (defun opencode-shell--rebuild-turn-from-message-cache (parent-id)
   "Rebuild and return PARENT-ID's turn from cached assistant envelopes."
-  (when-let ((turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)))
+  (when-let* ((turn (opencode-shell--turn-by-id parent-id opencode-shell--turns)))
     (let ((assistants (opencode-shell--cached-assistants-for-parent parent-id)))
       (setf (opencode-shell--turn-assistant-messages turn)
             (mapcar (lambda (envelope)
@@ -2548,7 +2548,7 @@ QUIET reconciles cheap resources plus a change-gated message re-fetch (see
                (delta (plist-get event :delta)))
            (if (and known part-id (stringp field) (not (string-empty-p field))
                     (stringp delta))
-               (when-let ((updated (delta-part (opencode-shell--get known 'parts)
+               (when-let* ((updated (delta-part (opencode-shell--get known 'parts)
                                                part-id field delta)))
                  (sync-envelope `((info . ,(opencode-shell--get known 'info))
                                   (parts . (,updated)))
@@ -2674,7 +2674,7 @@ QUIET reconciles cheap resources plus a change-gated message re-fetch (see
                 (assoc-delete-all '(event-reconcile messages)
                                   opencode-shell-async--queue))))
        ((equal type "session.updated")
-        (when-let ((title (opencode-shell--get (plist-get event :info) 'title)))
+        (when-let* ((title (opencode-shell--get (plist-get event :info) 'title)))
           (when (and (stringp title) (not (string-empty-p title))
                      (not (equal title opencode-shell--session-title)))
             (setq opencode-shell--session-title title)
@@ -2775,7 +2775,7 @@ QUIET reconciles cheap resources plus a change-gated message re-fetch (see
 Roots map to nil; ids absent from SESSIONS are simply not present."
   (let ((map (make-hash-table :test #'equal)))
     (dolist (session sessions map)
-      (when-let ((id (opencode-shell--get session 'id)))
+      (when-let* ((id (opencode-shell--get session 'id)))
         (let ((parent (or (opencode-shell--get session 'parentID)
                           (opencode-shell--get session 'parentId))))
           (puthash id (and parent (not (equal parent "")) parent) map))))))
@@ -2810,7 +2810,7 @@ is missing from PARENT-MAP (not yet indexed) so classification must wait."
 
 (defun opencode-shell--current-turn-anchor ()
   "Return the current last turn's id, or nil when there are no turns."
-  (when-let ((turn (car (last opencode-shell--turns))))
+  (when-let* ((turn (car (last opencode-shell--turns))))
     (opencode-shell--turn-id turn)))
 
 (defun opencode-shell--anchor-descendant-sessions (ids)
@@ -2853,7 +2853,7 @@ per-(id, turn) walk and regexp over the part payloads."
           (let ((model (opencode-shell-response-normalize-part part)))
             (when (and (eq (plist-get model :kind) 'tool)
                        (member (plist-get model :name) '("task" nil)))
-              (when-let ((state (opencode-shell-response--get part 'state)))
+              (when-let* ((state (opencode-shell-response--get part 'state)))
                 (let ((output (opencode-shell-response--get state 'output)))
                   (setq chunks
                         (nconc chunks
@@ -2896,7 +2896,7 @@ out permanently; one whose chain reaches an ancestor still absent from the
 `/session' snapshot is left unresolved so a subagent not yet indexed is
 re-probed on a later poll rather than dropped forever.  Overrides the default
 row truncation so a descendant beyond the first page is still found."
-  (when-let ((unresolved (opencode-shell--unresolved-interaction-sessions items)))
+  (when-let* ((unresolved (opencode-shell--unresolved-interaction-sessions items)))
     (opencode-shell--guarded-request
      'descendant-sessions "GET" "/session"
      (lambda (sessions)
@@ -2974,7 +2974,7 @@ its own request."
   "Return ID-bearing ITEMS once each, preserving their first order."
   (let (seen result)
     (dolist (item items (nreverse result))
-      (when-let ((id (opencode-shell--permission-id item)))
+      (when-let* ((id (opencode-shell--permission-id item)))
         (unless (member id seen)
           (push id seen)
            (push item result))))))
@@ -2996,7 +2996,7 @@ its own request."
   "Return ID-bearing question ITEMS once each in first-seen order."
   (let (seen result)
     (dolist (item items (nreverse result))
-      (when-let ((id (opencode-shell--question-id item)))
+      (when-let* ((id (opencode-shell--question-id item)))
         (unless (member id seen)
           (push id seen)
           (push item result))))))
@@ -3141,7 +3141,7 @@ status-spinner overlay/animation (see `opencode-shell--refresh-spinner-overlays'
 (defun opencode-shell--descendant-anchor-running-p (anchor)
   "Return non-nil when turn id ANCHOR is a present, still-active turn.
 A subagent anchored to an in-progress turn is treated as running."
-  (when-let ((turn (opencode-shell--turn-by-id anchor opencode-shell--turns)))
+  (when-let* ((turn (opencode-shell--turn-by-id anchor opencode-shell--turns)))
     (opencode-shell-state-turn-active-p (opencode-shell--turn-status turn))))
 
 (defun opencode-shell--descendant-session-running-p (id anchor)
@@ -3242,7 +3242,7 @@ the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
         ;; still holds its full unshared terminator.
         (when (and (> begin (point-min))
                    (eq (char-before begin) ?\n)
-                   (if-let ((last (car (last opencode-shell--rendered-turns))))
+                   (if-let* ((last (car (last opencode-shell--rendered-turns))))
                        (let ((expected (length (opencode-shell--cached-response-display last))))
                          (if (> expected 0)
                              (= (- begin (opencode-shell--turn-response-begin last))
@@ -3256,7 +3256,7 @@ the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
         (opencode-shell--replace-display-region begin opencode-shell--composer-start (car projection))
         (set-marker opencode-shell--transcript-end begin)
         (set-marker opencode-shell--permission-begin begin)
-        (when-let ((last (car (last opencode-shell--rendered-turns))))
+        (when-let* ((last (car (last opencode-shell--rendered-turns))))
           (set-marker (opencode-shell--turn-response-end last) begin))
         (set-marker opencode-shell--permission-status-begin (+ begin (nth 1 projection)))
         (set-marker opencode-shell--permission-status-end (+ begin (nth 2 projection)))
@@ -3347,7 +3347,7 @@ the subagent is running.  Reads `opencode-shell--descendant-anchor-map'."
           (opencode-shell--activate-button answer #'opencode-shell--questions)
           (opencode-shell--activate-button reject #'opencode-shell--question-reject)))
       (set-marker opencode-shell--permission-status-begin (point))
-      (when-let ((status (opencode-shell--permission-status-display)))
+      (when-let* ((status (opencode-shell--permission-status-display)))
         (insert status))
       (set-marker opencode-shell--permission-status-end (point))
       (set-marker opencode-shell--permission-end (point))
@@ -3652,7 +3652,7 @@ is never cached: its display depends on interaction state outside the signature.
    ((plist-get opencode-shell--hydration-state :pending)
     (propertize (opencode-shell--status-display "Loading session")
                 'face 'opencode-shell-waiting-face))
-   ((when-let ((turn (opencode-shell--permission-status-turn)))
+   ((when-let* ((turn (opencode-shell--permission-status-turn)))
       (opencode-shell--response-display turn t)))))
 
 (defconst opencode-shell--spinner-neon-colors
@@ -3717,7 +3717,7 @@ leading the chase."
                       (marker-position opencode-shell--permission-begin))))
       (dolist (turn opencode-shell--turns)
         (unless (eq (opencode-shell--turn-status turn) 'complete)
-          (when-let ((pos (and (markerp (opencode-shell--turn-response-begin turn))
+          (when-let* ((pos (and (markerp (opencode-shell--turn-response-begin turn))
                                (marker-position (opencode-shell--turn-response-begin turn)))))
             (setq start (if start (min start pos) pos)))))
       (if start
@@ -3768,7 +3768,7 @@ leading the chase."
 
 (defun opencode-shell--turn-terminal-error-suffix (turn)
   "Return a bounded, propertized terminal-error annotation for TURN, or \"\"."
-  (if-let ((label (opencode-shell--turn-terminal-error turn)))
+  (if-let* ((label (opencode-shell--turn-terminal-error turn)))
       (propertize (format "\n[%s]\n" label) 'font-lock-face 'opencode-shell-error-face)
     ""))
 
@@ -3780,7 +3780,7 @@ change re-enter the hook, which can recurse until the Lisp stack is exhausted.
 Scheduling the work on an idle timer makes the hook return immediately and
 coalesces repeated changes into a single off-hook render."
   (unless (or opencode-shell--table-rerendering
-              (when-let ((window (opencode-shell--transcript-window)))
+              (when-let* ((window (opencode-shell--transcript-window)))
                 (equal (window-body-width window)
                        opencode-shell--table-render-width)))
     (let ((buffer (current-buffer)))
@@ -3804,7 +3804,7 @@ coalesces repeated changes into a single off-hook render."
         (let ((table-turns
                (seq-filter
                 (lambda (turn)
-                  (when-let ((raw (opencode-shell--turn-assistant turn)))
+                  (when-let* ((raw (opencode-shell--turn-assistant turn)))
                     (string-match-p "|" raw)))
                 opencode-shell--rendered-turns)))
           (setq opencode-shell--table-render-width width)
@@ -4179,7 +4179,7 @@ CHANGED-TURNS into the response blocks pending incremental update."
          (opencode-shell-state-request-phase
           (mapcar #'opencode-shell--turn-status opencode-shell--turns)
           opencode-shell--submit-in-flight)))
-  (when-let ((turn (seq-find
+  (when-let* ((turn (seq-find
                     (lambda (entry)
                       (equal opencode-shell--submit-in-flight
                              (opencode-shell--turn-id entry)))
@@ -4350,7 +4350,7 @@ the next full resync without a dedicated request of its own."
   (opencode-shell--guarded-request
    'session "GET" "/session"
    (lambda (sessions)
-     (when-let ((session (seq-find
+     (when-let* ((session (seq-find
                           (lambda (item)
                             (equal opencode-shell--session-id
                                    (opencode-shell--get item 'id)))
@@ -4385,7 +4385,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
            (when (buffer-live-p origin)
              (with-current-buffer origin
                (when (= generation opencode-shell--generation)
-                 (unless (when-let ((runtime (opencode-shell-async-runtime-get
+                 (unless (when-let* ((runtime (opencode-shell-async-runtime-get
                                              (opencode-shell--server-key profile))))
                            (gethash origin (plist-get runtime :subscribers)))
                    (setq opencode-shell--connection-stale nil)
@@ -4450,7 +4450,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
                        (setq opencode-shell--capabilities-loading nil
                              opencode-shell--capabilities-loaded (not failed))
                        (unless failed
-                         (when-let ((key (and opencode-shell--profile
+                         (when-let* ((key (and opencode-shell--profile
                                               (opencode-shell--server-key opencode-shell--profile))))
                            (puthash key
                                     (list :models opencode-shell--models
@@ -4648,7 +4648,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
   "Return ITEM's concise actionable command or target, or nil."
   (let ((metadata (opencode-shell--get item 'metadata))
         (tool (opencode-shell--get item 'tool)))
-    (when-let ((context (or (opencode-shell--get metadata 'command)
+    (when-let* ((context (or (opencode-shell--get metadata 'command)
                             (opencode-shell--get tool 'command)
                             (car-safe (opencode-shell--get item 'patterns)))))
       (opencode-shell--permission-value context))))
@@ -4694,7 +4694,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
        (unless (opencode-shell--resolved-permission id)
          (let ((record `((id . ,id) (reply . ,reply)
                          (description . ,(opencode-shell--permission-description item))
-                         (after-turn-id . ,(when-let ((turn (car (last opencode-shell--turns))))
+                         (after-turn-id . ,(when-let* ((turn (car (last opencode-shell--turns))))
                                              (opencode-shell--turn-id turn))))))
            (setq opencode-shell--resolved-permissions
                  (append opencode-shell--resolved-permissions (list record)))))
@@ -4731,7 +4731,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
 (defun opencode-shell--questions ()
   "Explicitly answer or reject a pending question."
   (interactive)
-  (if-let ((item (or (get-text-property (point) 'opencode-shell-question)
+  (if-let* ((item (or (get-text-property (point) 'opencode-shell-question)
                      (car opencode-shell--questions-pending))))
       (opencode-shell--question-reply item nil)
     (opencode-shell--choose-pending
@@ -5093,7 +5093,7 @@ busy spinner animates while the Vertico menu stays open."
            setup)
       (setq setup
             (lambda ()
-              (when-let ((window (active-minibuffer-window)))
+              (when-let* ((window (active-minibuffer-window)))
                 (unless (plist-get session :buffer)
                   (let ((buffer (window-buffer window)))
                     (setf (plist-get session :window) window
@@ -5122,7 +5122,7 @@ busy spinner animates while the Vertico menu stays open."
               (switch-to-buffer selected)))
         (setq opencode-shell--switch-buffer-session nil)
         (remove-hook 'minibuffer-setup-hook setup)
-        (when-let ((buffer (plist-get session :buffer)))
+        (when-let* ((buffer (plist-get session :buffer)))
           (opencode-shell-async-unsubscribe-animation buffer)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
@@ -5170,7 +5170,7 @@ ACTIVE means that their session browser is already live."
     (delq nil
           (mapcar
            (lambda (location)
-             (when-let ((profile
+             (when-let* ((profile
                          (seq-find (lambda (item)
                                      (equal (car location)
                                             (opencode-shell--profile-key item)))
@@ -5274,7 +5274,7 @@ ACTIVE means that their session browser is already live."
                      opencode-shell-profiles)))
     (unless profiles (user-error "No OpenCode profiles configured"))
     (condition-case nil
-        (when-let ((location
+        (when-let* ((location
                     (opencode-shell--read-session-location
                      (opencode-shell--saved-session-location-entries profiles))))
           (opencode-shell--open-sessions (car location) (cdr location) t))
@@ -5315,7 +5315,7 @@ ACTIVE means that their session browser is already live."
                                         (nth 3 a)))))
                 (unless entries (user-error "No OpenCode session locations"))
                 (condition-case nil
-                     (when-let ((location
+                     (when-let* ((location
                                  (opencode-shell--read-session-location entries)))
                        (opencode-shell--open-sessions
                         (car location) (cdr location) t))
@@ -5329,7 +5329,7 @@ ACTIVE means that their session browser is already live."
             (remember opencode-shell--profile opencode-shell--directory
                       most-positive-fixnum t))))
       (dolist (location opencode-shell--recent-session-locations)
-        (when-let ((candidate-profile
+        (when-let* ((candidate-profile
                     (seq-find (lambda (item)
                                 (equal (car location)
                                        (opencode-shell--profile-key item)))
@@ -5366,7 +5366,7 @@ ACTIVE means that their session browser is already live."
     (opencode-shell--ensure-message-cache)
     (clrhash opencode-shell--parent-assistant-ids)
     (dolist (id opencode-shell--message-order)
-      (when-let ((envelope (gethash id opencode-shell--message-envelopes)))
+      (when-let* ((envelope (gethash id opencode-shell--message-envelopes)))
         (let* ((compacted (opencode-shell--compact-envelope envelope))
                (info (opencode-shell--get compacted 'info))
                (role (format "%s" (or (opencode-shell--get info 'role) "")))
@@ -5435,7 +5435,7 @@ ACTIVE means that their session browser is already live."
       (unless (and sources (seq-every-p #'file-exists-p sources))
         (user-error "Cannot locate OpenCode Shell source files"))
       (dolist (source sources) (load source nil nil t))
-    (when-let ((setting (locate-library "opencode-shell-setting")))
+    (when-let* ((setting (locate-library "opencode-shell-setting")))
       (load setting nil nil t))
     (opencode-shell--register-profile-commands)
     (when (fboundp 'opencode-shell--setup-evil)

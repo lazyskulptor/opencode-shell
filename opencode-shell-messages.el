@@ -15,6 +15,7 @@
 
 (require 'cl-lib)
 (require 'map)
+(require 'subr-x)
 
 (defun opencode-shell-messages--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -49,7 +50,7 @@
            (cells-by-id (make-hash-table :test #'equal)))
       (let ((cursor result))
         (while cursor
-          (when-let ((id (opencode-shell--part-id (car cursor))))
+          (when-let* ((id (opencode-shell--part-id (car cursor))))
             (puthash id cursor cells-by-id))
           (setq cursor (cdr cursor))))
       (dolist (part incoming result)
