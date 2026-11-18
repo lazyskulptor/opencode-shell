@@ -103,6 +103,40 @@ explicit successful request or manual recovery.
 
 ## Lifecycle
 
+Changing a transcript's major mode releases its runtime and animation ownership
+just like killing that buffer. Session-browser request generations are allocated
+globally so reopening the same buffer cannot revive older callbacks.
+
+Authoritative snapshots replace retained message envelopes (including empty or
+removed parts/info fields) rather than applying SSE partial-update merge rules.
+Turn assistant envelopes are rebuilt from that snapshot, and observed user turns
+follow its chronological order; unacknowledged local submissions remain after
+the observed history. An unchanged authoritative snapshot remains a display no-op.
+Part removal also removes pending orphan parts, preventing resurrection when
+their message metadata arrives later.
+
+SSE CRLF is one line ending, including when CR and LF arrive in separate feeds.
+Multiline data and its event/id fields are dispatched only on a blank line.
+
+Session status retains its explicit type through decoding: only `idle` (or the
+dedicated `session.idle` event) is evidence for idle terminality; `retry` must not
+settle a running task. A paused runtime cannot start SSE even when a subscriber
+is added. Queue cancellation invalidates the currently detached drain batch as
+well as queued work; callbacks enqueued after cancellation run in a fresh drain.
+
+Turn completion does not unsubscribe an open session. Its shared SSE connection
+and ordinary reconciliation continue observing permission, question and message
+changes while the user waits. Completion must not cancel queued deliveries.
+Buffer cleanup, explicit stop, and reload still release subscriptions and owned
+requests. Displaying an older unsubscribed session restores observation even if
+its cached turns are all complete. Healthy idle sessions use cheap metadata and
+interaction probes, not a full transcript fetch on every tick.
+
+SSE traffic resets connection-failure backoff, but never resets the integrity
+poll cadence. Heartbeats, metadata events and activity in another session cannot
+postpone periodic reconciliation indefinitely. Delivery activity alone is not
+evidence that a transcript received every message.
+
 Opening a live transcript subscribes it to its profile runtime. The first
 subscriber starts SSE or polling fallback. Validated events route only to the
 matching session and update message or part state without a snapshot read.

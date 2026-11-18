@@ -6652,5 +6652,349 @@ migration paths issue no explicit viewport command and still do their work."
              (question (and position (get-text-property position 'opencode-shell-question))))
         (should (equal (opencode-shell--get question 'id) "new"))))))
 
+(ert-deftest opencode-shell-submit-keeps-prompt-and-point-off-previous-line ()
+  "Repeated non-turn renders must not eat the last turn's trailing newline or
+move a newly submitted prompt or composer point onto the previous line."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "submit-line")
+    (opencode-shell--render-messages
+     '(((info . ((id . "u1") (role . "user")))
+        (parts . (((id . "pu1") (type . "text") (text . "first prompt")))))
+       ((info . ((id . "a1") (role . "assistant") (parentID . "u1")
+                 (finish . "stop") (time . ((completed . 1)))))
+        (parts . (((id . "pa1") (type . "text") (text . "first answer"))))))
+     1)
+    (opencode-shell--render-turns nil 'none)
+    (opencode-shell--render-permissions)
+    (goto-char opencode-shell--composer-start)
+    (insert "second prompt")
+    (should (= (line-number-at-pos (point)) 5))
+    (cl-letf (((symbol-function 'opencode-shell--request) #'ignore)
+              ((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (opencode-shell--submit))
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "first prompt\n\nfirst answer\n\nsecond prompt\n\nSending ▰\n "))
+    (should (= (line-number-at-pos (point)) 8))
+    (opencode-shell--render-permissions)
+    (opencode-shell--render-turns nil 'none)
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "first prompt\n\nfirst answer\n\nsecond prompt\n\nSending ▰\n "))
+    (should (= (line-number-at-pos (point)) 8))))
+
+(ert-deftest opencode-shell-submit-trailing-newlines-survive-idle-renders ()
+  "Do not mistake user-authored trailing newlines for the Composer separator."
+  (dolist (body '("answer\n" "answer\n\n" "answer\n\n\n"))
+    (with-temp-buffer
+      (opencode-shell-mode)
+      (setq opencode-shell--turns
+            (list (opencode-shell--make-turn :id "fixture" :user "question"
+                                             :assistant body :status 'complete)))
+      (opencode-shell--render-turns t)
+      (let ((before (buffer-substring-no-properties (point-min) (point-max)))
+            (boundary (marker-position opencode-shell--composer-start)))
+        (dotimes (_ 3)
+          (opencode-shell--render-turns nil 'none)
+          (opencode-shell--render-permissions))
+        (should (equal before (buffer-substring-no-properties (point-min) (point-max))))
+        (should (= boundary opencode-shell--composer-start))))))
+
+(ert-deftest opencode-shell-runtime-events-cannot-starve-integrity-poll ()
+  "Even ignored or foreign-session events must not postpone reconciliation."
+  (dolist (kind '(heartbeat foreign metadata))
+    (with-temp-buffer
+      (setq-local opencode-shell--generation 1)
+      (let* ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+             (subscribers (make-hash-table :test #'eq))
+             (runtime (list :subscribers subscribers :attempt 'fixture
+                            :poll-interval 2 :ticks 0 :paused nil))
+             (polls 0))
+        (puthash (current-buffer)
+                 (list :session-id "ours" :callback (lambda () (cl-incf polls))
+                       :event-callback #'ignore) subscribers)
+        (puthash 'fixture runtime opencode-shell-async--runtimes)
+        (cl-letf (((symbol-function 'opencode-shell-sse-connected-p) (lambda (_) t))
+                  ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                  ((symbol-function 'opencode-shell-event-decode)
+                   (lambda (_)
+                     (pcase kind
+                       ('heartbeat '(:resource none))
+                       ('foreign '(:kind session-updated :type "session.updated" :session-id "other"))
+                       (_ '(:kind session-updated :type "session.updated" :session-id "ours"))))))
+          (dotimes (_ (* 2 (max 1 (round (/ opencode-shell-async--reconcile-interval 2)))))
+            (opencode-shell-async--transport-event 'fixture 'fixture nil)
+            (opencode-shell-async--poll-runtime 'fixture)
+            (opencode-shell-async-drain (current-buffer)))
+          (should (= polls 2)))))))
+
+(ert-deftest opencode-shell-idle-session-keeps-observation-until-buffer-cleanup ()
+  "Completion must not unsubscribe an open session or discard pending delivery."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture"
+          opencode-shell--runtime-key 'fixture)
+    (let ((unsubscribes 0) (delivered 0))
+      (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                ((symbol-function 'opencode-shell-async-unsubscribe-runtime)
+                 (lambda (&rest _) (cl-incf unsubscribes))))
+        (opencode-shell-async-enqueue
+         (current-buffer) 'fixture-delivery opencode-shell--generation
+         (lambda () (cl-incf delivered)))
+        (opencode-shell--render-messages nil)
+        (should (eq opencode-shell--runtime-key 'fixture))
+        (should (= unsubscribes 0))
+        (opencode-shell-async-drain (current-buffer))
+        (should (= delivered 1))
+        (opencode-shell--cleanup)
+        (should (= unsubscribes 1))))))
+
+(ert-deftest opencode-shell-idle-session-visible-resumes-observation ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture")
+    (let ((starts 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'opencode-shell--start-polling)
+                 (lambda () (cl-incf starts) (setq opencode-shell--runtime-key 'fixture))))
+        (opencode-shell--render-if-visible)
+        (opencode-shell--render-if-visible)
+        (should (= starts 1))))))
+
+(ert-deftest opencode-shell-idle-session-poll-discovers-human-requests ()
+  "An idle session's ordinary reconciliation still discovers both request kinds."
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture"
+          opencode-shell--runtime-key 'fixture
+          opencode-shell--reconciled-session-updated 1)
+    (cl-letf (((symbol-function 'opencode-shell--guarded-request)
+               (lambda (key _method _path callback &rest _)
+                 (pcase key
+                   ('permissions
+                    (funcall callback '(((id . "permission") (sessionID . "fixture")
+                                         (permission . "read")))))
+                   ('questions
+                    (funcall callback '(((id . "question") (sessionID . "fixture")
+                                         (questions . (((question . "fixture question"))))))))
+                   ('session-updated (funcall callback '((time . ((updated . 1))))))))))
+      (opencode-shell--update-message-lifecycle-state)
+      (should opencode-shell--runtime-key)
+      (opencode-shell--reconcile-quiet)
+      (should (equal (opencode-shell--get (car opencode-shell--permissions) 'id) "permission"))
+      (should (equal (opencode-shell--get (car opencode-shell--questions-pending) 'id) "question"))
+      (should-not (opencode-shell--composer-visible-p)))))
+
+(ert-deftest opencode-shell-delivery-retry-is-not-idle ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (setq opencode-shell--session-id "fixture" opencode-shell--runtime-key 'fixture)
+    (let ((event (opencode-shell-event-decode
+                  '(:data "{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"fixture\",\"status\":{\"type\":\"retry\"}}}"))))
+      (should (equal (plist-get event :status) "retry"))
+      (cl-letf (((symbol-function 'opencode-shell--schedule-event-reconciliation) #'ignore))
+        (opencode-shell--receive-application-event event))
+      (should-not opencode-shell--session-idle-p))))
+
+(ert-deftest opencode-shell-delivery-paused-runtime-cannot-connect ()
+  (let* ((opencode-shell-async--runtimes (make-hash-table :test #'equal))
+         (subscribers (make-hash-table :test #'eq))
+         (runtime (list :paused t :sse-enabled t :subscribers subscribers))
+         (starts 0))
+    (puthash (current-buffer) #'ignore subscribers)
+    (puthash 'fixture runtime opencode-shell-async--runtimes)
+    (cl-letf (((symbol-function 'opencode-shell-sse-start)
+               (lambda (&rest _) (cl-incf starts) (error "unexpected connection"))))
+      (opencode-shell-async--connect 'fixture)
+      (should (= starts 0)))))
+
+(ert-deftest opencode-shell-delivery-cancel-invalidates-draining-batch ()
+  (with-temp-buffer
+    (let (calls)
+      (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil)))
+        (opencode-shell-async-enqueue (current-buffer) 'first nil
+         (lambda () (push 'first calls) (opencode-shell-async-cancel)))
+        (opencode-shell-async-enqueue (current-buffer) 'stale nil
+         (lambda () (push 'stale calls)))
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal calls '(first)))
+        (opencode-shell-async-enqueue (current-buffer) 'fresh nil
+         (lambda () (push 'fresh calls)))
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal calls '(fresh first)))))))
+
+(ert-deftest opencode-shell-delivery-cancel-defers-new-render-to-next-batch ()
+  "Work queued after cancellation belongs to a fresh drain, not the old one."
+  (with-temp-buffer
+    (let (calls)
+      (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil)))
+        (opencode-shell-async-enqueue (current-buffer) 'cancel nil
+         (lambda ()
+           (opencode-shell-async-cancel)
+           (opencode-shell-async-enqueue (current-buffer) 'render nil
+            (lambda () (push 'fresh calls)))))
+        (opencode-shell-async-drain (current-buffer))
+        (should-not calls)
+        (should (assoc 'render opencode-shell-async--queue))
+        (opencode-shell-async-drain (current-buffer))
+        (should (equal calls '(fresh)))))))
+
+(ert-deftest opencode-shell-audit-authoritative-replaces-removed-parts ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((user '((info . ((id . "u") (role . "user"))) (parts . nil))))
+          (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore))
+            (opencode-shell--render-messages
+             (list user '((info . ((id . "a") (role . "assistant") (parentID . "u")
+                                  (finish . "stop")))
+                          (parts . (((id . "p") (type . "text") (text . "obsolete")))))) 1 t t)
+            (opencode-shell--render-messages
+             (list user '((info . ((id . "a") (role . "assistant") (parentID . "u")))
+                          (parts . nil))) 2 t t)
+            (let ((cached (gethash "a" opencode-shell--message-envelopes)))
+              (should-not (opencode-shell--get cached 'parts))
+              (should-not (opencode-shell--get (opencode-shell--get cached 'info) 'finish)))
+            (should-not (string-match-p "obsolete" (opencode-shell--turn-assistant (car opencode-shell--turns))))))))
+
+(ert-deftest opencode-shell-audit-authoritative-restores-chronological-order ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (let ((early '((info . ((id . "u1") (role . "user"))) (parts . nil)))
+            (latest '((info . ((id . "u2") (role . "user"))) (parts . nil))))
+        (opencode-shell--render-messages (list latest) 1 t t)
+        (opencode-shell--render-messages (list early latest) 2 t t)
+        (should (equal (mapcar #'opencode-shell--turn-id opencode-shell--turns) '("u1" "u2")))
+        (should-not (eq (opencode-shell--turn-status (car (last opencode-shell--turns))) 'complete))))))
+
+(ert-deftest opencode-shell-audit-mode-change-unsubscribes-runtime ()
+  (let ((opencode-shell-async--runtimes (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (opencode-shell-mode)
+      (setq opencode-shell--runtime-key 'fixture)
+      (let ((subscribers (make-hash-table :test #'eq)))
+        (puthash (current-buffer) #'ignore subscribers)
+        (puthash 'fixture (list :subscribers subscribers) opencode-shell-async--runtimes))
+      (text-mode)
+      (should-not (opencode-shell-async-runtime-get 'fixture)))))
+
+(ert-deftest opencode-shell-audit-removed-orphan-stays-removed ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (cl-letf (((symbol-function 'opencode-shell--update-message-lifecycle-state) #'ignore)
+              ((symbol-function 'opencode-shell--schedule-render) #'ignore))
+      (opencode-shell--normalize-turns '(((info . ((id . "u") (role . "user"))))))
+      (setq opencode-shell--turns (opencode-shell--normalize-turns '(((info . ((id . "u") (role . "user")))))))
+      (opencode-shell--apply-message-event '(:kind part-updated :message-id "a" :part-id "p"
+        :part ((id . "p") (messageID . "a") (type . "text") (text . "removed"))))
+      (opencode-shell--apply-message-event '(:kind part-removed :message-id "a" :part-id "p"))
+      (opencode-shell--apply-message-event '(:kind message-updated :message-id "a"
+        :info ((id . "a") (parentID . "u") (role . "assistant"))))
+      (should-not (opencode-shell--get (gethash "a" opencode-shell--message-envelopes) 'parts)))))
+
+(ert-deftest opencode-shell-audit-browser-reopen-rejects-old-callback ()
+  (with-temp-buffer
+    (let ((browser (current-buffer)) callbacks
+          (profile opencode-shell-test--local-profile))
+      (cl-letf (((symbol-function 'opencode-shell--sessions-buffer) (lambda (&rest _) browser))
+                ((symbol-function 'opencode-shell--remember-session-location) #'ignore)
+                ((symbol-function 'pop-to-buffer) #'ignore)
+                ((symbol-function 'opencode-shell--request)
+                 (lambda (_method _path callback &rest _) (push callback callbacks))))
+        (opencode-shell--sessions "/fixture/" profile)
+        (let ((old (car callbacks)))
+          (opencode-shell--sessions "/fixture/" profile)
+          (let ((count (length callbacks)))
+            (funcall old '((stale . t)))
+            (should (= count (length callbacks)))
+            (should-not opencode-shell--session-status)))))))
+
+(ert-deftest opencode-shell-audit-browser-long-id-retains-row ()
+  (with-temp-buffer
+    (opencode-shell-sessions-mode)
+    (setq opencode-shell--profile opencode-shell-test--local-profile
+          opencode-shell--directory "/fixture/")
+    (let ((sessions '(((id . "fixture-first-long-id") (directory . "/fixture/"))
+                      ((id . "fixture-second-long-id") (directory . "/fixture/")))))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+        (opencode-shell--apply-session-browser-snapshot sessions nil opencode-shell--generation)
+        (goto-char (point-min)) (forward-line 1)
+        (let ((id (tabulated-list-get-id)))
+          (should id)
+          (opencode-shell--apply-session-browser-snapshot sessions id opencode-shell--generation)
+          (should (equal id (tabulated-list-get-id))))))))
+
+(ert-deftest opencode-shell-audit-location-search-honors-explicit-profile ()
+  (let* ((opencode-shell-profiles (list opencode-shell-test--local-profile opencode-shell-test--remote-profile))
+         (opencode-shell--recent-session-locations
+          (list (cons (opencode-shell--profile-key opencode-shell-test--local-profile) "/fixture/")))
+         (browser (generate-new-buffer " *foreign-fixture*")) entries)
+    (unwind-protect
+        (progn
+          (with-current-buffer browser
+            (opencode-shell-sessions-mode)
+            (setq opencode-shell--profile opencode-shell-test--remote-profile
+                  opencode-shell--directory "/foreign/"))
+          (cl-letf (((symbol-function 'opencode-shell--request)
+                     (lambda (_method _path callback &rest _) (funcall callback nil)))
+                    ((symbol-function 'opencode-shell--read-session-location)
+                     (lambda (items) (setq entries items) nil)))
+            (opencode-shell-find-session-with-server opencode-shell-test--local-profile))
+          (should entries)
+          (should (seq-every-p (lambda (entry)
+                                (equal (opencode-shell--profile-key (car entry))
+                                       (opencode-shell--profile-key opencode-shell-test--local-profile))) entries)))
+      (kill-buffer browser))))
+
+(ert-deftest opencode-shell-audit-identical-authoritative-snapshot-is-stable ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((messages '(((info . ((id . "u") (role . "user"))) (parts . nil))
+                      ((info . ((id . "a") (role . "assistant") (parentID . "u") (finish . "stop")))
+                       (parts . (((id . "p") (type . "text") (text . "fixture"))))))))
+      (opencode-shell--render-messages messages 1 nil t)
+      (setq opencode-shell--animation-frame 4)
+      (let ((tick (buffer-chars-modified-tick)))
+        (opencode-shell--render-messages messages 2 nil t)
+        (should (= opencode-shell--animation-frame 4))
+        (should (= tick (buffer-chars-modified-tick)))))))
+
+(ert-deftest opencode-shell-audit-authoritative-keeps-unacknowledged-local-turn ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((local (opencode-shell--make-turn :id "local" :user "draft" :status 'sending)))
+      (setq opencode-shell--turns (list local))
+      (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore))
+        (opencode-shell--render-messages
+         '(((info . ((id . "server") (role . "user"))) (parts . nil))) 1 t t))
+      (should (eq (car (last opencode-shell--turns)) local))
+      (should (equal (opencode-shell--turn-user local) "draft")))))
+
+(ert-deftest opencode-shell-audit-authoritative-clears-confirmed-user-text ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (cl-letf (((symbol-function 'opencode-shell--start-polling) #'ignore))
+      (opencode-shell--render-messages
+       '(((info . ((id . "u") (role . "user")))
+          (parts . (((id . "p") (type . "text") (text . "removed-prompt")))))) 1 nil t)
+      (opencode-shell--render-messages '(((info . ((id . "u") (role . "user"))) (parts . nil))) 2 nil t)
+      (should (equal (opencode-shell--turn-user (car opencode-shell--turns)) ""))
+      (should-not (string-match-p "removed-prompt" (buffer-string))))))
+
+(ert-deftest opencode-shell-audit-authoritative-reorder-updates-rendered-history ()
+  (with-temp-buffer
+    (opencode-shell-mode)
+    (let ((first '(((info . ((id . "u1") (role . "user")))
+                    (parts . (((type . "text") (text . "first-fixture")))))
+                   ((info . ((id . "a1") (role . "assistant") (parentID . "u1") (finish . "stop")))
+                    (parts . (((type . "text") (text . "answer-one")))))))
+          (second '(((info . ((id . "u2") (role . "user")))
+                     (parts . (((type . "text") (text . "second-fixture")))))
+                    ((info . ((id . "a2") (role . "assistant") (parentID . "u2") (finish . "stop")))
+                     (parts . (((type . "text") (text . "answer-two"))))))))
+      (opencode-shell--render-messages (append first second) 1 nil t)
+      (opencode-shell--render-messages (append second first) 2 nil t)
+      (should (< (string-match "second-fixture" (buffer-string))
+                 (string-match "first-fixture" (buffer-string)))))))
+
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here
