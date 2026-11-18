@@ -1195,12 +1195,12 @@ history strictly before the chosen prompt."
                     (and (not (string-empty-p text)) text)))))
             parts))
 
-;;;###autoload
 (defconst opencode-shell--rename-session-timeout 120
   "Seconds to wait for the title agent's reply in `opencode-shell-rename-session'.
 Longer than `opencode-shell--url-retrieve-timeout' because this request
 blocks on an LLM completion rather than an ordinary API round trip.")
 
+;;;###autoload
 (defun opencode-shell-rename-session ()
   "Ask OpenCode's native title agent to retitle this session from its context.
 Sends a throwaway message to the hidden `title' agent, drops that exchange

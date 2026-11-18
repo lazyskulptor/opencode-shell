@@ -1,6 +1,13 @@
 EMACS ?= emacs
+.DEFAULT_GOAL := test
 
-.PHONY: test compile compiled-test clean verify
+.PHONY: test compile compiled-test clean verify checkdoc package-lint
+
+checkdoc:
+	$(EMACS) -Q --batch -l checkdoc --eval '(let ((checkdoc-autofix-flag nil)) (dolist (file (directory-files default-directory t "^opencode-shell.*[.]el$$")) (with-temp-buffer (insert-file-contents file) (setq buffer-file-name file) (emacs-lisp-mode) (checkdoc-batch))))'
+
+package-lint:
+	$(EMACS) -Q --batch -l package --eval '(setq package-user-dir (or (getenv "MELPA_LINT_DIR") (error "MELPA_LINT_DIR required")))' -f package-initialize -l package-lint -f package-lint-batch-and-exit opencode-shell.el
 
 test:
 	$(EMACS) -Q --batch -L . -L test -L test/fixtures -l test/opencode-shell-recovery-test.el -l test/opencode-shell-transport-test.el -l test/opencode-shell-sse-test.el -l test/opencode-shell-event-test.el -l test/opencode-shell-state-test.el -l test/opencode-shell-interaction-test.el -l test/opencode-shell-response-test.el -l test/opencode-shell-pipeline-test.el -l test/opencode-shell-test.el -f ert-run-tests-batch-and-exit

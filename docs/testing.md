@@ -40,6 +40,15 @@ Run all source tests with `make test`. Run the required final verification with
 then runs the compiled suite. If source edits appear ignored, run `make clean`:
 an older `.elc` can still win when `load-prefer-newer` is nil.
 
+For packaging, run `make checkdoc` across the production modules. Install
+`package-lint` into a disposable Emacs package directory and run
+`MELPA_LINT_DIR=/path/to/that/directory make package-lint`. The lint target does
+not install packages or use the user's package directory. Test compatibility
+with `make verify EMACS=/path/to/emacs28` as well as on the current Emacs;
+run acceptance separately with each executable. Keep generated `.elc` files out
+of commits. Existing lint style suggestions about hooks and byte handling are
+separate from the packaging checks and do not justify changing runtime behavior.
+
 ## Deterministic async tests
 
 - Capture success and failure callbacks instead of sleeping or using real I/O.
