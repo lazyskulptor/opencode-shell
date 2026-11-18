@@ -23,6 +23,18 @@
 
 (require 'cl-lib)
 (require 'map)
+(require 'transient)
+
+(declare-function opencode-shell--refresh "opencode-shell" ())
+(declare-function opencode-shell--open-at-point "opencode-shell")
+(declare-function opencode-shell--create-session "opencode-shell")
+(declare-function opencode-shell--filter "opencode-shell")
+(declare-function opencode-shell--toggle-child-sessions "opencode-shell")
+(declare-function opencode-shell--delete-session "opencode-shell")
+(declare-function opencode-shell--render-session-browser-if-visible "opencode-shell" ())
+(declare-function opencode-shell-async-cancel "opencode-shell-async" (&optional buffer))
+(defvar opencode-shell--recent-session-locations)
+(defvar opencode-shell--session-directory-overrides)
 
 (defun opencode-shell-sessions--get (object key)
   "Get KEY from JSON OBJECT regardless of symbol/string representation."
@@ -104,13 +116,10 @@ Each retained session keeps its server-reported directory unchanged."
 (defun opencode-shell-sessions-help ()
   "Display the session browser transient menu."
   (interactive)
-  (require 'transient)
   (transient-setup 'opencode-shell-sessions-menu))
 
-(declare-function transient-setup "transient")
 (defvar opencode-shell-sessions-menu nil)
 
-(require 'transient)
 (transient-define-prefix opencode-shell-sessions-menu ()
     "OpenCode session actions."
     [["Session"

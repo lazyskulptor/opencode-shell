@@ -80,7 +80,10 @@ and lifecycle keys."
   "Maximum seconds a read-only snapshot may hold an in-flight guard.")
 
 (defvar projectile-mode)
-(declare-function projectile-project-root "projectile")
+(declare-function projectile-project-root "ext:projectile")
+(declare-function vertico--exhibit "ext:vertico" ())
+(defvar opencode-shell--directory)
+(defvar opencode-shell--session-id)
 
 (defun opencode-shell--default-profile ()
   "Return the backwards-compatible implicit profile."
@@ -491,7 +494,6 @@ Move the associated API log buffer so its name stays in sync."
   "Base name for API request log buffers."
   :type 'string :group 'opencode-shell)
 
-(defvar opencode-shell--session-id)
 (defvar opencode-shell--profile)
 
 (defun opencode-shell--log-buffer-name ()
@@ -1936,8 +1938,7 @@ missed are still recovered automatically without a manual resync."
   "Open exact session ID scoped to DIRECTORY and PROFILE.
 When CURRENT-WINDOW is non-nil, display it in the selected window."
   (interactive "sSession ID: ")
-  (let* ((explicit-profile (or profile opencode-shell--profile))
-          (profile (or (opencode-shell--resolve-profile profile)
+  (let* ((profile (or (opencode-shell--resolve-profile profile)
                        profile opencode-shell--profile
                        (opencode-shell--default-profile)))
           (resolved-directory
@@ -4825,8 +4826,8 @@ When FULL is non-nil, also refresh metadata and capabilities."
 (defun opencode-shell--evil-open-below (count)
   "Reuse an empty composer from `Prompt>`; otherwise open below COUNT times."
   (interactive "p")
-  (declare-function evil-insert-state "evil-states")
-  (declare-function evil-open-below "evil-commands")
+  (declare-function evil-insert-state "ext:evil-states")
+  (declare-function evil-open-below "ext:evil-commands")
   (cond
    ((not (opencode-shell--evil-edit-allowed-p t)) nil)
    ((and (string-empty-p (opencode-shell--composer-text))
@@ -4840,7 +4841,7 @@ When FULL is non-nil, also refresh metadata and capabilities."
 (defun opencode-shell--evil-backspace ()
   "Delete backward in the Composer without crossing its empty boundary."
   (interactive)
-  (declare-function evil-delete-backward-char-and-join "evil-commands")
+  (declare-function evil-delete-backward-char-and-join "ext:evil-commands")
   (unless (and (opencode-shell--in-composer-p)
                (string-empty-p (opencode-shell--composer-text))
                (= (point) opencode-shell--composer-start))
@@ -4883,8 +4884,8 @@ When PROMPT-LINE-P is non-nil, also allow the empty Composer's `Prompt>` line."
 
 (defun opencode-shell--setup-evil ()
   "Install Evil integration when Evil is available."
-  (declare-function evil-set-initial-state "evil-core")
-  (declare-function evil-define-key* "evil-core")
+  (declare-function evil-set-initial-state "ext:evil-core")
+  (declare-function evil-define-key* "ext:evil-core")
   (evil-set-initial-state 'opencode-shell-mode 'normal)
   (evil-set-initial-state 'opencode-shell-sessions-mode 'normal)
   (evil-define-key* 'normal opencode-shell-sessions-mode-map (kbd "g") nil)

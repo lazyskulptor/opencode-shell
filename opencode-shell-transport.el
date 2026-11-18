@@ -20,6 +20,7 @@
 (require 'json)
 (require 'opencode-shell-async)
 (require 'opencode-shell-recovery)
+(declare-function opencode-shell--resync "opencode-shell" (&optional full resource manual))
 
 ;; Defined in opencode-shell.el, which always `require's this file before
 ;; defining them.  By the time any callback below actually runs, loading is
