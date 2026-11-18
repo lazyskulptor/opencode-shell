@@ -4610,22 +4610,102 @@ under [mouse-1]."
     (should (facep 'opencode-shell-active-session-face))
     (should (facep 'opencode-shell-recent-session-face))))
 
-(ert-deftest opencode-shell-switch-buffer-shows-title-and-buffer-name ()
-  (let ((shell (generate-new-buffer "*Opencode project shell*")) prompt selected)
+(defun opencode-shell-test--switch-status-prefix (buffer)
+  "Return BUFFER's leading status prefix by invoking the real affixation fn."
+  (let (result)
+    (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list buffer)))
+              ((symbol-function 'switch-to-buffer) #'ignore))
+      (let ((captured nil))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _)
+                     (setq captured (plist-get completion-extra-properties
+                                               :affixation-function))
+                     (buffer-name buffer))))
+          (opencode-shell-switch-buffer))
+        (setq result (car (funcall captured (list (buffer-name buffer)))))))
+    result))
+
+(ert-deftest opencode-shell-switch-buffer-shows-buffer-name-only ()
+  (let ((shell (generate-new-buffer "*oc-sh➜ Generated title — project*")) selected captor)
     (unwind-protect
         (progn
           (with-current-buffer shell
             (opencode-shell-mode)
             (setq opencode-shell--session-title "Generated title"))
-          (cl-letf (((symbol-function 'completing-read)
-                     (lambda (_ candidates &rest _)
-                       (setq prompt (caar candidates))
-                       prompt))
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list shell)))
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt candidates &rest _)
+                       (setq captor (plist-get completion-extra-properties
+                                               :affixation-function))
+                       (caar candidates)))
                     ((symbol-function 'switch-to-buffer)
-                      (lambda (buffer &rest _) (setq selected buffer))))
+                     (lambda (buffer &rest _) (setq selected buffer))))
             (opencode-shell-switch-buffer))
-          (should (string-match-p "Generated title.*Opencode project shell" prompt))
-          (should (eq selected shell)))
+          (should (eq selected shell))
+          (let ((affixed (car (funcall captor (list (buffer-name shell))))))
+            (should (equal (nth 0 affixed) (buffer-name shell)))
+            (should (equal (nth 2 affixed) ""))
+            (should (= (string-width (nth 1 affixed)) 14))))
+      (kill-buffer shell))))
+
+(ert-deftest opencode-shell-switch-buffer-leading-status-fixed-width ()
+  (dolist (case '((permission "!" 12) (question "?" 10) (busy "⠋" 6) (idle "○" 6)))
+    (let ((shell (generate-new-buffer (format "*oc-sw-%s*" (car case)))))
+      (unwind-protect
+          (progn
+            (with-current-buffer shell
+              (opencode-shell-mode)
+              (pcase (car case)
+                ('permission (setq opencode-shell--permissions '(((id . "p")))))
+                ('question (setq opencode-shell--questions-pending '(((id . "q")))))
+                ('busy (setq opencode-shell--turns
+                             (list (opencode-shell--make-turn :id "t" :status 'receiving))))
+                ('idle nil)))
+            (let* ((affixed (opencode-shell-test--switch-status-prefix shell))
+                   (prefix (nth 1 affixed)))
+              (should (equal (nth 0 affixed) (buffer-name shell)))
+              (should (equal (nth 2 affixed) ""))
+              (should (= (string-width prefix) 14))
+              (should (string-prefix-p (nth 1 case) prefix))))
+        (kill-buffer shell)))))
+
+(ert-deftest opencode-shell-switch-buffer-status-priority ()
+  (let ((shell (generate-new-buffer "*oc-sw-priority*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--permissions '(((id . "p")))
+                  opencode-shell--questions-pending '(((id . "q")))
+                  opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'receiving)))
+            (should (eq (opencode-shell--buffer-list-status shell) 'permission))
+            (setq opencode-shell--permissions nil)
+            (should (eq (opencode-shell--buffer-list-status shell) 'question))
+            (setq opencode-shell--questions-pending nil)
+            (should (eq (opencode-shell--buffer-list-status shell) 'busy))
+            (setq opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'complete)))
+            (should (eq (opencode-shell--buffer-list-status shell) 'idle)))
+        (kill-buffer shell)))))
+
+(ert-deftest opencode-shell-switch-buffer-ignores-non-transcripts-and-empty ()
+  (let ((plain (generate-new-buffer "*plain*"))
+        (shell (generate-new-buffer "*oc-sw-filter*"))
+        seen)
+    (unwind-protect
+        (progn
+          (with-current-buffer shell (opencode-shell-mode))
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list plain shell)))
+                    ((symbol-function 'completing-read)
+                     (lambda (_p candidates &rest _) (setq seen (mapcar #'car candidates))
+                            (caar candidates)))
+                    ((symbol-function 'switch-to-buffer) #'ignore))
+            (opencode-shell-switch-buffer))
+          (should (equal seen (list (buffer-name shell))))
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list plain))))
+            (should-error (opencode-shell-switch-buffer) :type 'user-error)))
+      (kill-buffer plain)
       (kill-buffer shell))))
 
 (ert-deftest opencode-shell-sessions-installs-buffer-local-evil-bindings ()
@@ -6995,6 +7075,248 @@ move a newly submitted prompt or composer point onto the previous line."
       (opencode-shell--render-messages (append second first) 2 nil t)
       (should (< (string-match "second-fixture" (buffer-string))
                  (string-match "first-fixture" (buffer-string)))))))
+
+(ert-deftest opencode-shell-switch-buffer-animates-busy-without-disturbing-selection ()
+  (let* ((shell (generate-new-buffer "*oc-sw-anim*"))
+         (mini (generate-new-buffer " *sw-mini*"))
+         (window (selected-window))
+         (previous (window-buffer window))
+         tick (exhibits 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'receiving))))
+          (set-window-buffer window mini)
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list shell)))
+                    ((symbol-function 'opencode-shell--switch-buffer-vertico-p)
+                     (lambda () t))
+                    ((symbol-function 'active-minibuffer-window) (lambda () window))
+                    ((symbol-function 'vertico--exhibit) (lambda () (cl-incf exhibits)))
+                    ((symbol-function 'opencode-shell-async-subscribe-animation)
+                     (lambda (buffer _interval callback)
+                       (should (eq buffer mini)) (setq tick callback)))
+                    ((symbol-function 'opencode-shell-async-unsubscribe-animation) #'ignore)
+                    ((symbol-function 'opencode-shell-async-cancel) #'ignore)
+                    ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                    ((symbol-function 'switch-to-buffer) #'ignore)
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (run-hooks 'minibuffer-setup-hook)
+                       (should tick)
+                       (funcall tick)
+                       (funcall tick)
+                       (should (> opencode-shell--switch-buffer-frame-index 0))
+                       (opencode-shell-async-drain mini)
+                       (buffer-name shell))))
+            (opencode-shell-switch-buffer))
+          (should (= exhibits 1))
+          (should-not opencode-shell--switch-buffer-session))
+      (set-window-buffer window previous)
+      (kill-buffer shell)
+      (kill-buffer mini))))
+
+(ert-deftest opencode-shell-switch-buffer-closed-menu-ignores-stale-tick ()
+  (let* ((shell (generate-new-buffer "*oc-sw-stale*"))
+         (mini (generate-new-buffer " *sw-mini2*"))
+         (window (selected-window))
+         (previous (window-buffer window))
+         tick (exhibits 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer shell (opencode-shell-mode))
+          (set-window-buffer window mini)
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list shell)))
+                    ((symbol-function 'opencode-shell--switch-buffer-vertico-p)
+                     (lambda () t))
+                    ((symbol-function 'active-minibuffer-window) (lambda () window))
+                    ((symbol-function 'vertico--exhibit) (lambda () (cl-incf exhibits)))
+                    ((symbol-function 'opencode-shell-async-subscribe-animation)
+                     (lambda (_b _i callback) (setq tick callback)))
+                    ((symbol-function 'opencode-shell-async-unsubscribe-animation) #'ignore)
+                    ((symbol-function 'opencode-shell-async-cancel) #'ignore)
+                    ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                    ((symbol-function 'switch-to-buffer) #'ignore)
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (run-hooks 'minibuffer-setup-hook)
+                       (buffer-name shell))))
+            (opencode-shell-switch-buffer))
+          ;; The menu is closed; a late animation callback must be inert.
+          (when tick (funcall tick))
+          (opencode-shell-async-drain mini)
+          (should (zerop exhibits)))
+      (set-window-buffer window previous)
+      (kill-buffer shell)
+      (kill-buffer mini))))
+
+
+(ert-deftest opencode-shell-switch-buffer-static-without-vertico ()
+  (let* ((shell (generate-new-buffer "*oc-sw-static*"))
+         (mini (generate-new-buffer " *sw-mini3*"))
+         (window (selected-window))
+         (previous (window-buffer window))
+         subscribed exhibits captor)
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'receiving))))
+          (set-window-buffer window mini)
+          (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list shell)))
+                    ((symbol-function 'opencode-shell--switch-buffer-vertico-p)
+                     (lambda () nil))
+                    ((symbol-function 'vertico--exhibit) (lambda () (cl-incf exhibits 0)))
+                    ((symbol-function 'opencode-shell-async-subscribe-animation)
+                     (lambda (&rest _) (setq subscribed t)))
+                    ((symbol-function 'opencode-shell-async-unsubscribe-animation) #'ignore)
+                    ((symbol-function 'opencode-shell-async-cancel) #'ignore)
+                    ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil))
+                    ((symbol-function 'switch-to-buffer) #'ignore)
+                    ((symbol-function 'completing-read)
+                     (lambda (_p candidates &rest _)
+                       (setq captor (plist-get completion-extra-properties
+                                               :affixation-function))
+                       (run-hooks 'minibuffer-setup-hook)
+                       (caar candidates))))
+            (opencode-shell-switch-buffer))
+          (should-not subscribed)
+          (let ((affixed (car (funcall captor (list (buffer-name shell))))))
+            (should (= (string-width (nth 1 affixed)) 14))))
+      (set-window-buffer window previous)
+      (kill-buffer shell)
+      (kill-buffer mini))))
+
+(ert-deftest opencode-shell-switch-buffer-recursive-prompt-is-inert ()
+  (let* ((shell (generate-new-buffer "*oc-sw-recursive*"))
+         (mini (generate-new-buffer " *sw-mini4*"))
+         (nested (generate-new-buffer " *sw-nested*"))
+         (window (selected-window))
+         (previous (window-buffer window))
+         (exhibits 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'receiving))))
+          (set-window-buffer window mini)
+          (let ((session (list :window window :buffer mini
+                               :candidates (list (cons (buffer-name shell) shell))
+                               :animate t)))
+            (let ((opencode-shell--switch-buffer-session session))
+              (cl-letf (((symbol-function 'active-minibuffer-window)
+                         (lambda () window))
+                        ((symbol-function 'opencode-shell--switch-buffer-vertico-p)
+                         (lambda () t))
+                        ((symbol-function 'vertico--exhibit)
+                         (lambda () (cl-incf exhibits)))
+                        ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil)))
+                (opencode-shell--switch-buffer-tick session)
+                (opencode-shell-async-drain mini)
+                (should (= exhibits 1))
+                ;; A nested prompt reuses the same window for another buffer.
+                (set-window-buffer window nested)
+                (opencode-shell--switch-buffer-tick session)
+                (opencode-shell-async-drain mini)
+                (should (= exhibits 1))))))
+      (set-window-buffer window previous)
+      (kill-buffer shell)
+      (kill-buffer mini)
+      (kill-buffer nested))))
+
+(ert-deftest opencode-shell-switch-buffer-transitions-repaint-once-then-settle ()
+  (let* ((shell (generate-new-buffer "*oc-sw-transition*"))
+         (mini (generate-new-buffer " *sw-mini5*"))
+         (window (selected-window))
+         (previous (window-buffer window))
+         (exhibits 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (opencode-shell-mode)
+            (setq opencode-shell--turns
+                  (list (opencode-shell--make-turn :id "t" :status 'receiving))))
+          (set-window-buffer window mini)
+          (let* ((candidates (list (cons (buffer-name shell) shell)))
+                 (session (list :window window :buffer mini
+                                :candidates candidates
+                                :statuses (opencode-shell--switch-buffer-statuses candidates)
+                                :animate t))
+                 (opencode-shell--switch-buffer-session session)
+                 (affix (opencode-shell--switch-buffer-affixation candidates)))
+            (cl-letf (((symbol-function 'active-minibuffer-window)
+                       (lambda () window))
+                      ((symbol-function 'opencode-shell--switch-buffer-vertico-p)
+                       (lambda () t))
+                      ((symbol-function 'vertico--exhibit)
+                       (lambda () (cl-incf exhibits)))
+                      ((symbol-function 'run-with-idle-timer) (lambda (&rest _) nil)))
+              ;; Busy candidate rotates and repaints.
+              (opencode-shell--switch-buffer-tick session)
+              (opencode-shell-async-drain mini)
+              (should (= exhibits 1))
+              ;; Transition busy -> idle repaints once so the final state is shown.
+              (with-current-buffer shell
+                (setq opencode-shell--turns
+                      (list (opencode-shell--make-turn :id "t" :status 'complete))))
+              (opencode-shell--switch-buffer-tick session)
+              (opencode-shell-async-drain mini)
+              (should (= exhibits 2))
+              (should (string-prefix-p "○ idle"
+                                       (nth 1 (car (funcall affix (list (buffer-name shell)))))))
+              ;; Settled idle list stays inert on subsequent ticks.
+              (opencode-shell--switch-buffer-tick session)
+              (opencode-shell-async-drain mini)
+              (should (= exhibits 2))
+              ;; Transition idle -> permission repaints once.
+              (with-current-buffer shell
+                (setq opencode-shell--permissions '(((id . "p")))))
+              (opencode-shell--switch-buffer-tick session)
+              (opencode-shell-async-drain mini)
+              (should (= exhibits 3))
+              (should (string-prefix-p "! permission"
+                                       (nth 1 (car (funcall affix (list (buffer-name shell))))))))))
+      (set-window-buffer window previous)
+      (kill-buffer shell)
+      (kill-buffer mini))))
+
+(ert-deftest opencode-shell-switch-buffer-distinguishes-same-title-and-rejects-closed ()
+  (let ((first (generate-new-buffer "*oc-sh➜ Same title — one*"))
+        (second (generate-new-buffer "*oc-sh➜ Same title — two*"))
+        selected preserved-category)
+    (unwind-protect
+        (progn
+          (dolist (buf (list first second))
+            (with-current-buffer buf
+              (opencode-shell-mode)
+              (setq opencode-shell--session-title "Same title")))
+          (let ((completion-extra-properties '(:category buffer)))
+            (cl-letf (((symbol-function 'buffer-list)
+                       (lambda (&rest _) (list first second)))
+                      ((symbol-function 'completing-read)
+                       (lambda (_p candidates &rest _)
+                         (setq preserved-category
+                               (plist-get completion-extra-properties :category))
+                         (car (nth 1 candidates))))
+                      ((symbol-function 'switch-to-buffer)
+                       (lambda (buffer &rest _) (setq selected buffer))))
+              (opencode-shell-switch-buffer)))
+          (should (eq preserved-category 'buffer))
+          (should (eq selected second))
+          ;; If the chosen buffer is killed while the menu is open, signal user-error.
+          (cl-letf (((symbol-function 'buffer-list)
+                     (lambda (&rest _) (list first second)))
+                    ((symbol-function 'completing-read)
+                     (lambda (_p candidates &rest _)
+                       (let ((name (caar candidates)))
+                         (kill-buffer first)
+                         name))))
+            (should-error (opencode-shell-switch-buffer) :type 'user-error)))
+      (when (buffer-live-p first) (kill-buffer first))
+      (when (buffer-live-p second) (kill-buffer second)))))
 
 (provide 'opencode-shell-test)
 ;;; opencode-shell-test.el ends here

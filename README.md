@@ -97,6 +97,12 @@ inside ordinary Emacs buffers—with first-class **Evil** and vanilla keybinding
 | `C-c o f` | `opencode-shell-find-session` | Open a session browser from saved project locations (`C-k` removes a saved entry) |
 | `M-x` | `opencode-shell-find-session-with-server` | Browse saved + live server-discovered project directories (`F` in Transient menu) |
 
+> The switch list shows each buffer by name with a fixed-width leading status
+> column: `! permission`, `? question`, `⠋ busy` (spinning while the menu stays
+> open) and `○ idle`, in that priority order. Status reflects each open buffer's
+> observed work; a busy spinner only animates inside an active Vertico menu.
+> `idle` means no observed work — it does not imply the server is reachable.
+
 > Each configured profile alias also generates `<alias>` convenience commands such as
 > `M-x opencode-shell-local-sessions` and `M-x opencode-shell-local-start`.
 

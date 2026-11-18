@@ -4945,27 +4945,188 @@ When CURRENT-WINDOW is non-nil, display it in the selected window."
   (opencode-shell--start-session
    (opencode-shell--profile-for-command profile)))
 
+(defconst opencode-shell--switch-buffer-status-width 12
+  "Display columns reserved for the leading status cell.")
+
+(defconst opencode-shell--switch-buffer-status-gap 2
+  "Display columns between the status cell and the buffer name.")
+
+(defconst opencode-shell--switch-buffer-busy-frames
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Single-cell spinner frames for a busy transcript.")
+
+(defvar opencode-shell--switch-buffer-frame-index 0
+  "Frame index used by the status cell; advanced only while the menu is open.")
+
+(defvar opencode-shell--switch-buffer-session nil
+  "Active switch-buffer menu token, or nil; stale ticks ignore themselves.")
+
+(defun opencode-shell--switch-buffer-frame (kind)
+  "Return the one-cell glyph for status KIND at the current frame."
+  (pcase kind
+    ('busy (aref opencode-shell--switch-buffer-busy-frames
+                 (mod opencode-shell--switch-buffer-frame-index
+                      (length opencode-shell--switch-buffer-busy-frames))))
+    ('permission "!")
+    ('question "?")
+    (_ "○")))
+
+(defun opencode-shell--buffer-list-status (buffer)
+  "Return BUFFER's observed work status: permission, question, busy or idle.
+Reads existing buffer-local lifecycle state; issues no requests."
+  (with-current-buffer buffer
+    (cond
+     ((or opencode-shell--permissions
+          (opencode-shell-interaction-active-p
+           opencode-shell--interaction-state 'permission))
+      'permission)
+     ((or opencode-shell--questions-pending
+          (opencode-shell-interaction-active-p
+           opencode-shell--interaction-state 'question))
+      'question)
+     ((opencode-shell-state-polling-needed-p
+       (mapcar #'opencode-shell--turn-status opencode-shell--turns)
+       opencode-shell--submit-in-flight
+       (not (opencode-shell--initial-hydration-complete-p)))
+      'busy)
+     (t 'idle))))
+
+(defun opencode-shell--switch-buffer-status-prefix (kind)
+  "Return a fixed-width leading status cell for KIND, then a gap.
+The status cell is `opencode-shell--switch-buffer-status-width' display
+columns and the whole prefix is that width plus the gap, so buffer names
+start in the same column regardless of the rotating glyph."
+  (let* ((label (pcase kind
+                  ('permission "permission")
+                  ('question "question")
+                  ('busy "busy")
+                  (_ "idle")))
+         (text (format "%s %s" (opencode-shell--switch-buffer-frame kind) label))
+         (pad (max 0 (- opencode-shell--switch-buffer-status-width
+                        (string-width text))))
+         (face (pcase kind
+                 ('permission 'error)
+                 ('question 'warning)
+                 ('busy 'opencode-shell-waiting-face)
+                 (_ 'shadow))))
+    (concat (propertize (concat text (make-string pad ?\s)) 'face face)
+            (make-string opencode-shell--switch-buffer-status-gap ?\s))))
+
+(defun opencode-shell--switch-buffer-affixation (candidates)
+  "Return an `:affixation-function' mapping names to CANDIDATES."
+  (let ((blank (make-string (+ opencode-shell--switch-buffer-status-width
+                               opencode-shell--switch-buffer-status-gap)
+                            ?\s)))
+    (lambda (names)
+      (mapcar
+       (lambda (name)
+         (let ((buffer (cdr (assoc name candidates))))
+           (list name
+                 (if (buffer-live-p buffer)
+                     (opencode-shell--switch-buffer-status-prefix
+                      (opencode-shell--buffer-list-status buffer))
+                   blank)
+                 "")))
+       names))))
+
+(defun opencode-shell--switch-buffer-vertico-p ()
+  "Return non-nil when Vertico is the active completion UI in this session."
+  (and (bound-and-true-p vertico-mode) (fboundp 'vertico--exhibit)))
+
+(defun opencode-shell--switch-buffer-active-p (session)
+  "Return non-nil when SESSION still owns the currently active minibuffer."
+  (and (eq session opencode-shell--switch-buffer-session)
+       (let ((window (active-minibuffer-window)))
+         (and (eq window (plist-get session :window))
+              (buffer-live-p (plist-get session :buffer))
+              (eq (window-buffer window) (plist-get session :buffer))))))
+
+(defun opencode-shell--switch-buffer-statuses (candidates)
+  "Return the current observed status list for CANDIDATES."
+  (mapcar (lambda (candidate)
+            (let ((buffer (cdr candidate)))
+              (and (buffer-live-p buffer)
+                   (opencode-shell--buffer-list-status buffer))))
+          candidates))
+
+(defun opencode-shell--switch-buffer-tick (session)
+  "Advance the menu spinner for SESSION and request one idle redraw.
+Repaints when any candidate is busy or when observed candidate statuses
+changed since the last displayed snapshot; fully settled lists stay inert."
+  (when (and (opencode-shell--switch-buffer-active-p session)
+             (opencode-shell--switch-buffer-vertico-p))
+    (let* ((candidates (plist-get session :candidates))
+           (statuses (opencode-shell--switch-buffer-statuses candidates))
+           (busy (memq 'busy statuses))
+           (changed (not (equal statuses (plist-get session :statuses)))))
+      (when (or busy changed)
+        (when busy
+          (setq opencode-shell--switch-buffer-frame-index
+                (1+ opencode-shell--switch-buffer-frame-index)))
+        (opencode-shell-async-enqueue
+         (plist-get session :buffer) 'switch-buffer-frame nil
+         (lambda ()
+           (when (and (opencode-shell--switch-buffer-active-p session)
+                      (opencode-shell--switch-buffer-vertico-p))
+             (setf (plist-get session :statuses)
+                   (opencode-shell--switch-buffer-statuses candidates))
+             (vertico--exhibit))))))))
+
 ;;;###autoload
 (defun opencode-shell-switch-buffer ()
-  "Select and display a live OpenCode transcript buffer."
+  "Select and display a live OpenCode transcript buffer.
+Candidates are shown by buffer name with a fixed-width status column, and a
+busy spinner animates while the Vertico menu stays open."
   (interactive)
   (let* ((buffers (seq-filter
                    (lambda (buffer)
                       (with-current-buffer buffer
                         (derived-mode-p 'opencode-shell-mode)))
                    (buffer-list)))
-         (candidates
-          (mapcar (lambda (buffer)
-                    (cons (with-current-buffer buffer
-                            (format "%s  —  %s"
-                                    (or opencode-shell--session-title "Untitled")
-                                    (buffer-name buffer)))
-                          buffer))
-                  buffers)))
+         (candidates (mapcar (lambda (buffer) (cons (buffer-name buffer) buffer))
+                             buffers)))
     (unless candidates (user-error "No OpenCode buffers"))
-    (switch-to-buffer
-     (cdr (assoc (completing-read "OpenCode shell: " candidates nil t)
-                 candidates)))))
+    (let* ((opencode-shell--switch-buffer-frame-index 0)
+           (session (list :window nil :buffer nil :candidates nil
+                          :statuses nil :animate nil))
+           (opencode-shell--switch-buffer-session session)
+           setup)
+      (setq setup
+            (lambda ()
+              (when-let ((window (active-minibuffer-window)))
+                (unless (plist-get session :buffer)
+                  (let ((buffer (window-buffer window)))
+                    (setf (plist-get session :window) window
+                          (plist-get session :buffer) buffer
+                          (plist-get session :candidates) candidates
+                          (plist-get session :statuses)
+                          (opencode-shell--switch-buffer-statuses candidates)
+                          (plist-get session :animate)
+                          (opencode-shell--switch-buffer-vertico-p))
+                    (when (plist-get session :animate)
+                      (opencode-shell-async-subscribe-animation
+                       buffer opencode-shell-animation-interval
+                       (lambda () (opencode-shell--switch-buffer-tick session)))))))))
+      (unwind-protect
+          (progn
+            (add-hook 'minibuffer-setup-hook setup)
+            (let* ((completion-extra-properties
+                    (plist-put (copy-sequence completion-extra-properties)
+                               :affixation-function
+                               (opencode-shell--switch-buffer-affixation candidates)))
+                   (selected
+                    (cdr (assoc (completing-read "OpenCode shell: " candidates nil t)
+                                candidates))))
+              (unless (buffer-live-p selected)
+                (user-error "Selected OpenCode buffer was closed"))
+              (switch-to-buffer selected)))
+        (setq opencode-shell--switch-buffer-session nil)
+        (remove-hook 'minibuffer-setup-hook setup)
+        (when-let ((buffer (plist-get session :buffer)))
+          (opencode-shell-async-unsubscribe-animation buffer)
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (opencode-shell-async-cancel))))))))
 
 (defun opencode-shell--session-browser-candidate (profile directory active)
   "Return a styled PROFILE and DIRECTORY completion candidate.
