@@ -38,6 +38,9 @@
 (defvar-local opencode-shell-async--queue nil
   "Latest queued callback for each key in the current buffer.")
 
+(defvar-local opencode-shell-async--cancel-epoch 0
+  "Cancellation epoch invalidating even a detached, currently draining batch.")
+
 (defvar-local opencode-shell-async--idle-timer nil
   "Idle timer draining `opencode-shell-async--queue'.")
 
@@ -190,8 +193,10 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (when (eq attempt (plist-get runtime :attempt))
       (setf (plist-get runtime :backoff) 1
-            (plist-get runtime :failures) 0
-            (plist-get runtime :ticks) 0)
+            (plist-get runtime :failures) 0)
+      ;; Stream activity proves transport liveness, not delivery completeness.
+      ;; Resetting :ticks here lets heartbeats or other sessions starve the
+      ;; integrity poll indefinitely, so message recovery never gets a chance.
       (let ((application-event (opencode-shell-event-decode event)))
         (opencode-shell-async--runtime-log
          runtime "transport=sse wake=event type=%s scope=%s"
@@ -236,7 +241,8 @@ Transport retains resource cleanup; the runtime only owns cancellation scope."
   "Open KEY's independent SSE transport."
   (when-let ((runtime (gethash key opencode-shell-async--runtimes)))
     (setf (plist-get runtime :reconnect-timer) nil)
-    (when (and (plist-get runtime :sse-enabled)
+    (when (and (not (plist-get runtime :paused))
+               (plist-get runtime :sse-enabled)
                (not (plist-get runtime :sse-disabled))
                (not (memq (and (plist-get runtime :connection)
                                (opencode-shell-sse-connection-state
@@ -331,33 +337,38 @@ for SESSION-ID to EVENT-CALLBACK when it is non-nil."
   "Run the current latest-value queue for BUFFER."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (timerp opencode-shell-async--idle-timer)
-        (cancel-timer opencode-shell-async--idle-timer))
-      (setq opencode-shell-async--idle-timer nil)
-      (let ((queue (prog1 (nreverse opencode-shell-async--queue)
-                     (setq opencode-shell-async--queue nil))))
-        (dolist (entry queue)
-          (let ((generation (nth 1 entry))
-                (function (nth 2 entry))
-                (arguments (nthcdr 3 entry)))
+      (let ((epoch opencode-shell-async--cancel-epoch))
+        (when (timerp opencode-shell-async--idle-timer)
+          (cancel-timer opencode-shell-async--idle-timer))
+        (setq opencode-shell-async--idle-timer nil)
+        (let ((queue (prog1 (nreverse opencode-shell-async--queue)
+                       (setq opencode-shell-async--queue nil))))
+          (dolist (entry queue)
+            (let ((generation (nth 1 entry))
+                  (function (nth 2 entry))
+                  (arguments (nthcdr 3 entry)))
+              (when (and (buffer-live-p buffer)
+                         (= epoch opencode-shell-async--cancel-epoch)
+                         (or (null generation)
+                             (and (boundp 'opencode-shell--generation)
+                                  (= generation opencode-shell--generation))))
+                (apply function arguments)))))
+        (when-let ((render (and (buffer-live-p buffer)
+                               (= epoch opencode-shell-async--cancel-epoch)
+                               (assoc 'render opencode-shell-async--queue))))
+          (setq opencode-shell-async--queue
+                (assoc-delete-all 'render opencode-shell-async--queue))
+          (unless opencode-shell-async--queue
+            (when (timerp opencode-shell-async--idle-timer)
+              (cancel-timer opencode-shell-async--idle-timer))
+            (setq opencode-shell-async--idle-timer nil))
+          (let ((generation (nth 1 render))
+                (function (nth 2 render))
+                (arguments (nthcdr 3 render)))
             (when (or (null generation)
                       (and (boundp 'opencode-shell--generation)
                            (= generation opencode-shell--generation)))
-              (apply function arguments)))))
-      (when-let ((render (assoc 'render opencode-shell-async--queue)))
-        (setq opencode-shell-async--queue
-              (assoc-delete-all 'render opencode-shell-async--queue))
-        (unless opencode-shell-async--queue
-          (when (timerp opencode-shell-async--idle-timer)
-            (cancel-timer opencode-shell-async--idle-timer))
-          (setq opencode-shell-async--idle-timer nil))
-        (let ((generation (nth 1 render))
-              (function (nth 2 render))
-              (arguments (nthcdr 3 render)))
-          (when (or (null generation)
-                    (and (boundp 'opencode-shell--generation)
-                         (= generation opencode-shell--generation)))
-            (apply function arguments)))))))
+              (apply function arguments))))))))
 
 (defun opencode-shell-async-enqueue (buffer key generation function &rest arguments)
   "Enqueue FUNCTION with ARGUMENTS for BUFFER under KEY.
@@ -377,6 +388,7 @@ Only the latest pending value for KEY and GENERATION is retained."
 (defun opencode-shell-async-cancel (&optional buffer)
   "Cancel queued work and owned requests for BUFFER or the current buffer."
   (with-current-buffer (or buffer (current-buffer))
+    (cl-incf opencode-shell-async--cancel-epoch)
     (opencode-shell-async-cancel-requests)
     (when (timerp opencode-shell-async--idle-timer)
       (cancel-timer opencode-shell-async--idle-timer))
