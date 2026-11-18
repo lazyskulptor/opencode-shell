@@ -120,15 +120,15 @@ state application.  Unknown or malformed values become snapshot hints."
                        (opencode-shell-event--get properties 'part) 'sessionID)
                       (and (string-prefix-p "session." type)
                            (opencode-shell-event--get info 'id))))
-                 (busy (and (equal type "session.status")
-                            (equal (opencode-shell-event--get
-                                    (opencode-shell-event--get properties 'status)
-                                    'type)
-                                   "busy"))))
+                 (status (and (equal type "session.status")
+                              (opencode-shell-event--get
+                               (opencode-shell-event--get properties 'status) 'type)))
+                 (busy (equal status "busy")))
             (let ((snapshot
                    (opencode-shell-event--snapshot
                     type 'unsupported (and (stringp session-id) session-id)
                     (and busy 'none))))
+              (when (stringp status) (setq snapshot (plist-put snapshot :status status)))
               (if (and (equal type "session.updated") (listp info))
                   (plist-put snapshot :info info)
                 snapshot))))))
