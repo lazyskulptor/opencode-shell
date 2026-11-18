@@ -19,7 +19,7 @@
 
 (cl-defstruct (opencode-shell-sse-parser
                (:constructor opencode-shell-sse--make-parser))
-  phase input transfer chunk-state chunk-size sse-input sse-started
+  phase input transfer chunk-state chunk-size sse-input sse-started sse-skip-lf
   max-header-bytes max-chunk-bytes max-frame-bytes)
 
 (cl-defun opencode-shell-sse-parser-create
@@ -211,13 +211,22 @@ Return nil on success or a protocol error plist."
 
 (defun opencode-shell-sse--consume-frames (parser bytes)
   "Append BYTES to PARSER's SSE input and return (EVENTS ERROR)."
+  ;; Normalize each line ending atomically. A CR at a feed boundary already
+  ;; ended its line; swallow its optional LF on the next nonempty feed.
+  (unless (string-empty-p bytes)
+    (let ((skip (opencode-shell-sse-parser-sse-skip-lf parser)))
+      (setf (opencode-shell-sse-parser-sse-skip-lf parser)
+            (string-suffix-p "\r" bytes))
+      (when (and skip (string-prefix-p "\n" bytes))
+        (setq bytes (substring bytes 1)))
+      (setq bytes (replace-regexp-in-string "\r\n\\|\r" "\n" bytes t t))))
   (let ((input (concat (opencode-shell-sse-parser-sse-input parser) bytes))
         (start 0)
         events error delimiter)
     (while (and (not error)
                 (setq delimiter
                       (string-match
-                       "\\(?:\r\n\\|\r\\|\n\\)\\(?:\r\n\\|\r\\|\n\\)"
+                       "\n\n"
                        input start)))
       (let ((frame (substring input start delimiter))
             (next-start (match-end 0)))

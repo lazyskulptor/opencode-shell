@@ -4,6 +4,21 @@
 (require 'cl-lib)
 (require 'opencode-shell-sse)
 
+(ert-deftest opencode-shell-sse-audit-multiline-all-line-endings ()
+  (dolist (ending '("\n" "\r" "\r\n"))
+    (let ((wire (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+                        "event: update" ending "id: fixture" ending
+                        "data: one" ending "data: two" ending ending)))
+      (dotimes (split (1+ (length wire)))
+        (let* ((result (opencode-shell-sse-test--feed
+                        (list (substring wire 0 split) (substring wire split))))
+               (events (plist-get result :events)))
+          (should-not (plist-get result :error))
+          (should (= (length events) 1))
+          (should (equal (plist-get (car events) :data) "one\ntwo"))
+          (should (equal (plist-get (car events) :event) "update"))
+          (should (equal (plist-get (car events) :id) "fixture")))))))
+
 (defun opencode-shell-sse-test--feed (parts &rest limits)
   "Feed PARTS through a parser configured with LIMITS."
   (let ((parser (apply #'opencode-shell-sse-parser-create limits)) events error)
